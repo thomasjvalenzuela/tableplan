@@ -940,7 +940,17 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
         if not data.startswith("data:image/"):
             data = "data:image/jpeg;base64," + data.split(",", 1)[-1]
         content.append({"type": "image_url", "image_url": {"url": data, "detail": "high"}})
-    out = openai_chat([{"role": "user", "content": content}], "recipe", AI_RECIPE_SCHEMA, feature, detail)
+    try:
+        out = openai_chat([{"role": "user", "content": content}], "recipe", AI_RECIPE_SCHEMA, feature, detail)
+    except AIUnreadable:
+        content[0] = {"type": "text", "text": (
+            "Extract the single recipe from the material below and reply in EXACTLY this plain-text format, nothing else:\n"
+            "TITLE: <name>\nDESCRIPTION: <one sentence or blank>\nSERVINGS: <number or 0>\nPREP: <minutes or 0>\n"
+            "COOK: <minutes or 0>\nTOTAL: <minutes or 0>\nTAGS: <comma separated>\nINGREDIENTS:\n<one ingredient per line, amount first; "
+            "a line starting with # is a section heading>\nSTEPS:\n<one step per line>\n"
+            "Copy amounts exactly and never invent content. If there is no recipe, reply only: NO RECIPE")
+            + (f"\n\n{text[:30000]}" if text else "")}
+        out = parse_recipe_text(openai_text([{"role": "user", "content": content}], feature + " (text)", detail))
     if not out.get("found") or not (out.get("ingredients") or out.get("steps")):
         raise ApiError(422, "No recipe found there. Try a clearer screenshot that shows the ingredients and steps.")
     ings = [{"referenceId": str(uuid.uuid4()), "title": (x.get("section") or None), "note": x["line"], "display": x["line"],
@@ -2652,27 +2662,82 @@ def openai_chat(messages, schema_name, schema, feature, detail=""):
     key, model = cfg("openai_key"), cfg("openai_model") or "gpt-5-mini"
     if not key:
         raise ApiError(400, "Add your OpenAI key in Settings → AI recipe import to use AI step-by-step.")
-    payload = {"model": model, "messages": messages, "max_completion_tokens": 16000,
+    payload = {"model": model, "messages": messages, "max_completion_tokens": 8000,
                "response_format": {"type": "json_schema", "json_schema": {"name": schema_name, "strict": True, "schema": schema}}}
     if re.match(r"^(gpt-5|o[134])", model):
-        payload["reasoning_effort"] = "low"   # leaves room for the answer and is much faster
-    for attempt in (1, 2):
-        res = _https_json("https://api.openai.com/v1/chat/completions", payload=payload,
-                          headers={"Authorization": f"Bearer {key}"}, timeout=180)
-        u = res.get("usage") or {}
-        log_ai(feature, res.get("model") or model, u.get("prompt_tokens"), u.get("completion_tokens"), detail)
-        choice = (res.get("choices") or [{}])[0]
-        msg = choice.get("message") or {}
-        if msg.get("refusal"):
-            raise ApiError(422, "The AI declined to read that. Try a different screenshot.")
-        try:
-            return json.loads(msg.get("content") or "{}")
-        except ValueError:
-            log(f"AI reply unreadable (finish_reason={choice.get('finish_reason')}, attempt {attempt})")
-            payload["max_completion_tokens"] = 32000
-            if "reasoning_effort" in payload:
-                payload["reasoning_effort"] = "minimal"
-    raise ApiError(502, "The AI's answer was cut off twice. Try fewer or smaller screenshots, or try again in a minute.")
+        payload["reasoning_effort"] = "low"
+    content, finish = _openai_call(key, payload, feature, detail, model)
+    try:
+        return json.loads(content or "{}")
+    except ValueError:
+        log(f"AI JSON unreadable (finish_reason={finish}, {len(content or '')} chars): {(content or '')[:200]!r}")
+        raise AIUnreadable(finish)
+
+
+class AIUnreadable(ApiError):
+    def __init__(self, finish=None):
+        super().__init__(502, f"The AI's answer couldn't be read ({finish or 'unknown'}). Please try again.")
+
+
+def _openai_call(key, payload, feature, detail, model):
+    res = _https_json("https://api.openai.com/v1/chat/completions", payload=payload,
+                      headers={"Authorization": f"Bearer {key}"}, timeout=180)
+    u = res.get("usage") or {}
+    log_ai(feature, res.get("model") or model, u.get("prompt_tokens"), u.get("completion_tokens"), detail)
+    choice = (res.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    if msg.get("refusal"):
+        raise ApiError(422, "The AI declined to read that. Try a different screenshot.")
+    return msg.get("content") or "", choice.get("finish_reason")
+
+
+def openai_text(messages, feature, detail=""):
+    key, model = cfg("openai_key"), cfg("openai_model") or "gpt-5-mini"
+    payload = {"model": model, "messages": messages, "max_completion_tokens": 8000}
+    if re.match(r"^(gpt-5|o[134])", model):
+        payload["reasoning_effort"] = "minimal" if model.startswith("gpt-5") else "low"
+    content, finish = _openai_call(key, payload, feature, detail, model)
+    log(f"AI text reply: finish_reason={finish}, {len(content)} chars")
+    return content
+
+
+def parse_recipe_text(t):
+    """Parse the plain-text recipe format requested by ai_recipe's fallback."""
+    out = {"found": True, "name": "", "description": "", "servings": 0, "prep_minutes": 0, "cook_minutes": 0,
+           "total_minutes": 0, "ingredients": [], "steps": [], "tags": []}
+    mode, section = None, ""
+    for raw in (t or "").splitlines():
+        line = raw.strip().strip("*").strip()
+        if not line:
+            continue
+        m = re.match(r"^(TITLE|DESCRIPTION|SERVINGS|PREP|COOK|TOTAL|TAGS|INGREDIENTS|STEPS|NO RECIPE)\s*:?\s*(.*)$", line, re.I)
+        if m:
+            k, v = m.group(1).upper(), m.group(2).strip()
+            if k == "NO RECIPE":
+                out["found"] = False
+            elif k in ("INGREDIENTS", "STEPS"):
+                mode = k
+            elif k == "TITLE":
+                out["name"] = v
+            elif k == "DESCRIPTION":
+                out["description"] = v
+            elif k == "TAGS":
+                out["tags"] = [x.strip() for x in v.split(",") if x.strip()]
+            else:
+                n = re.search(r"\d+(?:\.\d+)?", v)
+                key = {"SERVINGS": "servings", "PREP": "prep_minutes", "COOK": "cook_minutes", "TOTAL": "total_minutes"}[k]
+                if n:
+                    out[key] = float(n.group()) if k == "SERVINGS" else int(float(n.group()))
+            continue
+        if mode == "INGREDIENTS":
+            if line.startswith("#"):
+                section = line.lstrip("# ").strip()
+                continue
+            out["ingredients"].append({"section": section, "line": re.sub(r"^[-•*]\s*", "", line)})
+            section = ""
+        elif mode == "STEPS":
+            out["steps"].append(re.sub(r"^(step\s*)?\d+[.):]\s*", "", line, flags=re.I))
+    return out
 
 
 def guided_ai(rec):
