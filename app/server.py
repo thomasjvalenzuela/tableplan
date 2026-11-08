@@ -3154,7 +3154,8 @@ _update_cache = {"at": 0, "data": None}
 
 
 def update_info(force=False):
-    if force or time.time() - _update_cache["at"] > 6 * 3600:
+    ttl = 3600 if _update_cache["data"] else 600   # hourly; retry sooner after a failed check
+    if force or time.time() - _update_cache["at"] > ttl:
         data = None
         try:
             req = urllib.request.Request(UPDATE_FEED, headers={"User-Agent": f"TablePlan/{APP_VERSION}"})
@@ -3182,8 +3183,28 @@ def update_info(force=False):
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
+def notify_update():
+    """Send a one-time phone/email notice when a newer TablePlan is published."""
+    u = update_info()
+    if not u["update_available"] or get_internal("update_notified") == u["latest"] or not any(channels_ready().values()):
+        return
+    notes = (u.get("notes") or "").strip()
+    text = f"TablePlan {u['latest']} is available (you have {u['version']}).\n{notes[:300]}\n\nTo update: {u['how']}"
+    try:
+        deliver({"subject": f"⬆️ TablePlan {u['latest']} is available", "text": text,
+                 "html": email_wrap(f"<h2>TablePlan {html.escape(u['latest'])} is available</h2><p>{html.escape(notes[:300])}</p>"
+                                    f"<p><b>To update:</b> {html.escape(u['how'])}</p>"), "files": []})
+        set_internal("update_notified", u["latest"])
+    except ApiError as e:
+        log("update notice not sent:", e.message)
+
+
 def scheduler():
     while True:
+        try:
+            notify_update()
+        except Exception as e:
+            log("update check failed:", e)
         try:
             s = get_settings()
             day = (s.get("auto_plan_day") or "").lower()[:3]

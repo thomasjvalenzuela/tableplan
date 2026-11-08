@@ -135,7 +135,7 @@ function renderTabs() {
   const v = state.cfg?.version || "";
   $("#tabs").innerHTML = `<div class="nav-brand"><img src="/static/icon-180.png" alt="">TablePlan</div>` +
     TABS.map(([id, label, icon]) => `<button class="tab ${state.tab === id ? "on" : ""}" data-tab="${id}">${ic(icon)}<span>${label}</span></button>`).join("") +
-    `<div style="flex:1" class="desktop-only"></div><button class="tab desktop-only" id="nav-settings">${ic("gear")}<span>Settings</span></button>
+    `<div style="flex:1" class="desktop-only"></div><button class="tab desktop-only ${upd() ? "dot" : ""}" id="nav-settings">${ic("gear")}<span>Settings</span></button>
      <div class="nav-foot"><span>Version ${esc(v)}</span><a href="${state.cfg?.repo_url || REPO}" target="_blank" rel="noopener" aria-label="TablePlan on GitHub" title="TablePlan on GitHub">${ic("github")}</a></div>`;
   $$("#tabs .tab[data-tab]").forEach((b) => (b.onclick = () => go(b.dataset.tab)));
   $("#nav-settings").onclick = () => openSettings();
@@ -157,8 +157,29 @@ function route() {
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
-const topbar = (extra = "") => `<div class="topbar">${extra}<button class="round-btn" id="btn-settings" aria-label="Settings">${ic("gear")}</button></div>`;
-function bindTopbar() { $("#btn-settings") && ($("#btn-settings").onclick = openSettings); }
+const upd = () => !!state.update?.update_available;
+const topbar = (extra = "") => `${updateBar()}<div class="topbar">${extra}<button class="round-btn ${upd() ? "dot" : ""}" id="btn-settings" aria-label="Settings">${ic("gear")}</button></div>`;
+function updateBar() {
+  if (!upd()) return "";
+  let snooze = null; try { snooze = JSON.parse(localStorage.getItem("tp.updSnooze") || "null"); } catch (_) {}
+  if (snooze && snooze.v === state.update.latest && Date.now() < snooze.until) return "";
+  return `<div class="update-bar" id="upd-bar"><span>${ic("refresh")}<b>TablePlan ${esc(state.update.latest)} is available</b></span><span><button id="upd-how">How to update</button><button id="upd-later" aria-label="Later">${ic("x")}</button></span></div>`;
+}
+function bindUpdateBar() {
+  $("#upd-how") && ($("#upd-how").onclick = () => openUpdateHelp());
+  $("#upd-later") && ($("#upd-later").onclick = () => { try { localStorage.setItem("tp.updSnooze", JSON.stringify({ v: state.update.latest, until: Date.now() + 864e5 })); } catch (_) {} $("#upd-bar")?.remove(); });
+}
+async function checkUpdate() {
+  try {
+    const was = upd(), u = await api("GET", "/api/version");
+    state.update = u;
+    if (u.update_available && !was) {
+      if (!$("#upd-bar") && $(".topbar")) { $(".topbar").insertAdjacentHTML("beforebegin", updateBar()); bindUpdateBar(); }
+      $("#btn-settings")?.classList.add("dot"); renderTabs();
+    }
+  } catch (_) {}
+}
+function bindTopbar() { $("#btn-settings") && ($("#btn-settings").onclick = openSettings); bindUpdateBar(); }
 const loading = () => `<div class="spinner"></div>`;
 
 // ------------------------------------------------------------------ HOME
@@ -185,7 +206,6 @@ async function renderHome() {
   let html = `<div class="chips fade-in">${chips.map(([a, b, i, c, t]) =>
     `<button class="chip" data-go="${t}"><span class="dot ${c}">${ic(i)}</span><span>${esc(a)}<small>${esc(b)}</small></span></button>`).join("")}</div>`;
   if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie" style="width:100%;text-align:left">${esc(s.error)}</button>`;
-  if (state.update?.update_available) html += `<button class="update-banner" id="home-up">${ic("refresh")}<span><b>TablePlan ${esc(state.update.latest)} is available</b><small>Open the ZimaOS App Store and tap Update on TablePlan.</small></span></button>`;
   html += zoomNudge();
   if (s.pantry_checkin?.due) html += `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Time for a pantry check-in</b><small>${s.pantry_checkin.last ? `Last checked ${esc(s.pantry_checkin.days_since)} days ago.` : "Takes a minute."} Confirm what's still in the fridge and pantry so plans and lists stay accurate.</small></span><span class="chev">${ic("chevR")}</span></button>`;
 
@@ -1033,11 +1053,12 @@ function openUpdateHelp() {
   if (!sess.setup_complete) return runWizard(() => location.reload());
   try { state.cfg = await api("GET", "/api/config"); }
   catch (e) { app.innerHTML = `<h1 class="title">TablePlan</h1><div class="banner">${esc(e.message)}</div>`; return; }
-  api("GET", "/api/version").then((u) => { state.update = u; if (u.update_available && state.tab === "home") renderHome(); }).catch(() => {});
+  checkUpdate(); setInterval(checkUpdate, 3600e3);
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ai: a }; }).catch(() => {});
   route();
   window.addEventListener("popstate", route);
   window.addEventListener("hashchange", route);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("#layer").firstChild && !$("#cook") && TABS.some((t) => t[0] === location.hash.slice(1))) refresh(); });
   setTimeout(maybeWhatsNew, 600);
 })();
