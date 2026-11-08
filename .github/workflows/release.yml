@@ -86,7 +86,8 @@ jobs:
           s = re.sub(r"image: ghcr\.io/[^/\s]+/tableplan:\S+", f"image: {img}:{v}", s)
           s = re.sub(r'version: "[^"]*"', f'version: "{v}"', s, count=1)
           s = re.sub(r'update_at: "[^"]*"', f'update_at: "{os.environ["DATE"]}"', s, count=1)
-          notes = os.environ["NOTES"].replace('"', "'")
+          import json
+          notes = json.dumps(os.environ["NOTES"])          # quoted → safe even with ':' or '#'
           s = re.sub(r"(release_notes:\n\s+en_US: ).*", lambda m: m.group(1) + notes, s, count=1)
           s = s.replace("thomasjvalenzuela/tableplan", f"{owner}/{repo}")
           s = s.replace("io.github.thomasjvalenzuela.tableplan", f"io.github.{owner}.{repo}")
