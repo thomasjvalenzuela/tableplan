@@ -3519,7 +3519,16 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/plan/reroll":
             return self.send(200, reroll(self.body()))
         if m == "POST" and path == "/api/plan/save":
-            n = save_plan(self.body().get("entries") or [])
+            b = self.body()
+            entries = b.get("entries") or []
+            if b.get("replace"):   # "Only fill empty days" off: new picks replace what's in those slots
+                slots = {(e.get("date"), e.get("entry_type") or "dinner") for e in entries}
+                dates = sorted(d for d, _ in slots if d)
+                if dates:
+                    for e in get_plans(parse_date(dates[0]), parse_date(dates[-1])):
+                        if (e["date"], e["entry_type"]) in slots:
+                            mealie("DELETE", f"/api/households/mealplans/{e['id']}")
+            n = save_plan(entries)
             return self.send(200, {"created": n})
         mm = re.fullmatch(r"/api/plan/(\d+)", path)
         if m == "DELETE" and mm:

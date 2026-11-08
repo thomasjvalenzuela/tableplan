@@ -442,7 +442,7 @@ async function runGenerate(g) {
     $("#p-save").onclick = async (ev) => {
       ev.target.disabled = true;
       try {
-        const r = await api("POST", "/api/plan/save", { entries: props.map((p) => ({ date: p.date, entry_type: p.entry_type, recipe_id: p.recipe.id })) });
+        const r = await api("POST", "/api/plan/save", { replace: !g.fill_empty_only, entries: props.map((p) => ({ date: p.date, entry_type: p.entry_type, recipe_id: p.recipe.id })) });
         closeSheet(); toast(`Added ${r.created} meals to your plan`); refresh();
       } catch (e) { ev.target.disabled = false; fail(e); }
     };
