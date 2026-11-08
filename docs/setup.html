@@ -92,11 +92,14 @@ h2.done .n{background:var(--tip)}
 <h1>🍳 Install TablePlan</h1>
 <p>TablePlan is a self-hosted household kitchen app. It handles recipes from links and screenshots, auto-generated meal plans, a pantry that tracks real use-by dates, and grocery lists you can email or print. It runs on your own server, and <a href="https://github.com/mealie-recipes/mealie">Mealie</a> is bundled as the recipe engine.</p>
 
+<div class="alert important"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>You never have to touch Mealie</div><p>You don't need a Mealie account, and you never need to open or sign in to the Mealie app. The setup wizard creates and secures the Mealie account for you. Mealie runs behind the scenes as TablePlan's database and import engine, and viewing, editing, writing and deleting recipes, and making shopping lists, all happen in TablePlan. On ZimaOS you can ignore the Mealie app tile.</p></div>
+
 <div class="progress" aria-hidden="true"><i id="bar"></i></div>
 <div class="ptxt" id="ptxt">Tick each step as you finish it. Your progress is saved in this browser.</div>
 
 <div class="toc"><b>Contents</b>
 <ol>
+<li><a href="#new">New in v0.3</a></li>
 <li><a href="#need">What you need</a></li>
 <li><a href="#s1">Install</a></li>
 <li><a href="#s2">Run the setup wizard</a></li>
@@ -107,6 +110,20 @@ h2.done .n{background:var(--tip)}
 <li><a href="#trouble">Troubleshooting</a></li>
 <li><a href="#faq">FAQ</a></li>
 </ol></div>
+
+<h2 id="new">New in v0.3</h2>
+<ul>
+<li><b>Recipes tab</b> with search and favorites.</li>
+<li><b>Edit recipes in TablePlan</b>, or create one from scratch with <b>Type it</b>. Plain-text ingredients scale automatically too.</li>
+<li><b>Two recipe styles:</b> <i>Classic</i> or <i>Step-by-step</i>, tuned to your stove (gas, electric or induction) and oven (conventional or convection).</li>
+<li><b>Cook mode</b> with built-in timers.</li>
+<li><b>Import progress</b> with a time estimate.</li>
+<li><b>Pantry barcode scanning</b> (via Open Food Facts) and a weekly pantry check-in reminder.</li>
+<li><b>Confirm what you have</b> before a shopping list is built.</li>
+<li><b>AI spending tracker</b> with budget alerts. Add an optional OpenAI <i>admin</i> key to see exact costs.</li>
+<li><b>Ingredient and recipe photos.</b> Tap <b>Try another</b> or upload your own.</li>
+<li><b>What's new</b> popup after updates, <b>light/dark mode</b>, and a desktop sidebar showing your version and a GitHub link.</li>
+</ul>
 
 <h2 id="need">What you need</h2>
 <div class="cards">
@@ -172,7 +189,7 @@ docker compose up -d</code></pre></div>
 <table>
 <tr><th>Screen</th><th>What it does</th><th>What you need</th></tr>
 <tr><td><b>Household</b></td><td>Sets how many people you cook for. Planned meals and shopping lists scale to that number.</td><td>A name and a number</td></tr>
-<tr><td><b>Recipe library</b></td><td>Creates your Mealie login and replaces Mealie's default <code>changeme@example.com</code> account. TablePlan then creates its own access token, so you never copy keys by hand.</td><td>Your name, email, and a password with at least 8 characters</td></tr>
+<tr><td><b>Recipe library</b></td><td>Creates the Mealie account for you (don't make one beforehand) and replaces Mealie's default <code>changeme@example.com</code> account. TablePlan then creates its own access token, so you never copy keys by hand or sign in to Mealie.</td><td>Your name, email, and a password with at least 8 characters</td></tr>
 <tr><td><b>Import from screenshots</b></td><td>Connects AI so photos, screenshots and TikTok/YouTube links become recipes. The key is tested before it's saved.</td><td>An OpenAI key from <a href="https://platform.openai.com/api-keys">platform.openai.com/api-keys</a>, with a little prepaid credit</td></tr>
 <tr><td><b>Email</b></td><td>Sends a test message, then lets you email shopping lists, meal plans and pantry reports.</td><td>Gmail/Google Workspace: an <a href="https://myaccount.google.com/apppasswords">App Password</a>. Outlook, iCloud, Yahoo and any SMTP server also work.</td></tr>
 <tr><td><b>Lock it</b></td><td>Adds an optional household password.</td><td>Recommended if anyone outside your home can reach the server</td></tr>
@@ -183,7 +200,7 @@ docker compose up -d</code></pre></div>
 <tr><th>iPhone / iPad (Safari)</th><th>Android (Chrome)</th></tr>
 <tr><td>Open <code>http://YOUR-SERVER-IP:9930</code> → <b>Share</b> → <b>Add to Home Screen</b></td><td>Open it → <b>⋮</b> → <b>Add to Home screen</b></td></tr>
 </table>
-<p>It opens full-screen with its own icon, like a native app.</p>
+<p>It opens full-screen with its own icon, like a native app. Everything from here on happens in TablePlan, so there's no need to open Mealie.</p>
 
 <h2 id="updates">Updating</h2>
 <p>TablePlan checks for new versions and shows a blue <b>Update available</b> banner on Home and in Settings.</p>
@@ -195,6 +212,7 @@ docker compose up -d</code></pre></div>
 <tr><td>Portainer</td><td>Stacks → tableplan → <b>Update the stack</b> with <i>Re-pull image</i> checked</td></tr>
 </table>
 <p>Your data is kept across updates.</p>
+<p><b>What about Mealie?</b> Mealie doesn't update itself. Each TablePlan release includes a tested Mealie version, so pressing <b>Update</b> on TablePlan keeps Mealie current too.</p>
 
 <h2 id="backup">Backup &amp; uninstall</h2>
 <p>Everything lives in two folders: <code>data/</code> for TablePlan (pantry, settings and shelf-life rules) and <code>mealie/</code> for recipes, photos, plans and lists. Back up both.</p>
@@ -202,7 +220,6 @@ docker compose up -d</code></pre></div>
 sudo tableplan uninstall   <span class="c"># removes containers, keeps your data</span></code></pre></div>
 <div class="code"><span class="lbl">compose users</span><pre><code>docker compose stop &amp;&amp; tar czf tableplan-backup.tgz data mealie &amp;&amp; docker compose start
 docker compose down        <span class="c"># uninstall; delete the folder to remove data too</span></code></pre></div>
-<p>Mealie also has built-in backups under Settings → Backups.</p>
 
 <h2 id="remote">HTTPS &amp; using it away from home</h2>
 <p>Chrome labels every <code>http://</code> address as <b>Not secure</b>, including apps on your own Wi-Fi. TablePlan works fine at home without HTTPS. Adding it gives you a padlock and encrypted traffic.</p>
@@ -226,7 +243,8 @@ sudo docker exec tailscale tailscale serve --bg --https=8443 9925</code></pre></
 <li>Get Let's Encrypt certificates with the <b>DNS challenge</b>, so no ports need to be opened on your router.</li>
 <li>Set the Mealie address in Settings → Recipe library.</li>
 </ol>
-<p>Never port-forward 9930 or 9925 straight to the internet. If TablePlan is reachable from outside your home, set a household password.</p>
+<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Live barcode scanning needs HTTPS</div><p>Browsers only allow camera access on secure addresses. On plain <code>http://</code>, the pantry scanner falls back to taking a photo of the barcode or typing the number.</p></div>
+<p>Never port-forward 9930 or 9925 straight to the internet. If TablePlan is reachable from outside your home, set <code>TABLEPLAN_PUBLIC=1</code> on the TablePlan container. Sign-in is then always required, and until you set a household password, you need the one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs, or <code>docker logs tableplan</code>).</p>
 
 <h2 id="trouble">Troubleshooting</h2>
 <table>
@@ -235,6 +253,8 @@ sudo docker exec tailscale tailscale serve --bg --https=8443 9925</code></pre></
 <tr><td>Wizard: "Can't reach Mealie yet"</td><td>Mealie is still starting, which takes about a minute the first time. Tap <b>Check again</b>.</td></tr>
 <tr><td>Wizard: "This Mealie already has an account"</td><td>Your Mealie was set up before. Choose <b>Sign in</b> and use that login.</td></tr>
 <tr><td>OpenAI test failed</td><td>The key is wrong, or the account has no credit. Check billing at platform.openai.com.</td></tr>
+<tr><td>Screenshot import: "Unable to read any content from the provided source"</td><td>The OpenAI key isn't set, or an older version left Mealie's image reader unset. Update to v0.3, which repairs this automatically, or re-enter your OpenAI key in <b>Settings → AI recipe import</b>.</td></tr>
+<tr><td>Live barcode scanning won't open the camera</td><td>The camera needs HTTPS (see <a href="#remote">HTTPS</a>). Take a photo of the barcode or type the number instead.</td></tr>
 <tr><td>Email test failed</td><td>Gmail and Yahoo need an <b>App Password</b> (2-Step Verification must be on), not your normal password.</td></tr>
 <tr><td>Use-by dates are off by a day</td><td>Set <code>TZ</code> to your time zone, for example <code>America/New_York</code>, and recreate the container.</td></tr>
 <tr><td>"Open recipe" links go to the wrong address</td><td>Set <code>MEALIE_PUBLIC_URL</code>, for example <code>https://recipes.example.com</code>.</td></tr>
@@ -248,11 +268,20 @@ No, with two exceptions you turn on yourself: screenshot imports go to OpenAI, a
 <p><b>Where do the use-by dates come from?</b><br>
 From the USDA FoodKeeper database, always using the low end of its ranges to stay safe. When you open or freeze something, it switches to the matching "after opening" or "freezer" time. A date you type from the package always wins. You can edit any rule in Settings.</p>
 <p><b>Can I use my existing Mealie?</b><br>
-Yes. Use <code>docker-compose.existing-mealie.yml</code> and sign in during the wizard. Your recipes, plans and lists stay in Mealie.</p>
+Yes. Use <code>docker-compose.existing-mealie.yml</code> and sign in during the wizard. Your recipes, plans and lists are stored in Mealie, and you manage them from TablePlan.</p>
 <p><b>What does it cost?</b><br>
 TablePlan and Mealie are free and open source. AI imports use your own OpenAI account, at a few cents per recipe.</p>
 <p><b>License</b><br>
-TablePlan is <a href="https://github.com/thomasjvalenzuela/tableplan/blob/main/LICENSE">AGPL-3.0</a>. Mealie is AGPL-3.0. USDA FoodKeeper data is public domain.</p>
+TablePlan is <a href="https://github.com/thomasjvalenzuela/tableplan/blob/main/LICENSE">AGPL-3.0</a>.</p>
+<p><b>Credits</b></p>
+<ul>
+<li><a href="https://github.com/mealie-recipes/mealie">Mealie</a> (AGPL-3.0): recipe engine</li>
+<li><a href="https://catalog.data.gov/dataset/fsis-foodkeeper-data">USDA FoodKeeper</a> (public domain): shelf-life data</li>
+<li><a href="https://world.openfoodfacts.org">Open Food Facts</a> (ODbL): barcode product data</li>
+<li><a href="https://github.com/Sec-ant/zxing-wasm">zxing-wasm</a> (MIT): barcode decoding</li>
+<li><a href="https://www.themealdb.com">TheMealDB</a>: ingredient images</li>
+<li><a href="https://openverse.org">Openverse</a>: openly licensed photos</li>
+</ul>
 
 </article>
 </div>

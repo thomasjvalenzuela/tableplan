@@ -4,7 +4,9 @@
 // Small helpers (app.js defines the full set; these are safe duplicates for the wizard, which can run first).
 const _esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 async function _api(method, path, body) {
-  const res = await fetch(path, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
+  const headers = { "X-TablePlan": "1" };
+  if (body) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
   let data = null;
   try { data = await res.json(); } catch (_) {}
   if (!res.ok) { const e = new Error((data && data.error) || `Request failed (${res.status})`); e.status = res.status; throw e; }
@@ -12,13 +14,14 @@ async function _api(method, path, body) {
 }
 
 // ------------------------------------------------------------------ sign-in screen
-function renderLogin(onDone) {
+function renderLogin(onDone, sess) {
   document.querySelector(".tabbar").style.display = "none";
+  const code = sess && sess.needs_setup_code;
   const root = document.getElementById("app");
   root.innerHTML = `<div class="wiz"><div class="wiz-card fade-in" style="max-width:380px">
     <div class="wiz-logo"><img src="/static/icon.svg" alt=""></div>
-    <h2 class="wiz-title">TablePlan</h2><p class="wiz-sub">Enter the household password.</p>
-    <form id="lg"><div class="wfield"><input type="password" id="lg-pw" placeholder="Password" autocomplete="current-password" autofocus></div>
+    <h2 class="wiz-title">TablePlan</h2><p class="wiz-sub">${code ? "This server is on the internet, so setup is locked. Enter the one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs)." : "Enter the household password."}</p>
+    <form id="lg"><div class="wfield"><input type="${code ? "text" : "password"}" id="lg-pw" placeholder="${code ? "Setup code" : "Password"}" autocomplete="${code ? "one-time-code" : "current-password"}" autofocus></div>
     <div class="wiz-err" id="lg-err"></div>
     <button class="btn" type="submit">Sign in</button></form></div></div>`;
   document.getElementById("lg").onsubmit = async (e) => {

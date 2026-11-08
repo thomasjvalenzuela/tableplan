@@ -1,0 +1,519 @@
+/* TablePlan: recipes, recipe page, cook mode, images, AI spending, barcode scanner, pantry check-in, what's new.
+   Loaded after app.js and uses its helpers ($, api, esc, ic, openSheet, toast, state, …). */
+"use strict";
+// Broken images fall back to their emoji/text (no inline handlers, so the strict CSP stays on).
+document.addEventListener("error", (e) => { const t = e.target; if (t && t.tagName === "IMG" && t.dataset.fb != null) t.replaceWith(document.createTextNode(t.dataset.fb)); }, true);
+
+// ------------------------------------------------------------------ number formatting & scaling
+const FRAC = [[1 / 8, "⅛"], [1 / 4, "¼"], [1 / 3, "⅓"], [3 / 8, "⅜"], [1 / 2, "½"], [5 / 8, "⅝"], [2 / 3, "⅔"], [3 / 4, "¾"], [7 / 8, "⅞"]];
+function fmtQty(q) {
+  if (q == null || !isFinite(q) || q <= 0) return "";
+  const whole = Math.floor(q + 1e-9), rem = q - whole;
+  if (rem < 0.04) return String(whole || "");
+  if (rem > 0.96) return String(whole + 1);
+  if (q >= 10) return String(Math.round(q));
+  let best = FRAC[0], bd = 9;
+  for (const f of FRAC) { const d = Math.abs(f[0] - rem); if (d < bd) { bd = d; best = f; } }
+  if (bd > 0.06) return (Math.round(q * 100) / 100).toString();
+  return (whole ? whole : "") + best[1];
+}
+function ingLine(x, factor, portion = 1) {
+  if (!x.parsed || x.quantity == null) return { amt: factor !== 1 && x.display ? `${x.display}` : x.display, name: x.display ? "" : x.food, scaled: false };
+  const q = x.quantity * factor * portion;
+  let unit = q > 1 && x.unit_plural ? x.unit_plural : x.unit;
+  if (x.size) unit = `(${x.size}) ${unit}`;
+  const food = q > 1 && x.food_plural && !x.unit ? x.food_plural : x.food;
+  return { amt: [fmtQty(q), unit].filter(Boolean).join(" "), name: food + (x.note ? `, ${x.note}` : ""), scaled: true };
+}
+const recipeImg = (r, size = "min") => (r && r.has_image ? `/img/${r.id}?size=${size}&v=${encodeURIComponent(r.image_v || "")}` : null);
+
+// ------------------------------------------------------------------ RECIPES list
+const rstate = { q: "", filter: "all", list: null, tags: [] };
+async function renderRecipes() {
+  app.innerHTML = topbar(`<button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
+    `<h1 class="title">All recipes</h1>
+    <div class="search">${ic("search")}<input id="rq" placeholder="Search recipes" value="${esc(rstate.q)}" autocomplete="off"></div>
+    <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div>`;
+  bindTopbar();
+  $("#btn-add").onclick = openAddRecipe;
+  try { const d = await api("GET", "/api/recipes"); rstate.list = d.recipes; rstate.tags = d.tags; }
+  catch (e) { $("#rlist").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  const chips = [["all", "All"], ["fav", "♥ Favorites"], ...["Breakfast", "Lunch", "Dinner", "Dessert", "Snack"].filter((t) => rstate.tags.some((x) => x.toLowerCase() === t.toLowerCase())).map((t) => [t, t]),
+    ...rstate.tags.filter((t) => !["breakfast", "lunch", "dinner", "dessert", "snack"].includes(t.toLowerCase())).slice(0, 12).map((t) => [t, t])];
+  $("#rchips").innerHTML = chips.map(([k, l]) => `<button class="filter ${rstate.filter === k ? "on" : ""}" data-f="${esc(k)}">${esc(l)}</button>`).join("");
+  $$("#rchips [data-f]").forEach((b) => (b.onclick = () => { rstate.filter = b.dataset.f; $$("#rchips .filter").forEach((x) => x.classList.toggle("on", x === b)); draw(); }));
+  let t;
+  $("#rq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { rstate.q = e.target.value; draw(); }, 120); };
+  const draw = () => {
+    const q = rstate.q.trim().toLowerCase();
+    const list = rstate.list.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.tags.some((x) => x.toLowerCase().includes(q))) &&
+      (rstate.filter === "all" || (rstate.filter === "fav" ? r.favorite : [...r.tags, ...r.categories].some((x) => x.toLowerCase() === rstate.filter.toLowerCase()))));
+    if (!rstate.list.length) {
+      $("#rlist").innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>`;
+      $("#r-first").onclick = openAddRecipe; return;
+    }
+    if (!list.length) { $("#rlist").innerHTML = `<div class="empty">No recipes match.</div>`; return; }
+    const meta = (r) => `<div class="meta">${r.minutes ? `${ic("clock")}<span>${r.minutes} mins</span>` : ""}${r.minutes && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span style="color:var(--red)">♥</span>' : ""}</div>`;
+    $("#rlist").innerHTML = `<div class="group recipe-list">${list.map((r) => {
+      const img = recipeImg(r);
+      return `<button class="row" data-slug="${esc(r.slug)}"><div class="thumb" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : "🍽️"}</div>
+        <div class="main"><div class="a">${esc(r.name)}</div>${meta(r)}</div><span class="chev">${ic("chevR")}</span></button>`;
+    }).join("")}</div>
+    <div class="recipe-grid">${list.map((r) => {
+      const img = recipeImg(r);
+      return `<button class="rcard" data-slug="${esc(r.slug)}"><div class="img" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : "🍽️"}${r.favorite ? '<span class="heart">♥</span>' : ""}</div>
+        <div class="body"><div class="n">${esc(r.name)}</div>${meta(r)}</div></button>`;
+    }).join("")}</div>`;
+    $$("#rlist [data-slug]").forEach((b) => (b.onclick = () => openRecipe(b.dataset.slug)));
+  };
+  draw();
+}
+
+// ------------------------------------------------------------------ RECIPE page
+const R = { rec: null, servings: 0, style: "classic", guide: null };
+function openRecipe(slug) { location.hash = "recipe/" + encodeURIComponent(slug); }
+async function renderRecipe(slug) {
+  state.tab = "recipes"; renderTabs();
+  app.innerHTML = loading();
+  let rec;
+  try { rec = await api("GET", `/api/recipe/${encodeURIComponent(slug)}`); }
+  catch (e) { app.innerHTML = `${topbar(`<button class="round-btn left" id="rd-err-back">${ic("chevL")}</button>`)}<div class="banner">${esc(e.message)}</div>`; bindTopbar(); $("#rd-err-back").onclick = () => go("recipes"); return; }
+  R.rec = rec; R.servings = rec.servings || state.cfg.household?.people || 4; R.guide = null;
+  R.style = state.cfg.settings.recipe_style === "steps" ? "steps" : "classic";
+  const img = recipeImg(rec, "full");
+  app.innerHTML = `<div class="rd fade-in">
+    <div class="rd-hero" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : "🍽️"}
+      <button class="round-btn back" id="rd-back" aria-label="Back">${ic("chevL")}</button>
+      <button class="round-btn imgbtn" id="rd-img" aria-label="Change photo">${ic("camera")}</button>
+      <button class="round-btn fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite">${rec.favorite ? "♥" : "♡"}</button>
+    </div>
+    <div class="rd-body">
+      <h1>${esc(rec.name)}</h1>${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
+      <div class="stats">
+        <div class="stat">${ic("clock")}<small>Cooking time</small><b>${rec.minutes || "—"} <span>${rec.minutes ? "mins" : ""}</span></b></div>
+        <div class="stat">${ic("chef")}<small>Difficulty</small><b>${esc(rec.difficulty)}</b></div>
+        <div class="stat">${ic("users")}<small>Servings</small><div class="stepper"><button data-s="-1" aria-label="Fewer">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More">+</button></div></div>
+      </div>
+      <div class="seg" id="rd-style" style="margin-top:16px"><button data-v="classic">Classic</button><button data-v="steps">Step-by-step</button></div>
+      <div id="rd-content"></div>
+      <div class="toolbar" style="margin-top:18px">
+        <button class="pill-btn" id="rd-plan">${ic("cal")} Plan it</button>
+        <button class="pill-btn" id="rd-missing">${ic("cart")} Add missing to list</button>
+        <button class="pill-btn" id="rd-edit">${ic("edit")} Edit</button>
+        ${rec.source_url ? `<a class="pill-btn" href="${esc(rec.source_url)}" target="_blank" rel="noopener">${ic("link")} Original</a>` : ""}
+      </div>
+      <div class="cta-bar"><button class="btn" id="rd-cook">${ic("play")} Start cooking</button></div>
+    </div></div>`;
+  $("#rd-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
+  $("#rd-fav").onclick = async (e) => {
+    const on = !R.rec.favorite, btn = e.currentTarget;
+    try { await api("POST", `/api/recipe/${encodeURIComponent(slug)}/favorite`, { favorite: on }); R.rec.favorite = on; btn.classList.toggle("on", on); btn.textContent = on ? "♥" : "♡"; } catch (x) { fail(x); }
+  };
+  $("#rd-img").onclick = () => openImagePicker({ kind: "recipe", slug, name: rec.name, after: () => renderRecipe(slug) });
+  $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); }));
+  $$("#rd-style button").forEach((b) => (b.onclick = () => { R.style = b.dataset.v; drawContent(); }));
+  $("#rd-cook").onclick = () => startCook();
+  $("#rd-plan").onclick = () => planRecipe(rec);
+  $("#rd-missing").onclick = () => addMissing();
+  $("#rd-edit").onclick = () => { location.hash = "edit/" + encodeURIComponent(slug); };
+  drawContent();
+}
+const factor = () => (R.rec.servings ? R.servings / R.rec.servings : 1);
+function pantryTag(x) {
+  if (!x.pantry) return "";
+  const d = x.pantry.days_left;
+  return d != null && d <= 3 ? `<span class="pill soon">Use soon</span>` : `<span class="pill ok">In ${esc(x.pantry.location)}</span>`;
+}
+function ingPic(x) {
+  return `<div class="pic" data-ing="${esc(x.food || "")}">${x.img ? `<img src="${x.img}" alt="" loading="lazy" data-fb="${esc(x.emoji)}">` : x.emoji}</div>`;
+}
+async function drawContent() {
+  $$("#rd-style button").forEach((b) => b.classList.toggle("on", b.dataset.v === R.style));
+  const box = $("#rd-content"), rec = R.rec, f = factor();
+  if (R.style === "classic") {
+    let sec = null, html = `<div class="section-h" style="margin-top:20px"><h2>Ingredients (${rec.ingredients.length})</h2></div><div class="group ing">`;
+    rec.ingredients.forEach((x) => {
+      if (x.section && x.section !== sec) { sec = x.section; html += `</div><div class="group-label">${esc(sec)}</div><div class="group ing">`; }
+      const l = ingLine(x, f);
+      html += `<div class="row">${ingPic(x)}<div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="qty">${esc(l.amt)}</div>` : ""}</div><div class="tags">${pantryTag(x)}</div></div>`;
+    });
+    html += `</div><div class="section-h"><h2>Instructions</h2></div>`;
+    rec.steps.forEach((s, n) => { html += `<div class="step-card">${s.title ? `<div class="num">${esc(s.title)}</div>` : `<div class="num">Step ${n + 1}</div>`}<div class="txt">${esc(s.text)}</div></div>`; });
+    box.innerHTML = html;
+  } else {
+    if (!R.guide) {
+      box.innerHTML = loading();
+      try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided${R.guideAi ? "?ai=1" : ""}`); }
+      catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+    }
+    const g = R.guide;
+    let html = `<div class="section-h" style="margin-top:20px"><h2>Step by step</h2><span class="muted" style="font-size:13px">${g.source === "ai" ? "✨ AI-arranged" : "Auto-arranged"} · ${esc(state.cfg.settings.stove)} stove</span></div>`;
+    g.steps.forEach((s, n) => {
+      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${x.emoji} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
+      html += `<div class="step-card"><div class="num">${n + 1}. ${esc(s.title || "")}</div><div class="txt">${esc(s.text)}</div>
+        ${uses ? `<div class="uses">${uses}</div>` : ""}
+        <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${s.timer_sec ? `<span class="badge2 blue">⏱ ${esc(s.timer_label || fmtDur(s.timer_sec))}</span>` : ""}</div>
+        ${s.tip ? `<p class="hint" style="margin:8px 0 0">${esc(s.tip)}</p>` : ""}</div>`;
+    });
+    if (g.tips?.length) html += `<div class="group" style="padding:14px 16px"><b>Tips</b><ul style="margin:6px 0 0;padding-left:18px;color:var(--sub)">${g.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>`;
+    if (g.source !== "ai") html += `<div class="nudge" id="rd-ai" style="margin-top:14px"><span class="ic bg-indigo">${ic("sparkle")}</span><span><b>Make it smarter with AI</b><small>${state.cfg.ai_key ? `Reorders everything for your ${esc(state.cfg.settings.stove)} stove, with exact timing. Usually under 1¢.` : "Add your OpenAI key in Settings → AI recipe import."}</small></span></div>`;
+    else html += `<button class="pill-btn" id="rd-ai-redo" style="margin-top:8px">${ic("refresh")} Re-do with AI</button>`;
+    box.innerHTML = html;
+    $("#rd-ai") && ($("#rd-ai").onclick = async () => {
+      if (!state.cfg.ai_key) return openSetupSection("ai", "AI recipe import", reloadCfg);
+      box.insertAdjacentHTML("beforeend", loading());
+      try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided?ai=1`); R.guideAi = true; drawContent(); } catch (e) { fail(e); drawContent(); }
+    });
+    $("#rd-ai-redo") && ($("#rd-ai-redo").onclick = async () => { try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided?ai=1&refresh=1`); drawContent(); } catch (e) { fail(e); } });
+  }
+  $$("#rd-content [data-ing]").forEach((p) => p.dataset.ing && (p.onclick = () => openImagePicker({ kind: "ingredient", name: p.dataset.ing, after: () => drawContent() })));
+}
+function fmtDur(sec) { const m = Math.round(sec / 60); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60 ? (m % 60) + " min" : ""}` : `${m} min`; }
+async function addMissing() {
+  const f = factor();
+  const missing = R.rec.ingredients.filter((x) => !x.pantry && (x.food || x.display));
+  if (!missing.length) return toast("You have everything in the pantry 🎉");
+  openSheet("Add to shopping list", `<p class="hint" style="margin:0 4px 10px">Untick anything you already have.</p>
+    <div class="group">${missing.map((x) => { const l = ingLine(x, f); return `<label class="row"><span class="emo">${x.emoji}</span><div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="b">${esc(l.amt)}</div>` : ""}</div><input type="checkbox" checked data-t="${esc(l.scaled ? `${l.amt} ${l.name}` : l.amt)}" style="width:22px;height:22px;accent-color:var(--tint)"></label>`; }).join("")}</div>
+    <div style="height:14px"></div><button class="btn" id="am-go">${ic("cart")} Add to list</button>`, {
+    onMount() { $("#am-go").onclick = async () => {
+      const items = $$("[data-t]").filter((c) => c.checked).map((c) => c.dataset.t);
+      try { const r = await api("POST", `/api/recipe/${encodeURIComponent(R.rec.slug)}/to-list`, { items, list_id: state.listId }); closeSheet(); toast(`Added ${r.added} to your list`, "View", () => go("list")); } catch (e) { fail(e); }
+    }; },
+  });
+}
+function planRecipe(rec) {
+  const d0 = isoDate(today());
+  openSheet("Plan this recipe", `<div class="group"><div class="field"><label>Day</label><input type="date" id="pr-d" value="${d0}"></div>
+    <div class="field"><label>Meal</label><select id="pr-t">${["dinner", "lunch", "breakfast", "side", "snack", "dessert"].map((t) => `<option value="${t}">${cap(t)}</option>`).join("")}</select></div></div>
+    <p class="hint">Scaled to ${state.cfg.household?.people || 2} people automatically.</p><div style="height:14px"></div><button class="btn" id="pr-go">${ic("cal")} Add to plan</button>`, {
+    onMount() { $("#pr-go").onclick = async () => { try { await api("POST", "/api/plan/save", { entries: [{ date: $("#pr-d").value, entry_type: $("#pr-t").value, recipe_id: rec.id }] }); closeSheet(); toast("Added to your meal plan"); } catch (e) { fail(e); } }; },
+  });
+}
+
+// ------------------------------------------------------------------ COOK MODE (walkthrough with timers)
+const C = { i: 0, steps: [], timers: [], tick: null, wake: null, audio: null };
+async function startCook() {
+  if (!R.guide) { try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(R.rec.slug)}/guided`); } catch (e) { return fail(e); } }
+  C.steps = R.guide.steps; C.i = 0;
+  const el = document.createElement("div"); el.className = "cook"; el.id = "cook"; document.body.appendChild(el);
+  document.body.style.overflow = "hidden";
+  try { C.wake = await navigator.wakeLock?.request("screen"); } catch (_) {}
+  if ("Notification" in window && Notification.permission === "default" && window.isSecureContext) { try { Notification.requestPermission(); } catch (_) {} }
+  C.tick = setInterval(tickTimers, 1000);
+  document.addEventListener("keydown", cookKeys);
+  drawCook();
+}
+function endCook() {
+  clearInterval(C.tick); C.timers = []; document.removeEventListener("keydown", cookKeys);
+  try { C.wake?.release(); } catch (_) {}
+  $("#cook")?.remove(); document.body.style.overflow = "";
+}
+function cookKeys(e) { if (e.key === "ArrowRight") cookMove(1); if (e.key === "ArrowLeft") cookMove(-1); if (e.key === "Escape") endCook(); }
+function cookMove(d) { C.i = Math.max(0, Math.min(C.steps.length - 1, C.i + d)); drawCook(); }
+function drawCook() {
+  const s = C.steps[C.i], rec = R.rec, f = factor(), n = C.steps.length;
+  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${x.emoji} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
+  const running = C.timers.find((t) => t.step === C.i);
+  $("#cook").innerHTML = `
+    <div class="cook-top"><button class="round-btn" id="ck-x" aria-label="Close">${ic("x")}</button><div class="prog"><i style="width:${((C.i + 1) / n) * 100}%"></i></div><span class="count">${C.i + 1}/${n}</span></div>
+    <div class="cook-body">
+      <div class="ttl">${esc(s.title || `Step ${C.i + 1}`)}</div>
+      <div class="big">${esc(s.text)}</div>
+      ${uses ? `<div class="uses" style="display:flex;flex-wrap:wrap;gap:8px">${uses}</div>` : ""}
+      <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}</div>
+      ${s.tip ? `<p class="hint" style="margin:12px 0 0">${esc(s.tip)}</p>` : ""}
+      ${s.timer_sec ? `<div class="timer-ring"><div><div class="t" id="ck-t">${running ? fmtClock(running.left) : fmtClock(s.timer_sec)}</div><div class="l">${esc(s.timer_label || "Timer")}</div></div>
+        <div class="acts">${running ? `<button class="btn sec small" id="ck-add">+1 min</button><button class="btn sec small" id="ck-stop">Stop</button>` : `<button class="btn tint small" id="ck-start">${ic("play")} Start timer</button>`}</div></div>` : ""}
+      ${C.i < n - 1 ? `<p class="hint" style="margin:18px 0 0">Next: ${esc(C.steps[C.i + 1].text.slice(0, 120))}${C.steps[C.i + 1].text.length > 120 ? "…" : ""}</p>` : ""}
+    </div>
+    <div class="timers-tray" id="ck-tray"></div>
+    <div class="cook-foot"><button class="btn sec" id="ck-prev" ${C.i ? "" : "disabled"}>${ic("chevL")} Back</button>
+      ${C.i < n - 1 ? `<button class="btn" id="ck-next">Next ${ic("chevR")}</button>` : `<button class="btn tint" id="ck-done">Done 🎉</button>`}</div>`;
+  $("#ck-x").onclick = endCook;
+  $("#ck-prev").onclick = () => cookMove(-1);
+  $("#ck-next") && ($("#ck-next").onclick = () => cookMove(1));
+  $("#ck-done") && ($("#ck-done").onclick = () => { endCook(); toast("Enjoy your meal! 🍽️"); });
+  $("#ck-start") && ($("#ck-start").onclick = () => { unlockAudio(); C.timers.push({ step: C.i, label: s.timer_label || `Step ${C.i + 1}`, left: s.timer_sec, done: false }); drawCook(); });
+  $("#ck-stop") && ($("#ck-stop").onclick = () => { C.timers = C.timers.filter((t) => t.step !== C.i); drawCook(); });
+  $("#ck-add") && ($("#ck-add").onclick = () => { const t = C.timers.find((x) => x.step === C.i); if (t) { t.left += 60; t.done = false; } drawCook(); });
+  drawTray();
+}
+const fmtClock = (sec) => { sec = Math.max(0, Math.round(sec)); const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60; return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0"); };
+function drawTray() {
+  const tray = $("#ck-tray"); if (!tray) return;
+  tray.innerHTML = C.timers.map((t, k) => `<button class="tchip ${t.done ? "done" : ""}" data-k="${k}">⏱ ${esc(t.label)} · ${t.done ? "Done!" : fmtClock(t.left)}</button>`).join("");
+  $$("#ck-tray [data-k]").forEach((b) => (b.onclick = () => { const t = C.timers[+b.dataset.k]; if (t.done) C.timers.splice(+b.dataset.k, 1); C.i = t.step; drawCook(); }));
+}
+function tickTimers() {
+  let changed = false;
+  C.timers.forEach((t) => {
+    if (t.done) return;
+    t.left -= 1; changed = true;
+    if (t.left <= 0) { t.done = true; alertTimer(t); }
+  });
+  if (changed) { const cur = C.timers.find((t) => t.step === C.i); if (cur && $("#ck-t")) $("#ck-t").textContent = cur.done ? "0:00" : fmtClock(cur.left); drawTray(); }
+}
+function unlockAudio() { try { C.audio = C.audio || new (window.AudioContext || window.webkitAudioContext)(); C.audio.resume(); } catch (_) {} }
+function alertTimer(t) {
+  const next = C.steps[t.step + 1];
+  const msg = `⏰ ${t.label} is done${next ? ` · Next: ${next.title || next.text.slice(0, 60)}` : ""}`;
+  toast(msg, next ? "Go" : null, () => { C.i = t.step + 1; drawCook(); });
+  try { navigator.vibrate?.([300, 150, 300, 150, 300]); } catch (_) {}
+  try {
+    const a = C.audio; if (a) [0, 0.35, 0.7].forEach((d) => { const o = a.createOscillator(), g = a.createGain(); o.frequency.value = 880; o.connect(g); g.connect(a.destination); g.gain.setValueAtTime(0.25, a.currentTime + d); g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + d + 0.3); o.start(a.currentTime + d); o.stop(a.currentTime + d + 0.32); });
+  } catch (_) {}
+  try { if (document.hidden && window.Notification?.permission === "granted") new Notification("TablePlan timer", { body: msg }); } catch (_) {}
+}
+
+// ------------------------------------------------------------------ image picker (recipes & ingredients)
+function openImagePicker({ kind, slug, name, after }) {
+  const isRec = kind === "recipe";
+  openSheet(isRec ? "Recipe photo" : `Photo: ${name}`, `
+    <div style="border-radius:16px;overflow:hidden;background:var(--card2);aspect-ratio:${isRec ? "4/3" : "1"};max-height:300px;margin:0 auto 14px;display:grid;place-items:center" id="ip-prev">
+      ${isRec ? (R.rec?.has_image ? `<img src="${recipeImg(R.rec, "full")}" style="width:100%;height:100%;object-fit:cover">` : "🍽️") : `<img src="/img/ing?name=${encodeURIComponent(name)}&t=${Date.now()}" style="width:70%;height:70%;object-fit:contain" data-fb="No photo yet">`}
+    </div>
+    <div class="btn-row"><button class="btn sec" id="ip-next">${ic("refresh")} Try another</button><label class="btn" style="cursor:pointer">${ic("camera")} Upload<input type="file" accept="image/*" id="ip-file" hidden></label></div>
+    <p class="hint" id="ip-credit">${isRec ? "“Try another” finds openly licensed food photos (Openverse)." : "Ingredient photos come from TheMealDB, then openly licensed photos (Openverse)."} Your own photo always wins.</p>`, {
+    onMount() {
+      const done = (credit) => { if (credit) $("#ip-credit").textContent = `Photo: ${credit}`; toast("Photo updated"); closeSheet(); after && after(); };
+      $("#ip-next").onclick = async (e) => {
+        const btn = e.currentTarget; btn.disabled = true; btn.textContent = "Searching…";
+        try { const r = await api("POST", isRec ? `/api/recipe/${encodeURIComponent(slug)}/image/next` : "/api/ingredient-image/next", isRec ? {} : { name }); done(r.credit); }
+        catch (x) { fail(x); btn.disabled = false; btn.innerHTML = `${ic("refresh")} Try another`; }
+      };
+      $("#ip-file").onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        const data = await shrink(f);
+        try { await api("POST", isRec ? `/api/recipe/${encodeURIComponent(slug)}/image/upload` : "/api/ingredient-image/upload", isRec ? { data } : { name, data }); done("Your photo"); } catch (x) { fail(x); }
+      };
+    },
+  });
+}
+
+// ------------------------------------------------------------------ AI spending
+async function openAiSpending() {
+  openSheet("AI spending", loading(), { wide: true });
+  let d; try { d = await api("GET", "/api/ai/spending"); } catch (e) { sheetBody().innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  const draw = () => {
+    const exact = d.exact, total = exact ? exact.total : d.estimate_usd;
+    const days = exact ? exact.days : d.daily;
+    const max = Math.max(0.0001, ...days.map((x) => x.usd));
+    const pct = d.budget ? Math.min(100, (total / d.budget) * 100) : 0;
+    sheetBody().innerHTML = `
+      <div class="group"><div class="bigstat"><b>$${total.toFixed(total < 1 ? 3 : 2)}</b><small>${exact ? "Exact OpenAI spend this month (all apps on your account, including Mealie imports)" : "Estimated spend this month from TablePlan's own AI features"}</small>
+        ${d.budget ? `<div class="meter" style="max-width:none;margin-top:10px"><i style="width:${pct}%;background:${pct >= 100 ? "var(--red)" : pct >= 80 ? "var(--orange)" : "var(--green)"}"></i></div><small>${pct.toFixed(0)}% of your $${d.budget.toFixed(2)} monthly budget</small>` : ""}</div>
+        ${days.length ? `<div class="bars">${days.map((x) => `<i title="${x.date}: $${x.usd.toFixed(4)}" style="height:${(x.usd / max) * 100}%"></i>`).join("")}</div>` : ""}</div>
+      <div class="group-label">This month by feature</div>
+      <div class="group">${d.by_feature.length ? d.by_feature.map((r) => `<div class="row flush"><div class="main"><div class="a">${esc(cap(r.feature))}</div><div class="b">${r.n} call${r.n === 1 ? "" : "s"}${r.tin ? ` · ${(r.tin / 1000).toFixed(1)}k in / ${(r.tout / 1000).toFixed(1)}k out tokens` : ""}</div></div><b>${r.usd ? "$" + r.usd.toFixed(4) : "—"}</b></div>`).join("") : `<div class="row flush muted">No AI use yet this month.</div>`}</div>
+      <p class="hint">Screenshot and video imports run inside Mealie, so only OpenAI's own numbers (below) include them. Estimates use list prices (${esc(d.model || "gpt-5-mini")}: $${(d.prices[d.model] || d.prices["gpt-5-mini"]).input}/1M in, $${(d.prices[d.model] || d.prices["gpt-5-mini"]).output}/1M out).</p>
+      <div class="group-label">Monthly budget</div>
+      <div class="group"><div class="field"><label>Alert me at (USD / month)</label><input type="number" id="ai-b" min="0" step="1" value="${d.budget || ""}" placeholder="Off"></div></div>
+      <p class="hint">You get a notification at 80% and 100%. To hard-cap spending, also set a limit in OpenAI → Settings → Limits.</p>
+      <div class="group-label">Exact costs from OpenAI</div>
+      <div class="group"><div class="field"><input class="full" type="password" id="ai-ak" placeholder="${d.has_admin_key ? "Admin key saved ✓ (enter to replace)" : "sk-admin-… (optional)"}" autocomplete="off"></div></div>
+      <p class="hint">An <b>Admin key</b> (OpenAI → Settings → Organization → Admin keys) lets TablePlan read your real bill. It can only read costs here, and it stays on your server.${d.exact_error ? `<br><span style="color:var(--red)">${esc(d.exact_error)}</span>` : ""}</p>
+      <div style="height:12px"></div><div class="btn-row"><button class="btn" id="ai-save">Save</button>${d.has_admin_key ? `<button class="btn red" id="ai-rm">Remove admin key</button>` : ""}</div>
+      ${d.recent.length ? `<div class="group-label">Recent</div><div class="group">${d.recent.slice(0, 10).map((r) => `<div class="row flush"><div class="main"><div class="a" style="font-size:15px">${esc(r.detail || r.feature)}</div><div class="b">${esc(r.at.replace("T", " ").slice(0, 16))} · ${esc(r.model || "")}</div></div><span class="muted">${r.cost_usd != null ? "$" + r.cost_usd.toFixed(4) : "—"}</span></div>`).join("")}</div>` : ""}`;
+    $("#ai-save").onclick = async () => {
+      try {
+        const b = +$("#ai-b").value || 0;
+        await api("PUT", "/api/settings", { ai_budget: b }); state.cfg.settings.ai_budget = b;
+        const k = $("#ai-ak").value.trim();
+        d = k ? await api("POST", "/api/setup/openai-admin", { key: k }) : await api("GET", "/api/ai/spending");
+        toast("Saved"); draw();
+      } catch (e) { fail(e); }
+    };
+    $("#ai-rm") && ($("#ai-rm").onclick = async () => { d = await api("POST", "/api/setup/openai-admin", { key: "" }); draw(); });
+  };
+  draw();
+}
+
+// ------------------------------------------------------------------ barcode scanner → pantry
+let ZX = null;
+function loadZXing() {
+  if (ZX) return ZX;
+  ZX = new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = "/static/vendor/zxing/zxing-reader.js";
+    s.onload = () => { try { window.ZXingWASM.prepareZXingModule({ overrides: { locateFile: (p, pre) => (p.endsWith(".wasm") ? "/static/vendor/zxing/zxing_reader.wasm" : pre + p) }, fireImmediately: true }); res(window.ZXingWASM); } catch (e) { rej(e); } };
+    s.onerror = () => rej(new Error("Couldn't load the barcode reader"));
+    document.head.appendChild(s);
+  });
+  return ZX;
+}
+const BC_OPTS = { formats: ["EAN13", "EAN8", "UPCA", "UPCE"], tryHarder: true, maxNumberOfSymbols: 1 };
+async function openScanner(after) {
+  const live = window.isSecureContext && navigator.mediaDevices?.getUserMedia;
+  openSheet("Scan to pantry", `
+    ${live ? `<div class="scan-view"><video id="sc-v" playsinline muted></video><div class="aim"></div></div><p class="hint" style="text-align:center">Point at a barcode. It scans automatically.</p>` :
+      `<label class="drop" style="padding:28px">${ic("camera")}<div style="margin-top:8px"><b>Take a photo of the barcode</b><br><span class="muted">Fill most of the photo with the barcode</span></div><input type="file" accept="image/*" capture="environment" id="sc-file" hidden></label>
+       <p class="hint">Live scanning needs HTTPS. Set it up with Tailscale (see the README) to scan without taking photos.</p>`}
+    <div id="sc-res"></div>
+    <div class="group" style="margin-top:12px"><div class="field"><input class="full" id="sc-code" inputmode="numeric" placeholder="Or type the barcode number"></div></div>
+    <div style="height:10px"></div><button class="btn sec" id="sc-look">Look up</button>
+    <p class="hint">Product names come from Open Food Facts (free, open database).</p>`, {
+    async onMount(sheet) {
+      let stream = null, stop = false, busy = false;
+      const found = async (code) => {
+        if (busy) return; busy = true;
+        try { navigator.vibrate?.(60); } catch (_) {}
+        $("#sc-res").innerHTML = loading();
+        try { showProduct(await api("GET", `/api/upc/${code}`)); } catch (e) { $("#sc-res").innerHTML = `<div class="banner">${esc(e.message)}</div>`; }
+        busy = false;
+      };
+      const showProduct = (p) => {
+        const loc = p.rule?.location || "pantry";
+        $("#sc-res").innerHTML = p.found ? `<div class="group" style="margin-top:12px">
+            <div class="row flush"><div class="main"><div class="a">${esc(p.name)}</div><div class="b">${esc([p.brand, p.quantity].filter(Boolean).join(" · "))}${p.rule ? ` · shelf life: ${esc(p.rule.name)}` : ""}</div></div></div>
+            <div class="field"><label>Stored in</label><select id="sc-loc">${["fridge", "freezer", "pantry"].map((l) => `<option ${l === loc ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+            <div class="field"><label>Printed date (optional)</label><input type="date" id="sc-date"></div></div>
+            <div style="height:10px"></div><button class="btn" id="sc-add">${ic("plus")} Add to pantry</button>`
+          : `<div class="banner info" style="margin-top:12px">Barcode ${esc(p.code)} isn't in Open Food Facts yet.</div><div class="group"><div class="field"><input class="full" id="sc-name" placeholder="What is it? (e.g. Greek yogurt)"></div></div><div style="height:10px"></div><button class="btn" id="sc-add">${ic("plus")} Add to pantry</button>`;
+        $("#sc-add").onclick = async () => {
+          const name = p.found ? p.name : $("#sc-name").value.trim();
+          if (!name) return toast("Enter a name");
+          try {
+            const it = await api("POST", "/api/pantry", { name, location: $("#sc-loc")?.value, package_date: $("#sc-date")?.value || "", quantity_text: p.quantity || "" });
+            toast(`${it.name} → ${cap(it.location)}${it.expires_on ? ` · use by ${fmt(parseISO(it.expires_on), { month: "short", day: "numeric" })}` : ""}`);
+            $("#sc-res").innerHTML = `<div class="wstatus ok" style="margin-top:12px"><b>Added ${esc(it.name)}</b><span>Scan the next item, or close when you're done.</span></div>`;
+            after && after();
+          } catch (e) { fail(e); }
+        };
+      };
+      $("#sc-look").onclick = () => { const c = $("#sc-code").value.replace(/\D/g, ""); if (c.length >= 6) found(c); else toast("Enter the numbers under the barcode"); };
+      let zx;
+      try { zx = await loadZXing(); } catch (e) { $("#sc-res").innerHTML = `<div class="banner">${esc(e.message)}. Type the number instead.</div>`; return; }
+      if ($("#sc-file")) $("#sc-file").onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        const r = await zx.readBarcodes(f, BC_OPTS).catch(() => []);
+        if (r[0]?.text) found(r[0].text); else $("#sc-res").innerHTML = `<div class="banner">Couldn't read a barcode in that photo. Try closer and steadier, or type the number.</div>`;
+      };
+      if (live) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 } }, audio: false });
+          const v = $("#sc-v"); v.srcObject = stream; await v.play();
+          const cv = document.createElement("canvas"), ctx = cv.getContext("2d", { willReadFrequently: true });
+          const loop = async () => {
+            if (stop || !document.body.contains(v)) { stream.getTracks().forEach((t) => t.stop()); return; }
+            if (!busy && v.videoWidth) {
+              cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0);
+              const r = await zx.readBarcodes(ctx.getImageData(0, 0, cv.width, cv.height), BC_OPTS).catch(() => []);
+              if (r[0]?.text) await found(r[0].text);
+            }
+            setTimeout(loop, 250);
+          };
+          loop();
+        } catch (e) { $("#sc-res").innerHTML = `<div class="banner">Camera unavailable (${esc(e.message)}). Type the number instead.</div>`; }
+      }
+      const obs = new MutationObserver(() => { if (!document.body.contains(sheet)) { stop = true; stream?.getTracks().forEach((t) => t.stop()); obs.disconnect(); } });
+      obs.observe(document.body, { childList: true, subtree: true });
+    },
+  });
+}
+
+// ------------------------------------------------------------------ pantry check-in (quick review)
+async function openCheckin(after) {
+  let items = [];
+  try { items = (await api("GET", "/api/pantry")).items; } catch (e) { return fail(e); }
+  const acted = new Set();
+  openSheet("Pantry check-in", `<p class="hint" style="margin:0 4px 12px">Confirm what's still here. It takes a minute and keeps use-by dates and shopping lists accurate.</p>
+    <div class="group">${items.map((it) => `<div class="row flush" data-id="${it.id}"><span class="emo">${it.emoji || "🥫"}</span><div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(cap(it.location))} · ${Math.round(it.amount_left * 100)}% left${it.expires_on ? ` · ${esc(relExpiry(it))}` : ""}</div></div>
+      <div style="display:flex;gap:6px"><button class="pill-btn" data-a="keep" style="box-shadow:none;background:var(--fill)">✓</button><button class="pill-btn" data-a="half" style="box-shadow:none;background:var(--fill)">½</button><button class="pill-btn" data-a="gone" style="box-shadow:none;background:var(--fill);color:var(--red)">✕</button></div></div>`).join("") || `<div class="row flush muted">Your pantry is empty. Scan or add items first.</div>`}</div>
+    <div style="height:14px"></div><button class="btn" id="ci-done">${ic("check")} Done</button>`, {
+    onMount() {
+      $$("[data-a]").forEach((b) => (b.onclick = async () => {
+        const row = b.closest("[data-id]"), id = row.dataset.id, a = b.dataset.a, it = items.find((x) => String(x.id) === id);
+        try {
+          if (a === "gone") await api("PATCH", `/api/pantry/${id}`, { action: "use", left: 0 });
+          if (a === "half") await api("PATCH", `/api/pantry/${id}`, { action: "use", left: Math.min(0.5, it.amount_left) });
+          acted.add(id); row.style.opacity = a === "gone" ? ".35" : ".6";
+          $$("[data-a]", row).forEach((x) => (x.style.background = x === b ? "var(--ink)" : "var(--fill)", x.style.color = x === b ? "var(--on-ink)" : ""));
+        } catch (e) { fail(e); }
+      }));
+      $("#ci-done").onclick = async () => { await api("POST", "/api/pantry/checked").catch(() => {}); closeSheet(); toast("Pantry checked ✓"); after && after(); };
+    },
+  });
+}
+
+// ------------------------------------------------------------------ what's new (shown once per new version)
+const WHATS_NEW = {
+  "0.3": {
+    title: "What's new in TablePlan",
+    items: [
+      ["book", "bg-orange", "Recipes, beautifully", "Browse, search and favorite your recipes, with photos, cooking time and difficulty at a glance."],
+      ["list", "bg-indigo", "Step-by-step mode", "Ingredients appear right inside each step, in perfect order, tuned to your gas, electric or induction stove."],
+      ["play", "bg-green", "Cook mode with timers", "A hands-free walkthrough. Timers keep running while you move ahead, and alert you when it's time for the next step."],
+      ["scan", "bg-blue", "Scan your pantry", "Scan barcodes to stock the fridge and pantry, and get a gentle weekly reminder to check what's left."],
+      ["share", "bg-teal", "Telegram & push", "Get shopping lists, meal plans and use-soon alerts on Telegram or ntfy, with no Gmail needed."],
+      ["dollar", "bg-purple", "AI spending", "See what OpenAI costs you each month, with an optional budget alert."],
+    ],
+  },
+};
+function maybeWhatsNew() {
+  const v = (state.cfg.version || "").split(".").slice(0, 2).join(".");
+  const seen = (() => { try { return localStorage.getItem("tp.seen"); } catch (_) { return null; } })();
+  const mark = () => { try { localStorage.setItem("tp.seen", v); } catch (_) {} };
+  if (!WHATS_NEW[v] || seen === v) return mark();
+  if (!seen && !state.cfg.setup_complete) return mark();
+  const w = WHATS_NEW[v];
+  openSheet(w.title, `<div class="whatsnew"><ul>${w.items.map(([i, c, t, d]) => `<li><span class="ic ${c}">${ic(i)}</span><span><b>${esc(t)}</b><span>${esc(d)}</span></span></li>`).join("")}</ul></div>
+    <div style="height:14px"></div><button class="btn" id="wn-ok">Let's cook</button><p class="hint" style="text-align:center">Version ${esc(state.cfg.version)}</p>`, {
+    onMount() { $("#wn-ok").onclick = () => closeSheet(); },
+  });
+  mark();
+}
+
+// ------------------------------------------------------------------ zoom / Home Screen tip (iOS keeps Safari's per-site page zoom)
+function zoomedOut() { return window.innerWidth > (screen.width || window.innerWidth) * 1.12 && screen.width < 900; }
+function zoomNudge() {
+  if (!zoomedOut()) return "";
+  const standalone = navigator.standalone || window.matchMedia("(display-mode: standalone)").matches;
+  return `<div class="nudge" style="border:1px solid rgba(255,149,0,.4)"><span class="ic bg-orange">${ic("search")}</span><span><b>Everything looks tiny?</b><small>${standalone
+    ? "This Home Screen app kept Safari's zoom. Open this page in Safari, tap <b>aA</b> → set zoom to <b>100%</b>, then remove this icon and tap Share → <b>Add to Home Screen</b> again."
+    : "Safari's page zoom is below 100%. Tap <b>aA</b> in the address bar and choose <b>100%</b>. If you added TablePlan to your Home Screen, re-add it afterwards."}</small></span></div>`;
+}
+
+// ------------------------------------------------------------------ recipe editor (everything stays in TablePlan; Mealie stores it)
+async function renderRecipeEditor(slug) {
+  state.tab = "recipes"; renderTabs();
+  app.innerHTML = loading();
+  let rec;
+  try { rec = await api("GET", `/api/recipe/${encodeURIComponent(slug)}`); } catch (e) { app.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  let sec = null;
+  const ingText = rec.ingredients.map((x) => { let t = ""; if (x.section && x.section !== sec) { sec = x.section; t = `# ${x.section}\n`; } return t + (x.raw || x.display || x.food); }).join("\n");
+  const stepText = rec.steps.map((s) => s.text).join("\n\n");
+  app.innerHTML = `<div class="topbar"><button class="round-btn left" id="ed-x" aria-label="Cancel">${ic("x")}</button><button class="pill-btn dark" id="ed-save">${ic("check")} Save</button></div>
+    <h1 class="title">Edit recipe</h1>
+    <div class="group"><div class="field"><input class="full" id="ed-name" value="${esc(rec.name)}" placeholder="Recipe name"></div>
+      <div class="field"><textarea class="full-area" id="ed-desc" rows="2" placeholder="Short description (optional)">${esc(rec.description)}</textarea></div></div>
+    <div class="group-label">Details</div>
+    <div class="group">
+      <div class="field"><label>Servings</label><input type="number" id="ed-serv" min="0" step="0.5" value="${rec.servings || ""}"></div>
+      <div class="field"><label>Prep (min)</label><input type="number" id="ed-prep" min="0" value="${rec.prep_minutes || ""}"></div>
+      <div class="field"><label>Cook (min)</label><input type="number" id="ed-cook" min="0" value="${rec.cook_minutes || ""}"></div>
+      <div class="field"><label>Total (min)</label><input type="number" id="ed-total" min="0" value="${rec.total_minutes || ""}"></div>
+    </div>
+    <div class="group-label">Ingredients</div>
+    <div class="group"><textarea class="full-area mono" id="ed-ing" rows="${Math.min(18, rec.ingredients.length + 3)}" placeholder="One per line, e.g. 1 ½ cups heavy cream">${esc(ingText)}</textarea></div>
+    <p class="hint">One ingredient per line, amount first (“2 cups flour”), so it scales. Start a line with # for a heading, like “# Sauce”.</p>
+    <div class="group-label">Instructions</div>
+    <div class="group"><textarea class="full-area" id="ed-steps" rows="${Math.min(20, rec.steps.length * 3 + 3)}" placeholder="Leave a blank line between steps">${esc(stepText)}</textarea></div>
+    <p class="hint">Leave a blank line between steps.</p>
+    <div style="height:18px"></div><button class="btn red" id="ed-del">${ic("trash")} Delete recipe</button><div style="height:30px"></div>`;
+  const back = () => (history.length > 1 ? history.back() : openRecipe(slug));
+  $("#ed-x").onclick = back;
+  $("#ed-save").onclick = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    const body = { name: $("#ed-name").value, description: $("#ed-desc").value, servings: $("#ed-serv").value,
+      prep_minutes: $("#ed-prep").value, cook_minutes: $("#ed-cook").value, total_minutes: $("#ed-total").value,
+      ingredients: $("#ed-ing").value.split("\n"), steps: $("#ed-steps").value.split(/\n\s*\n/) };
+    try { const r = await api("PUT", `/api/recipe/${encodeURIComponent(slug)}`, body); toast("Saved"); rstate.list = null; location.replace("#recipe/" + encodeURIComponent(r.slug)); }
+    catch (x) { fail(x); btn.disabled = false; }
+  };
+  $("#ed-del").onclick = () => openSheet("Delete recipe?", `<p class="hint" style="margin:0 4px 14px">“${esc(rec.name)}” will be removed from your library and any meal plans that use it.</p><div class="btn-row"><button class="btn sec" id="dd-no">Cancel</button><button class="btn red" id="dd-yes">Delete</button></div>`, {
+    onMount() {
+      $("#dd-no").onclick = () => closeSheet();
+      $("#dd-yes").onclick = async () => { try { await api("DELETE", `/api/recipe/${encodeURIComponent(slug)}`); closeSheet(true); toast("Recipe deleted"); go("recipes"); } catch (x) { fail(x); } };
+    },
+  });
+}

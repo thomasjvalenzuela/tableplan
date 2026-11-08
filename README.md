@@ -28,6 +28,21 @@ Runs on ZimaOS, CasaOS, Unraid, Portainer or any Linux server with Docker. Built
 - 🛒 **Share anything.** Email, print, or export lists and plans. Meal plans export to your calendar (.ics).
 - 📱 **Feels like an app.** It looks like Apple's Home app, and you can add it to your phone's Home Screen.
 
+> 💡 **You never have to touch Mealie.** You don't need a Mealie account, and you never need to open or sign in to the Mealie app. The setup wizard creates and secures the Mealie account for you. Mealie just runs behind the scenes as TablePlan's database and import engine. Viewing, editing, writing and deleting recipes, and making shopping lists, all happen in TablePlan. On ZimaOS you can ignore the Mealie app tile.
+
+### ✨ New in v0.3
+
+- **Recipes tab** with search and favorites.
+- **Edit recipes in TablePlan**, or create one from scratch with **Type it**. Plain-text ingredients scale automatically too.
+- **Two recipe styles:** *Classic* or *Step-by-step*, tuned to your stove (gas, electric or induction) and oven (conventional or convection).
+- **Cook mode** with built-in timers.
+- **Import progress** with a time estimate.
+- **Pantry barcode scanning** (via Open Food Facts) and a weekly pantry check-in reminder.
+- **Confirm what you have** before a shopping list is built, so you don't buy what's already in the pantry.
+- **AI spending tracker** with budget alerts. Add an optional OpenAI *admin* key to see exact costs.
+- **Ingredient and recipe photos.** Tap **Try another** or upload your own.
+- **What's new** popup after each update, **light/dark mode**, and a desktop sidebar showing your version and a GitHub link.
+
 ---
 
 ## 🚀 Install in 3 steps
@@ -151,7 +166,7 @@ Open **`http://YOUR-SERVER-IP:9930`** in your browser. A short wizard appears. Y
 | Screen | What to do |
 |---|---|
 | **Household** | Enter a name and how many people you cook for. |
-| **Recipe library** | **No Mealie before (Path A):** choose **Create account** and enter your name, email and a password with 8+ characters. This becomes your Mealie login, and it replaces Mealie's default `changeme@example.com` account so nobody else can use it.<br>**Existing Mealie (Path B):** choose **Sign in** with your Mealie email and password. Use an **admin** account if you want the AI step to work. TablePlan creates its own access token and doesn't store your password.<br>Prefer tokens? Choose **Use API token** and paste one from Mealie → Profile → API Tokens. |
+| **Recipe library** | **No Mealie before (Path A):** choose **Create account** and enter your name, email and a password with 8+ characters. You don't need to make a Mealie account first: TablePlan creates it for you and replaces Mealie's default `changeme@example.com` account so nobody else can use it. You won't need to sign in to Mealie after this.<br>**Existing Mealie (Path B):** choose **Sign in** with your Mealie email and password. Use an **admin** account if you want the AI step to work. TablePlan creates its own access token and doesn't store your password.<br>Prefer tokens? Choose **Use API token** and paste one from Mealie → Profile → API Tokens. |
 | **Import from screenshots** | Paste an OpenAI key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys) and add a few dollars of credit there. TablePlan tests the key before saving. You can also **Skip**. |
 | **Email** | Pick your provider and enter your email and password. **Gmail** needs an [App Password](https://myaccount.google.com/apppasswords). A test email is sent to confirm it works. |
 | **Lock it** | Optional household password. Use one if anyone outside your home can reach the server. |
@@ -161,7 +176,7 @@ Open **`http://YOUR-SERVER-IP:9930`** in your browser. A short wizard appears. Y
 - **iPhone (Safari):** open `http://YOUR-SERVER-IP:9930`, tap **Share**, then **Add to Home Screen**.
 - **Android (Chrome):** open it, tap **⋮**, then **Add to Home screen**.
 
-That's it. Tap **+** on the Home screen to add your first recipe.
+That's it. Tap **+** on the Home screen to add your first recipe. Everything from here on happens in TablePlan, so there's no need to open Mealie.
 
 ---
 
@@ -177,6 +192,8 @@ TablePlan shows a blue **Update available** banner when a new version is out.
 | Portainer | Stacks → tableplan → **Update the stack** with *Re-pull image* turned on |
 
 Your recipes, pantry and settings are kept.
+
+**What about Mealie?** Mealie doesn't update itself. Each TablePlan release includes a tested Mealie version, so pressing **Update** on TablePlan keeps Mealie current too.
 
 ## Backup & uninstall
 
@@ -223,9 +240,11 @@ This works with Nginx Proxy Manager, Caddy or Traefik, and a domain you own. Not
 Your proxy needs ports 80/443 on the server. On ZimaOS the dashboard uses port 80, so either move the dashboard to another port in ZimaOS settings, or run the proxy on another machine.
 </details>
 
+> 📷 **Barcode scanning with the live camera needs HTTPS.** Browsers only allow camera access on secure addresses, so set up Option 1 or 2. On plain `http://`, the pantry scanner falls back to taking a photo of the barcode or typing the number.
+
 ### Using it away from home
 
-**Tailscale** (Option 1 above) is the simplest and safest way. If you expose TablePlan through a public domain instead, set a **household password** in Settings. Never port-forward 9930 or 9925 straight to the internet.
+**Tailscale** (Option 1 above) is the simplest and safest way. If you expose TablePlan through a public domain instead, set `TABLEPLAN_PUBLIC=1` on the TablePlan container. Sign-in is then always required, and until you set a household password, you need a one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs, or `docker logs tableplan`). Never port-forward 9930 or 9925 straight to the internet.
 
 ## Troubleshooting
 
@@ -235,6 +254,8 @@ Your proxy needs ports 80/443 on the server. On ZimaOS the dashboard uses port 8
 | Wizard says "Can't reach Mealie yet" | Path A: Mealie is still starting, so wait about a minute and tap **Check again**. Path B: check `MEALIE_URL` and that Mealie is running. |
 | Wizard says "This Mealie already has an account" | Your Mealie was already set up. Choose **Sign in** instead. |
 | OpenAI test failed | The key is wrong or has no credit. Check [billing](https://platform.openai.com/settings/organization/billing). |
+| Screenshot import says "Unable to read any content from the provided source" | The OpenAI key isn't set, or an older version left Mealie's image reader unset. Update to v0.3, which repairs this automatically, or re-enter your OpenAI key in **Settings → AI recipe import**. |
+| Live barcode scanning doesn't open the camera | The camera needs HTTPS. See [HTTPS](#https-remove-chromes-not-secure-warning), or take a photo of the barcode or type the number instead. |
 | Email test failed | Gmail, Yahoo and iCloud need an **app password**, not your normal password. |
 | Use-by dates off by a day | Set `TZ` to your time zone and restart TablePlan. |
 | Chrome says "Not secure" | Normal for `http://` on a home network. See [HTTPS](#https-remove-chromes-not-secure-warning) to add a padlock. |
@@ -263,4 +284,8 @@ Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md
 
 - **TablePlan:** [AGPL-3.0](LICENSE).
 - **[Mealie](https://github.com/mealie-recipes/mealie)** (AGPL-3.0) is the recipe engine. TablePlan talks to it over its API.
-- Shelf-life data comes from **[USDA FSIS FoodKeeper](https://catalog.data.gov/dataset/fsis-foodkeeper-data)** (public domain).
+- **[USDA FSIS FoodKeeper](https://catalog.data.gov/dataset/fsis-foodkeeper-data)** (public domain): shelf-life data.
+- **[Open Food Facts](https://world.openfoodfacts.org)** ([ODbL](https://opendatacommons.org/licenses/odbl/1-0/)): barcode product data.
+- **[zxing-wasm](https://github.com/Sec-ant/zxing-wasm)** (MIT): barcode decoding in the browser.
+- **[TheMealDB](https://www.themealdb.com)**: ingredient images.
+- **[Openverse](https://openverse.org)**: openly licensed recipe photos.

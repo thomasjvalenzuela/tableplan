@@ -17,6 +17,8 @@ Pure Python standard library + SQLite. No pip installs.
 import base64
 import csv
 import hashlib
+import ipaddress
+import socket
 import hmac
 import html
 import io
@@ -34,6 +36,7 @@ import time
 import traceback
 import urllib.error
 import urllib.parse
+import uuid
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -42,6 +45,8 @@ from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+mimetypes.add_type("application/wasm", ".wasm")
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 STATIC_DIR = os.path.join(HERE, "static")
 SEED_FILE = os.path.join(HERE, "seed", "starter_shelf_life.json")
 
@@ -61,6 +66,11 @@ APP_VERSION = (open(os.path.join(HERE, "VERSION")).read().strip()
                if os.path.exists(os.path.join(HERE, "VERSION")) else "dev")
 UPDATE_FEED = env("TABLEPLAN_UPDATE_FEED", "https://thomasjvalenzuela.github.io/tableplan/version.json")
 INSTALL_METHOD = env("TABLEPLAN_INSTALL", "zimaos")   # zimaos | cli | manual
+# Set TABLEPLAN_PUBLIC=1 when TablePlan is reachable from the internet (custom domain, Railway, …):
+# sign-in is then always required, and until a household password exists the one-time setup code
+# printed in the server log is the only way in.
+PUBLIC_MODE = env("TABLEPLAN_PUBLIC", "").lower() in ("1", "true", "yes")
+SETUP_CODE = base64.b32encode(os.urandom(5)).decode()
 
 FOODKEEPER_URL = env("FOODKEEPER_URL", "https://www.fsis.usda.gov/shared/data/EN/foodkeeper.json")
 
@@ -76,6 +86,12 @@ DEFAULT_SETTINGS = {
     "auto_plan_email": False,         # "send the plan when it's made" (all notification channels)
     "expiry_alert": False,            # daily "use soon" alert
     "expiry_alert_hour": 8,
+    "recipe_style": "classic",        # classic | steps
+    "stove": "electric",              # gas | electric | induction
+    "oven": "conventional",           # conventional | convection
+    "temp_unit": "F",                 # F | C
+    "ai_budget": 0,                   # monthly USD; 0 = no alert
+    "pantry_check_days": 7,           # remind to review the pantry every N days (0 = off)
     "expiring_window_days": 3,
 }
 
@@ -140,6 +156,20 @@ CREATE TABLE IF NOT EXISTS recipe_cache (
   id TEXT PRIMARY KEY, updated TEXT, foods TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS guided_cache (
+  recipe_id TEXT, profile TEXT, updated TEXT, source TEXT, data TEXT, created_at TEXT,
+  PRIMARY KEY (recipe_id, profile)
+);
+CREATE TABLE IF NOT EXISTS ai_usage (
+  id INTEGER PRIMARY KEY, at TEXT NOT NULL, feature TEXT, model TEXT,
+  input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ai_usage_at ON ai_usage(at);
+CREATE TABLE IF NOT EXISTS upc_cache (code TEXT PRIMARY KEY, data TEXT, at TEXT);
+CREATE TABLE IF NOT EXISTS image_picks (
+  kind TEXT, key TEXT, idx INTEGER DEFAULT 0, file TEXT, credit TEXT, missing INTEGER DEFAULT 0, updated TEXT,
+  PRIMARY KEY (kind, key)
+);
 """
 
 
@@ -244,11 +274,16 @@ CFG_DEFAULTS = {
     "ntfy_server": env("NTFY_SERVER", "https://ntfy.sh"),
     "ntfy_topic": env("NTFY_TOPIC"),
     "ntfy_token": env("NTFY_TOKEN"),
+    "openai_key": env("OPENAI_API_KEY"),
+    "openai_model": env("OPENAI_MODEL", "gpt-5-mini"),
+    "openai_admin_key": env("OPENAI_ADMIN_KEY"),
+    "mealie_user_id": "",
     "app_password_hash": "",
     "session_secret": "",
     "setup_complete": False,
 }
 SECRET_KEYS = {"mealie_token", "smtp_password", "app_password_hash", "session_secret", "telegram_token", "ntfy_token",
+               "openai_key", "openai_admin_key",
                "telegram_link_code"}
 _cfg = {}
 _cfg_lock = threading.Lock()
@@ -328,7 +363,23 @@ def valid_session(tok):
 
 
 def auth_required():
-    return bool(cfg("app_password_hash"))
+    return bool(cfg("app_password_hash")) or PUBLIC_MODE
+
+
+def password_ok(pw):
+    if cfg("app_password_hash"):
+        return check_password(pw, cfg("app_password_hash"))
+    return PUBLIC_MODE and hmac.compare_digest(pw.strip().upper(), SETUP_CODE)
+
+
+_login_fails = {}
+
+
+def login_throttled(ip):
+    now = time.time()
+    fails = [t for t in _login_fails.get(ip, []) if now - t < 600]
+    _login_fails[ip] = fails
+    return len(fails) >= 8
 
 
 # ============================================================ USDA FoodKeeper
@@ -685,7 +736,7 @@ def pantry_json(c, row):
         "location": row["location"], "amount_left": row["amount_left"],
         "purchased_on": row["purchased_on"], "opened_on": row["opened_on"], "frozen_on": row["frozen_on"],
         "expires_on": row["expires_on"], "expiry_source": row["expiry_source"],
-        "days_left": (exp - t).days if exp else None, "status": row["status"],
+        "days_left": (exp - t).days if exp else None, "status": row["status"], "emoji": food_emoji(row["name"]),
         "rule": {"id": rule["id"], "name": rule["name"], "source": rule["source"],
                  **{f: rule[f] for f in RULE_FIELDS}, "tips": rule["tips"]} if rule else None,
     }
@@ -794,6 +845,7 @@ def recipe_pool(refresh=False):
     with _recipe_lock:
         if refresh or time.time() - _recipe_cache["at"] > 120:
             data = mealie("GET", "/api/recipes?page=1&perPage=-1&orderBy=name&orderDirection=asc")
+            favs = favorite_ids()
             items = []
             for r in data.get("items", []):
                 items.append({
@@ -806,6 +858,10 @@ def recipe_pool(refresh=False):
                     "updated": r.get("dateUpdated") or r.get("updatedAt") or r.get("updateAt") or "",
                     "total_time": r.get("totalTime"),
                     "servings": float(r.get("recipeServings") or 0),
+                    "minutes": recipe_minutes(r),
+                    "description": (r.get("description") or "")[:240],
+                    "image_v": r.get("image") or "",
+                    "favorite": r["id"] in favs,
                 })
             _recipe_cache.update(at=time.time(), items=items)
         return list(_recipe_cache["items"])
@@ -1096,7 +1152,11 @@ def grouped(sl, include_checked=False):
 def list_json(sl):
     return {
         "id": sl.get("id"), "name": sl.get("name") or "Shopping list",
-        "groups": [{"label": l, "items": [{"id": i["id"], "text": item_text(i), "name": item_name(i)} for i in items]}
+        "groups": [{"label": l, "items": [{"id": i["id"], "text": item_text(i), "name": item_name(i),
+                                            "emoji": food_emoji((i.get("food") or {}).get("name") or i.get("note") or i.get("display")),
+                                            "qty": " ".join(x for x in (nice_qty(i.get("quantity")) if (i.get("food") or i.get("unit")) else "",
+                                                                         ((i.get("unit") or {}).get("name") or "")) if x),
+                                            "food": (i.get("food") or {}).get("name") or ""} for i in items]}
                    for l, items in grouped(sl)],
         "checked": [{"id": i["id"], "text": item_text(i)} for i in (sl.get("listItems") or []) if i.get("checked")][:30],
         "mealie_link": f"{mealie_public()}/shopping-lists/{sl.get('id')}",
@@ -1727,12 +1787,13 @@ def ai_setup(api_key, model, audio, base_url=None):
         return mealie("POST", "/api/groups/ai-providers/providers", data)["id"]
 
     main_id = upsert(provider)
+    set_cfg(openai_key=api_key, openai_model=model)
     audio_id = None
     if audio:
         audio_id = upsert({**provider, "name": "OpenAI Whisper", "model": "whisper-1"})
     mealie("PUT", "/api/groups/ai-providers/settings", {
         "defaultProviderId": main_id,
-        "imageProviderId": main_id if test.get("supportsImages") is not False else None,
+        "imageProviderId": main_id if (VISION_MODELS.match(model) or test.get("supportsImages") is not False) else None,
         "audioProviderId": audio_id})
     st = ai_status()
     st["supports_images"] = test.get("supportsImages")
@@ -1810,8 +1871,189 @@ def import_images(images, text=None):
         if total > 25_000_000:
             raise ApiError(413, "Those images are too large together (25 MB max).")
         files.append(("images", im.get("name") or f"image{i}.jpg", im.get("type") or "image/jpeg", blob))
-    slug = mealie("POST", "/api/recipes/create/ai", multipart=({"content": text or None}, files), timeout=300)
+    if cfg("openai_key"):
+        transcript = transcribe_images(images, text)
+        slug = mealie("POST", "/api/recipes/create/ai", multipart=({"content": transcript}, []), timeout=300)
+        return _imported(slug)
+    ensure_image_provider()
+    try:
+        slug = mealie("POST", "/api/recipes/create/ai", multipart=({"content": text or None}, files), timeout=300)
+    except ApiError as e:
+        if re.search(r"unreadable|unable to read|image provider", str(e.message if hasattr(e, "message") else e), re.I):
+            raise ApiError(400, "Couldn't read that screenshot. Open Settings → AI recipe import, paste your OpenAI key "
+                                "again and tap Save, then try once more.")
+        raise
     return _imported(slug)
+
+
+# ============================================================ plain-text ingredient parsing (scales without Mealie's parser)
+
+_UFRAC = {"½": "1/2", "⅓": "1/3", "⅔": "2/3", "¼": "1/4", "¾": "3/4", "⅕": "1/5", "⅖": "2/5", "⅗": "3/5", "⅘": "4/5",
+          "⅙": "1/6", "⅚": "5/6", "⅛": "1/8", "⅜": "3/8", "⅝": "5/8", "⅞": "7/8"}
+_UNITS = {}
+for _sing, _plur, _aliases in [
+    ("cup", "cups", "c cup cups"), ("tbsp", "tbsp", "tbsp tbsps tbs tbl tablespoon tablespoons T"),
+    ("tsp", "tsp", "tsp tsps teaspoon teaspoons t"), ("oz", "oz", "oz ounce ounces"), ("fl oz", "fl oz", "floz"),
+    ("lb", "lb", "lb lbs pound pounds"), ("g", "g", "g gram grams gr"), ("kg", "kg", "kg kilogram kilograms"),
+    ("ml", "ml", "ml milliliter milliliters millilitre millilitres"), ("l", "l", "l liter liters litre litres"),
+    ("pinch", "pinches", "pinch pinches"), ("dash", "dashes", "dash dashes"), ("clove", "cloves", "clove cloves"),
+    ("can", "cans", "can cans"), ("package", "packages", "package packages pkg pkgs"), ("stick", "sticks", "stick sticks"),
+    ("slice", "slices", "slice slices"), ("quart", "quarts", "quart quarts qt qts"), ("pint", "pints", "pint pints pt"),
+    ("gallon", "gallons", "gallon gallons gal"), ("bunch", "bunches", "bunch bunches"), ("sprig", "sprigs", "sprig sprigs"),
+    ("head", "heads", "head heads"), ("jar", "jars", "jar jars"), ("bag", "bags", "bag bags"), ("box", "boxes", "box boxes"),
+    ("handful", "handfuls", "handful handfuls"), ("piece", "pieces", "piece pieces pc pcs"), ("stalk", "stalks", "stalk stalks"),
+]:
+    for _a in _aliases.split():
+        _UNITS[_a if _a in ("T", "t") else _a.lower()] = (_sing, _plur)
+_QTY = r"(\d+\s+\d+/\d+|\d+/\d+|\d+(?:\.\d+)?)"
+_ING_RE = re.compile(rf"^\s*{_QTY}(?:\s*(?:-|–|to)\s*{_QTY})?\s*(?:\(([^)]*)\)\s*)?([A-Za-z]+\.?)?\s*(?:of\s+)?(.*)$")
+_DESCRIPTORS = re.compile(r"\b(large|small|medium|fresh|freshly|chopped|minced|diced|sliced|grated|shredded|ground|finely|roughly|"
+                          r"thinly|peeled|softened|melted|room temperature|packed|heaping|level|boneless|skinless|optional)\b", re.I)
+
+
+def _qty_val(s):
+    s = s.strip()
+    if " " in s:
+        a, b = s.split(None, 1)
+        return float(a) + _qty_val(b)
+    if "/" in s:
+        n, d = s.split("/")
+        return float(n) / float(d)  # ZeroDivisionError on "1/0" is caught by the caller
+    return float(s)
+
+
+def parse_ing_text(text):
+    """'1 ½ cups heavy cream, divided' -> {quantity:1.5, unit:'cup', unit_plural:'cups', food:'heavy cream', note:'divided'}."""
+    t = (text or "").strip()
+    for k, v in _UFRAC.items():
+        t = re.sub(rf"(\d)\s*{k}", rf"\1 {v}", t).replace(k, v)
+    m = _ING_RE.match(t)
+    if not m:
+        return None
+    try:
+        q = _qty_val(m.group(1))
+    except (ValueError, ZeroDivisionError):
+        return None
+    if not q or q <= 0:
+        return None
+    paren, word, rest = m.group(3), m.group(4) or "", (m.group(5) or "").strip()
+    unit = _UNITS.get(word.rstrip(".") if word.rstrip(".") in ("T", "t") else word.rstrip(".").lower())
+    if not unit:
+        rest = (word + " " + rest).strip() if word else rest
+    if paren and not unit:
+        rest = f"({paren}) {rest}".strip()
+    food, _, note = rest.partition(",")
+    food = food.strip(" -")
+    if not food:
+        return None
+    return {"quantity": q, "unit": unit[0] if unit else "", "unit_plural": unit[1] if unit else "",
+            "food": food, "note": note.strip(), "size": (paren or "") if unit else ""}
+
+
+def clean_food(name):
+    n = re.sub(r"\([^)]*\)", " ", name or "")
+    n = _DESCRIPTORS.sub(" ", n)
+    n = re.split(r"\bor\b|,|;", n)[0]
+    return re.sub(r"\s+", " ", n).strip(" -.") or (name or "").strip()
+
+
+# ============================================================ in-app recipe editing (saves to Mealie)
+
+def recipe_update(slug, b):
+    r = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+    if "name" in b:
+        name = (b.get("name") or "").strip()
+        if not name:
+            raise ApiError(400, "Give the recipe a name.")
+        r["name"] = name[:200]
+    if "description" in b:
+        r["description"] = (b.get("description") or "").strip()[:2000]
+    if b.get("servings") not in (None, ""):
+        r["recipeServings"] = max(0.0, float(b["servings"]))
+    for key, field in (("prep_minutes", "prepTime"), ("cook_minutes", "performTime"), ("total_minutes", "totalTime")):
+        if key in b:
+            v = int(float(b.get(key) or 0))
+            r[field] = f"{v} minutes" if v else None
+            r[field + "Seconds"] = v * 60 if v else None
+    if isinstance(b.get("ingredients"), list):
+        old = {}
+        for ing in r.get("recipeIngredient") or []:
+            for k in ("display", "originalText", "note"):
+                if ing.get(k):
+                    old.setdefault(ing[k].strip(), ing)
+        new, section = [], None
+        for line in b["ingredients"]:
+            line = str(line).strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                section = line.lstrip("# ").strip() or None
+                continue
+            ing = dict(old.get(line) or {"quantity": 0, "unit": None, "food": None, "note": line, "display": line,
+                                         "originalText": line, "referenceId": str(uuid.uuid4())})
+            ing["title"] = section
+            section = None
+            new.append(ing)
+        r["recipeIngredient"] = new
+    if isinstance(b.get("steps"), list):
+        old_steps = r.get("recipeInstructions") or []
+        steps = []
+        for j, text in enumerate(t for t in (str(x).strip() for x in b["steps"]) if t):
+            st = dict(old_steps[j]) if j < len(old_steps) else {"id": str(uuid.uuid4()), "title": "", "summary": "", "ingredientReferences": []}
+            if st.get("text", "").strip() != text:
+                st["ingredientReferences"] = []
+            st["text"] = text
+            steps.append(st)
+        r["recipeInstructions"] = steps
+    out = mealie("PUT", f"/api/recipes/{urllib.parse.quote(slug)}", r)
+    _recipe_cache["at"] = 0
+    with db() as c:
+        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (r.get("id"),))
+    return {"slug": out.get("slug") or slug}
+
+
+def recipe_delete(slug):
+    mealie("DELETE", f"/api/recipes/{urllib.parse.quote(slug)}")
+    _recipe_cache["at"] = 0
+    return {"ok": True}
+
+
+# ============================================================ screenshot import: TablePlan reads the image itself
+
+TRANSCRIBE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["contains_recipe", "transcription"],
+                     "properties": {"contains_recipe": {"type": "boolean"}, "transcription": {"type": "string"}}}
+VISION_MODELS = re.compile(r"^(gpt-4o|gpt-4\.1|gpt-5|o[34]|chatgpt-4o)", re.I)
+
+
+def transcribe_images(images, text=None):
+    content = [{"type": "text", "text": "These images show one recipe (screenshots, a recipe card or a cookbook page). "
+                "Transcribe it faithfully as plain text: title, servings, times, every ingredient line with exact amounts "
+                "(one per line, keep section headings), then every instruction step in order. Ignore UI chrome, comments and ads. "
+                "Do not invent anything." + (f"\n\nExtra notes from the user: {text}" if text else "")}]
+    for im in images:
+        data = im.get("data") or ""
+        if not data.startswith("data:image/"):
+            data = "data:image/jpeg;base64," + data.split(",", 1)[-1]
+        content.append({"type": "image_url", "image_url": {"url": data, "detail": "high"}})
+    out = openai_chat([{"role": "user", "content": content}], "recipe_transcription", TRANSCRIBE_SCHEMA,
+                      "screenshot import", f"{len(images)} image{'s' if len(images) != 1 else ''}")
+    if not out.get("contains_recipe") or not (out.get("transcription") or "").strip():
+        raise ApiError(422, "No recipe found in that image. Try a clearer screenshot that shows the ingredients and steps.")
+    return out["transcription"].strip()
+
+
+def ensure_image_provider():
+    """Older setups could leave Mealie's image-reading slot empty, which breaks screenshot import."""
+    try:
+        st = mealie("GET", "/api/groups/ai-providers/settings")
+    except ApiError:
+        return
+    if st.get("defaultProviderId") and not st.get("imageProviderId"):
+        try:
+            mealie("PUT", "/api/groups/ai-providers/settings", {"defaultProviderId": st["defaultProviderId"],
+                   "imageProviderId": st["defaultProviderId"], "audioProviderId": st.get("audioProviderId")})
+        except ApiError:
+            pass
 
 
 def _imported(slug):
@@ -1828,6 +2070,571 @@ def _imported(slug):
         return {"slug": slug, "name": slug.replace("-", " ").title(), "link": recipe_link(slug)}
 
 
+# ============================================================ recipes (detail, favorites, scaling data)
+
+def recipe_minutes(r):
+    for k in ("totalTimeSeconds",):
+        if r.get(k):
+            return round(int(r[k]) / 60)
+    sec = sum(int(r.get(k) or 0) for k in ("prepTimeSeconds", "performTimeSeconds"))
+    if sec:
+        return round(sec / 60)
+    m = re.search(r"(\d+)\s*(h|hour)", str(r.get("totalTime") or ""), re.I)
+    mins = int(m.group(1)) * 60 if m else 0
+    m = re.search(r"(\d+)\s*(m|min)", str(r.get("totalTime") or ""), re.I)
+    return mins + (int(m.group(1)) if m else 0) or None
+
+
+def mealie_user_id():
+    uid = cfg("mealie_user_id")
+    if not uid:
+        uid = mealie("GET", "/api/users/self")["id"]
+        set_cfg(mealie_user_id=uid)
+    return uid
+
+
+def favorite_ids():
+    try:
+        res = mealie("GET", f"/api/users/{mealie_user_id()}/favorites")
+        return {r.get("recipeId") for r in res.get("ratings") or [] if r.get("isFavorite")}
+    except ApiError:
+        return set()
+
+
+def set_favorite(slug, on):
+    mealie("POST" if on else "DELETE", f"/api/users/{mealie_user_id()}/favorites/{urllib.parse.quote(slug)}")
+    _recipe_cache["at"] = 0
+    return {"favorite": bool(on)}
+
+
+FOOD_EMOJI = [
+    ("egg", "🥚"), ("milk", "🥛"), ("cream", "🥛"), ("butter", "🧈"), ("cheese", "🧀"), ("parmesan", "🧀"), ("yogurt", "🥛"),
+    ("chicken", "🍗"), ("turkey", "🦃"), ("beef", "🥩"), ("steak", "🥩"), ("pork", "🥓"), ("bacon", "🥓"), ("sausage", "🌭"),
+    ("ham", "🍖"), ("salmon", "🐟"), ("fish", "🐟"), ("tuna", "🐟"), ("shrimp", "🦐"), ("crab", "🦀"),
+    ("tomato", "🍅"), ("potato", "🥔"), ("onion", "🧅"), ("garlic", "🧄"), ("carrot", "🥕"), ("pepper", "🫑"), ("chili", "🌶️"),
+    ("jalapeno", "🌶️"), ("broccoli", "🥦"), ("lettuce", "🥬"), ("spinach", "🥬"), ("kale", "🥬"), ("cabbage", "🥬"),
+    ("cucumber", "🥒"), ("zucchini", "🥒"), ("corn", "🌽"), ("mushroom", "🍄"), ("avocado", "🥑"), ("eggplant", "🍆"),
+    ("bean", "🫘"), ("pea", "🫛"), ("lemon", "🍋"), ("lime", "🍋"), ("orange", "🍊"), ("apple", "🍎"), ("banana", "🍌"),
+    ("berry", "🫐"), ("blueberr", "🫐"), ("strawberr", "🍓"), ("cherry", "🍒"), ("grape", "🍇"), ("peach", "🍑"), ("mango", "🥭"),
+    ("pineapple", "🍍"), ("coconut", "🥥"), ("rice", "🍚"), ("pasta", "🍝"), ("spaghetti", "🍝"), ("noodle", "🍜"),
+    ("fettuccine", "🍝"), ("penne", "🍝"), ("linguine", "🍝"), ("macaroni", "🍝"), ("bread", "🍞"), ("tortilla", "🫓"), ("flour", "🌾"), ("oat", "🌾"), ("sugar", "🍬"), ("honey", "🍯"), ("syrup", "🍯"),
+    ("chocolate", "🍫"), ("cocoa", "🍫"), ("oil", "🫒"), ("olive", "🫒"), ("vinegar", "🍶"), ("salt", "🧂"), ("broth", "🍲"),
+    ("stock", "🍲"), ("wine", "🍷"), ("beer", "🍺"), ("water", "💧"), ("ice", "🧊"), ("herb", "🌿"), ("basil", "🌿"),
+    ("parsley", "🌿"), ("cilantro", "🌿"), ("oregano", "🌿"), ("thyme", "🌿"), ("rosemary", "🌿"), ("mint", "🌿"),
+    ("ginger", "🫚"), ("cinnamon", "🟤"), ("nut", "🥜"), ("peanut", "🥜"), ("almond", "🥜"), ("tofu", "🧊"), ("sauce", "🥫"),
+    ("paste", "🥫"), ("can", "🥫"),
+]
+
+
+# Checked before FOOD_EMOJI: seasonings and names that a plain keyword would mis-match (black pepper -> bell pepper,
+# eggplant -> egg, peach/peanut -> pea, nutmeg -> nut).
+_EMOJI_FIRST = [
+    (r"\bsalt\b", "🧂"), (r"\b(black|white|ground|cracked)\s+pepper|peppercorn|\bpepper\b.*\bto taste\b", "🧂"),
+    (r"\b(red pepper flakes|crushed red pepper|cayenne|chipotle|chile|chili)", "🌶️"), (r"\beggplant", "🍆"),
+    (r"\bpeanut", "🥜"), (r"\bpeach", "🍑"), (r"\bpear\b|\bpears\b", "🍐"), (r"\bnutmeg", "🟤"),
+    (r"\bcream cheese", "🧀"), (r"\bcornstarch|\bcorn starch", "🌾"), (r"\b(broth|stock)\b", "🍲"),
+]
+
+
+def food_emoji(name):
+    n = (name or "").lower()
+    for pat, e in _EMOJI_FIRST:
+        if re.search(pat, n):
+            return e
+    for k, e in FOOD_EMOJI:
+        # match at a word start so "juice"/"spice" don't hit "ice" and "pecan" doesn't hit "can"
+        if re.search(r"\b" + re.escape(k), n):
+            return e
+    return "🥄"
+
+
+def _num(v):
+    try:
+        f = float(v)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def recipe_detail(slug):
+    r = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+    with db() as c:
+        pantry = {}
+        for it in list_pantry(c):
+            pantry.setdefault(food_key(it["name"]), it)
+    ings, ref_index = [], {}
+    for i, ing in enumerate(r.get("recipeIngredient") or []):
+        food = ing.get("food") or {}
+        unit = ing.get("unit") or {}
+        fname = food.get("name") or ""
+        parsed = bool(food or unit) and _num(ing.get("quantity")) is not None
+        local = None
+        if not parsed:
+            local = parse_ing_text(ing.get("note") or ing.get("display") or ing.get("originalText") or "")
+            if local:
+                fname = local["food"]
+        pantry_hit = (pantry.get(food_key(fname)) or pantry.get(food_key(clean_food(fname)))) if fname else None
+        if ing.get("referenceId"):
+            ref_index[ing["referenceId"]] = i
+        if local:
+            ings.append({"i": i, "section": ing.get("title") or "", "quantity": local["quantity"], "parsed": True, "local": True,
+                         "unit": local["unit"], "unit_plural": local["unit_plural"], "food": local["food"], "food_plural": "",
+                         "note": local["note"], "size": local["size"],
+                         "display": (ing.get("display") or ing.get("note") or "").strip(),
+                         "raw": (ing.get("originalText") or ing.get("display") or ing.get("note") or "").strip(),
+                         "emoji": food_emoji(local["food"]), "img": f"/img/ing?name={urllib.parse.quote(clean_food(local['food']))}",
+                         "pantry": {"days_left": pantry_hit["days_left"], "location": pantry_hit["location"]} if pantry_hit else None})
+            continue
+        ings.append({
+            "i": i, "section": ing.get("title") or "",
+            "quantity": _num(ing.get("quantity")), "parsed": parsed,
+            "unit": unit.get("abbreviation") if unit.get("useAbbreviation") and unit.get("abbreviation") else unit.get("name") or "",
+            "unit_plural": unit.get("pluralAbbreviation") if unit.get("useAbbreviation") and unit.get("pluralAbbreviation")
+            else unit.get("pluralName") or "",
+            "food": fname, "food_plural": food.get("pluralName") or "",
+            "note": ing.get("note") or "", "display": (ing.get("display") or ing.get("originalText") or ing.get("note") or "").strip(),
+            "emoji": food_emoji(fname or ing.get("note") or ing.get("display")),
+            "img": f"/img/ing?name={urllib.parse.quote(clean_food(fname))}" if fname else None,
+            "raw": (ing.get("originalText") or ing.get("display") or ing.get("note") or "").strip(),
+            "pantry": {"days_left": pantry_hit["days_left"], "location": pantry_hit["location"]} if pantry_hit else None,
+        })
+    steps = []
+    for j, st in enumerate(r.get("recipeInstructions") or []):
+        refs = [ref_index[x["referenceId"]] for x in st.get("ingredientReferences") or [] if x.get("referenceId") in ref_index]
+        steps.append({"i": j, "title": st.get("title") or "", "text": (st.get("text") or "").strip(),
+                      "refs": refs, "duration_sec": st.get("durationSeconds")})
+    minutes = recipe_minutes(r)
+    n = len(ings)
+    difficulty = "Easy" if (minutes or 30) <= 30 and n <= 8 else "Hard" if (minutes or 0) > 90 or n > 15 else "Medium"
+    return {
+        "id": r["id"], "slug": r.get("slug"), "name": r.get("name"), "description": r.get("description") or "",
+        "has_image": bool(r.get("image")), "image_v": r.get("image") or "",
+        "servings": _num(r.get("recipeServings")) or _num(r.get("recipeYieldQuantity")) or 0,
+        "yield": r.get("recipeYield") or "", "minutes": minutes,
+        "prep_minutes": round(int(r.get("prepTimeSeconds") or 0) / 60) or None,
+        "cook_minutes": round(int(r.get("performTimeSeconds") or 0) / 60) or None,
+        "difficulty": difficulty, "rating": r.get("rating") or 0, "favorite": r["id"] in favorite_ids(),
+        "tags": [t.get("name") for t in r.get("tags") or []],
+        "categories": [t.get("name") for t in r.get("recipeCategory") or []],
+        "ingredients": ings, "steps": steps, "source_url": r.get("orgURL") or "",
+        "link": recipe_link(r.get("slug")), "updated": r.get("dateUpdated") or r.get("updatedAt") or "",
+        "unparsed": 0, "total_minutes": round(int(r.get("totalTimeSeconds") or 0) / 60) or None,
+    }
+
+
+def add_items_to_list(texts, list_id=None):
+    list_id = ensure_list(list_id)
+    mealie("POST", "/api/households/shopping/items/create-bulk",
+           [{"shoppingListId": list_id, "note": t, "quantity": 1, "isFood": False} for t in texts if t])
+    return {"list_id": list_id, "added": len([t for t in texts if t])}
+
+
+# ============================================================ guided "step-by-step" recipes
+
+DUR_RE = re.compile(r"(\d+(?:\.\d+)?)(?:\s*(?:-|–|to)\s*(\d+(?:\.\d+)?))?\s*(hours?|hrs?|h\b|minutes?|mins?|m\b|seconds?|secs?)", re.I)
+TEMP_RE = re.compile(r"(\d{3})\s*°?\s*(F|C)?\b", re.I)
+HEAT_RE = re.compile(r"\b((?:medium[- ])?(?:low|medium|high)(?:[- ]high|[- ]low)?)\s+heat\b", re.I)
+STOVE_TIPS = {
+    "gas": "Gas responds instantly. Adjust the flame and you'll see the change right away.",
+    "electric": "Electric coils are slow. Give the burner 2–3 minutes to heat, and slide the pan off the burner to cool it quickly.",
+    "induction": "Induction heats fast. Start one notch lower than the recipe says, and use a magnetic (cast iron or steel) pan.",
+}
+
+
+def _guided_profile():
+    st = get_settings()
+    return f"{st.get('stove')}|{st.get('oven')}|{st.get('temp_unit')}"
+
+
+def guided_auto(rec):
+    st = get_settings()
+    stove, oven, unit = st.get("stove"), st.get("oven"), st.get("temp_unit") or "F"
+    used, steps = set(), []
+    tokens_of = {x["i"]: set(tokens(x["food"])) for x in rec["ingredients"] if x["food"]}
+    for s0 in rec["steps"]:
+        text = s0["text"]
+        refs = [i for i in s0["refs"] if i not in used]
+        if not s0["refs"]:
+            ttoks = set(tokens(text))
+            refs = [i for i, tk in tokens_of.items() if tk and tk <= ttoks and i not in used]
+        used.update(refs)
+        timer, label = s0.get("duration_sec"), None
+        if not timer:
+            m = None
+            for m in DUR_RE.finditer(text):
+                pass
+            if m:
+                lo, hi, u = float(m.group(1)), m.group(2), m.group(3).lower()
+                mult = 3600 if u.startswith("h") else 1 if u.startswith("s") else 60
+                timer = int(lo * mult)
+                label = f"Check at {m.group(1)}" + (f"–{hi}" if hi else "") + (" h" if mult == 3600 else " sec" if mult == 1 else " min")
+        heat = HEAT_RE.search(text)
+        temp = None
+        tm = TEMP_RE.search(text)
+        if tm and re.search(r"oven|bake|roast|preheat|°", text, re.I):
+            t, u = int(tm.group(1)), (tm.group(2) or "F").upper()
+            if u != unit:
+                t = round((t - 32) * 5 / 9 / 5) * 5 if unit == "C" else round((t * 9 / 5 + 32) / 5) * 5
+            if oven == "convection" and re.search(r"bake|roast|oven", text, re.I):
+                t -= 25 if unit == "F" else 15
+            temp = f"{t}°{unit}"
+        steps.append({"title": s0["title"] or "", "text": text, "ingredients": [{"i": i, "portion": 1} for i in refs],
+                      "timer_sec": timer, "timer_label": label or (f"{round(timer / 60)} min" if timer else None),
+                      "heat": heat.group(1).lower() if heat else None, "temperature": temp,
+                      "tip": STOVE_TIPS.get(stove) if heat else None})
+    leftovers = [x["i"] for x in rec["ingredients"] if x["i"] not in used and (x["food"] or x["display"])]
+    out = []
+    oven_steps = [s for s in steps if s["temperature"]]
+    if oven_steps and not re.search(r"preheat", steps[0]["text"] if steps else "", re.I):
+        t = oven_steps[0]["temperature"]
+        out.append({"title": "Preheat", "text": f"Preheat the oven to {t}" + (" (convection, already lowered 25°F)" if oven == "convection" and unit == "F" else "")
+                    + ". It takes about 10–15 minutes, so keep going with the next steps while it heats.",
+                    "ingredients": [], "timer_sec": 600, "timer_label": "Oven preheating", "heat": None, "temperature": t, "tip": None})
+    if leftovers:
+        out.append({"title": "Get ready", "text": "Measure out and prep these before you start cooking.",
+                    "ingredients": [{"i": i, "portion": 1} for i in leftovers], "timer_sec": None, "timer_label": None,
+                    "heat": None, "temperature": None, "tip": None})
+    return {"source": "auto", "steps": out + steps, "tips": []}
+
+
+GUIDE_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["steps", "tips"],
+    "properties": {
+        "tips": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["title", "text", "ingredients", "timer_minutes", "timer_label", "heat", "temperature"],
+            "properties": {
+                "title": {"type": "string"}, "text": {"type": "string"},
+                "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                "required": ["index", "portion"],
+                                "properties": {"index": {"type": "integer"}, "portion": {"type": "number"}}}},
+                "timer_minutes": {"type": ["number", "null"]}, "timer_label": {"type": ["string", "null"]},
+                "heat": {"type": ["string", "null"]}, "temperature": {"type": ["string", "null"]}}}}}}
+
+
+AI_PRICES = {   # USD per 1M tokens (input, output). Published OpenAI list prices, Nov 2026; edit if they change.
+    "gpt-5": (1.25, 10.00), "gpt-5-mini": (0.25, 2.00), "gpt-5-nano": (0.05, 0.40),
+    "gpt-4.1": (2.00, 8.00), "gpt-4.1-mini": (0.40, 1.60), "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00),
+}
+
+
+def ai_cost(model, tin, tout):
+    key = next((k for k in sorted(AI_PRICES, key=len, reverse=True) if (model or "").startswith(k)), None)
+    if not key:
+        return None
+    pin, pout = AI_PRICES[key]
+    return round((tin or 0) / 1e6 * pin + (tout or 0) / 1e6 * pout, 6)
+
+
+def log_ai(feature, model, tin=None, tout=None, detail=""):
+    cost = ai_cost(model, tin, tout) if tin is not None else None
+    with db() as c:
+        c.execute("INSERT INTO ai_usage(at, feature, model, input_tokens, output_tokens, cost_usd, detail) VALUES (?,?,?,?,?,?,?)",
+                  (datetime.now().isoformat(timespec="seconds"), feature, model, tin, tout, cost, detail[:120]))
+    return cost
+
+
+def openai_chat(messages, schema_name, schema, feature, detail=""):
+    key, model = cfg("openai_key"), cfg("openai_model") or "gpt-5-mini"
+    if not key:
+        raise ApiError(400, "Add your OpenAI key in Settings → AI recipe import to use AI step-by-step.")
+    res = _https_json("https://api.openai.com/v1/chat/completions", payload={
+        "model": model, "messages": messages,
+        "response_format": {"type": "json_schema", "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
+    }, headers={"Authorization": f"Bearer {key}"}, timeout=120)
+    u = res.get("usage") or {}
+    log_ai(feature, res.get("model") or model, u.get("prompt_tokens"), u.get("completion_tokens"), detail)
+    content = (((res.get("choices") or [{}])[0].get("message") or {}).get("content")) or "{}"
+    return json.loads(content)
+
+
+def guided_ai(rec):
+    st = get_settings()
+    ing_lines = "\n".join(f"[{x['i']}] {x['display'] or x['food']}" + (f"  (section: {x['section']})" if x["section"] else "")
+                          for x in rec["ingredients"])
+    step_lines = "\n".join(f"{n + 1}. {s0['text']}" for n, s0 in enumerate(rec["steps"]))
+    sys_prompt = (
+        "You rewrite home recipes into a perfect order of operations a nervous home cook can follow without reading ahead. "
+        "Rules: keep every original ingredient and amount, never invent ingredients. Each step lists exactly which ingredients it uses "
+        "by their [index]; if an ingredient is split across steps, give the fraction used as portion (e.g. 0.5), otherwise 1. "
+        "Put preheating (oven, pans, water to boil) at the moment it must start so it's ready in time. "
+        f"The cook has a {st.get('stove')} stovetop and a {st.get('oven')} oven"
+        + (" (lower convection temperatures by 25°F / 15°C and say so)" if st.get("oven") == "convection" else "")
+        + f". Give temperatures in °{st.get('temp_unit') or 'F'}. Translate heat levels to that stove, with a short practical cue "
+        "(e.g. 'gas: flame just touching the pan'). For every step that involves waiting (simmer, bake, rest, marinate, boil), "
+        "set timer_minutes and a short timer_label such as 'Simmer sauce'. If something useful can be done while waiting, say so in the text. "
+        "Steps are short and imperative, one action each. tips: up to 3 short tips specific to this recipe.")
+    data = openai_chat([
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": f"Recipe: {rec['name']} (serves {rec['servings'] or '?'})\n\nIngredients:\n{ing_lines}\n\nOriginal steps:\n{step_lines}"},
+    ], "guided_recipe", GUIDE_SCHEMA, "step-by-step", rec["name"])
+    valid = {x["i"] for x in rec["ingredients"]}
+    steps = []
+    for s0 in data.get("steps") or []:
+        tm = s0.get("timer_minutes")
+        steps.append({"title": s0.get("title") or "", "text": s0.get("text") or "",
+                      "ingredients": [{"i": x["index"], "portion": max(0.05, min(1.0, float(x.get("portion") or 1)))}
+                                      for x in s0.get("ingredients") or [] if x.get("index") in valid],
+                      "timer_sec": int(tm * 60) if tm else None, "timer_label": s0.get("timer_label"),
+                      "heat": s0.get("heat"), "temperature": s0.get("temperature"), "tip": None})
+    if not steps:
+        raise ApiError(502, "The AI didn't return any steps. Try again.")
+    return {"source": "ai", "steps": steps, "tips": (data.get("tips") or [])[:3]}
+
+
+def guided(slug, use_ai=False, refresh=False):
+    rec = recipe_detail(slug)
+    profile = _guided_profile() + ("|ai" if use_ai else "|auto")
+    if not refresh:
+        with db() as c:
+            row = c.execute("SELECT * FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], profile)).fetchone()
+        if row and row["updated"] == rec["updated"]:
+            return {**json.loads(row["data"]), "cached": True}
+    data = guided_ai(rec) if use_ai else guided_auto(rec)
+    with db() as c:
+        c.execute("INSERT INTO guided_cache(recipe_id, profile, updated, source, data, created_at) VALUES (?,?,?,?,?,?) "
+                  "ON CONFLICT(recipe_id, profile) DO UPDATE SET updated=excluded.updated, source=excluded.source, data=excluded.data, created_at=excluded.created_at",
+                  (rec["id"], profile, rec["updated"], data["source"], json.dumps(data), datetime.now().isoformat(timespec="seconds")))
+    has_ai = False
+    if not use_ai:
+        with db() as c:
+            has_ai = bool(c.execute("SELECT 1 FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], _guided_profile() + "|ai")).fetchone())
+    return {**data, "cached": False, "ai_available": has_ai}
+
+
+# ============================================================ AI spending
+
+_costs_cache = {"at": 0, "data": None}
+
+
+def openai_costs(force=False):
+    """Exact spend from OpenAI's Costs API (needs an Admin key)."""
+    key = cfg("openai_admin_key")
+    if not key:
+        return None
+    if not force and time.time() - _costs_cache["at"] < 1800 and _costs_cache["data"]:
+        return _costs_cache["data"]
+    start = datetime(today().year, today().month, 1)
+    res = _https_json("https://api.openai.com/v1/organization/costs?" + urllib.parse.urlencode(
+        {"start_time": int(start.timestamp()), "bucket_width": "1d", "limit": 31}), headers={"Authorization": f"Bearer {key}"})
+    days = []
+    for b in res.get("data") or []:
+        amt = sum(float((x.get("amount") or {}).get("value") or 0) for x in b.get("results") or [])
+        days.append({"date": datetime.fromtimestamp(b["start_time"]).date().isoformat(), "usd": round(amt, 4)})
+    data = {"total": round(sum(d["usd"] for d in days), 4), "days": days, "currency": "usd"}
+    _costs_cache.update(at=time.time(), data=data)
+    return data
+
+
+def ai_spending():
+    month = today().strftime("%Y-%m")
+    with db() as c:
+        rows = c.execute("SELECT feature, COUNT(*) n, SUM(COALESCE(cost_usd,0)) usd, SUM(COALESCE(input_tokens,0)) tin, "
+                         "SUM(COALESCE(output_tokens,0)) tout FROM ai_usage WHERE substr(at,1,7)=? GROUP BY feature", (month,)).fetchall()
+        recent = [dict(r) for r in c.execute("SELECT at, feature, model, input_tokens, output_tokens, cost_usd, detail FROM ai_usage "
+                                              "ORDER BY id DESC LIMIT 25")]
+        daily = [dict(r) for r in c.execute("SELECT substr(at,1,10) date, SUM(COALESCE(cost_usd,0)) usd FROM ai_usage "
+                                             "WHERE substr(at,1,7)=? GROUP BY date ORDER BY date", (month,))]
+    exact, exact_error = None, None
+    try:
+        exact = openai_costs()
+    except ApiError as e:
+        exact_error = e.message
+    est = round(sum(r["usd"] for r in rows), 4)
+    return {"month": month, "estimate_usd": est, "by_feature": [dict(r) for r in rows], "daily": daily, "recent": recent,
+            "exact": exact, "exact_error": exact_error, "has_admin_key": bool(cfg("openai_admin_key")),
+            "has_key": bool(cfg("openai_key")), "model": cfg("openai_model"), "budget": float(get_settings().get("ai_budget") or 0),
+            "prices": {k: {"input": v[0], "output": v[1]} for k, v in AI_PRICES.items()}}
+
+
+# ============================================================ barcode lookup & pantry check-ins
+
+def upc_lookup(code):
+    with db() as c:
+        row = c.execute("SELECT data FROM upc_cache WHERE code=?", (code,)).fetchone()
+    if row:
+        return json.loads(row["data"])
+    try:
+        res = _https_json(f"https://world.openfoodfacts.org/api/v2/product/{code}.json?" + urllib.parse.urlencode(
+            {"fields": "product_name,product_name_en,generic_name,brands,quantity,categories_tags"}), timeout=12)
+    except ApiError as e:
+        raise ApiError(502, f"Couldn't look up that barcode ({e.message}). You can type the item instead.")
+    p = res.get("product") or {}
+    name = (p.get("product_name_en") or p.get("product_name") or p.get("generic_name") or "").strip()
+    found = bool(res.get("status") == 1 and name)
+    cats = [c.split(":", 1)[-1].replace("-", " ") for c in (p.get("categories_tags") or []) if c.startswith("en:")]
+    data = {"code": code, "found": found, "name": name, "brand": (p.get("brands") or "").split(",")[0].strip(),
+            "quantity": p.get("quantity") or "", "categories": cats[-4:], "source": "Open Food Facts"}
+    if found:
+        with db() as c:
+            rule = match_rule(c, name) or next((match_rule(c, cat) for cat in reversed(cats) if match_rule(c, cat)), None)
+        data["rule"] = {"id": rule["id"], "name": rule["name"], "location": rule["default_location"]} if rule else None
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO upc_cache(code, data, at) VALUES (?,?,?)", (code, json.dumps(data), iso(today())))
+    return data
+
+
+def pantry_checkin_status():
+    days = int(get_settings().get("pantry_check_days") or 0)
+    last = parse_date(get_internal("pantry_checked_at"))
+    if not last:
+        with db() as c:
+            first = c.execute("SELECT MIN(created_at) FROM pantry_items").fetchone()[0]
+        last = parse_date(first) if first else None
+    due = bool(days and last and (today() - last).days >= days)
+    return {"interval_days": days, "last": iso(last) if last else None, "due": due,
+            "days_since": (today() - last).days if last else None}
+
+
+# ============================================================ images (ingredients & recipes)
+
+IMG_DIR = os.path.join(DATA_DIR, "images")
+MAX_IMG = 8_000_000
+
+
+def _public_host(url):
+    host = urllib.parse.urlparse(url).hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    return True
+
+
+def _fetch_image(url):
+    if not url.startswith("https://") or not _public_host(url):
+        raise ValueError("refusing non-public or non-https image URL")
+    req = urllib.request.Request(url, headers={"User-Agent": f"TablePlan/{APP_VERSION} (+https://github.com/thomasjvalenzuela/tableplan)"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].lower()
+        if not ctype.startswith("image/"):
+            raise ValueError("not an image")
+        data = r.read(MAX_IMG + 1)
+    if len(data) > MAX_IMG:
+        raise ValueError("image too large")
+    return data, ctype
+
+
+def _ext(ctype):
+    return {"image/png": "png", "image/webp": "webp", "image/gif": "gif"}.get(ctype, "jpg")
+
+
+def openverse_candidates(q, n=20):
+    res = _https_json("https://api.openverse.org/v1/images/?" + urllib.parse.urlencode(
+        {"q": q, "page_size": n, "mature": "false", "category": "photograph"}), timeout=15)
+    out = []
+    for x in res.get("results") or []:
+        url = x.get("url") or x.get("thumbnail")
+        if url:
+            credit = f"“{x.get('title') or 'Photo'}” by {x.get('creator') or 'unknown'} ({(x.get('license') or '').upper()} {x.get('license_version') or ''})".strip()
+            out.append((url, credit))
+    return out
+
+
+def ingredient_candidates(name):
+    words = [w for w in re.findall(r"[A-Za-z]+", name)]
+    variants = []
+    for v in (" ".join(words), " ".join(singular(w.lower()) for w in words), words[-1] if words else "", singular(words[-1].lower()) if words else ""):
+        v = v.strip().title()
+        if v and v not in variants:
+            variants.append(v)
+    cands = [(f"https://www.themealdb.com/images/ingredients/{urllib.parse.quote(v)}-Small.png", "TheMealDB") for v in variants]
+    return cands
+
+
+def _pick_row(kind, key):
+    with db() as c:
+        return c.execute("SELECT * FROM image_picks WHERE kind=? AND key=?", (kind, key)).fetchone()
+
+
+def _save_pick(kind, key, idx, blob=None, ctype="image/jpeg", credit="", missing=0):
+    os.makedirs(IMG_DIR, exist_ok=True)
+    fname = None
+    if blob:
+        fname = f"{kind}-{hashlib.sha1(key.encode()).hexdigest()[:16]}.{_ext(ctype)}"
+        for old in os.listdir(IMG_DIR):
+            if old.startswith(fname.rsplit(".", 1)[0] + "."):
+                os.remove(os.path.join(IMG_DIR, old))
+        with open(os.path.join(IMG_DIR, fname), "wb") as f:
+            f.write(blob)
+    with db() as c:
+        c.execute("INSERT INTO image_picks(kind, key, idx, file, credit, missing, updated) VALUES (?,?,?,?,?,?,?) "
+                  "ON CONFLICT(kind, key) DO UPDATE SET idx=excluded.idx, file=excluded.file, credit=excluded.credit, "
+                  "missing=excluded.missing, updated=excluded.updated",
+                  (kind, key, idx, fname, credit, missing, datetime.now().isoformat(timespec="seconds")))
+    return fname
+
+
+def ingredient_image(name, advance=False):
+    """Return (path, credit) for an ingredient photo, fetching and caching it on first use."""
+    key = food_key(name) or name.lower().strip()
+    row = _pick_row("ing", key)
+    if row and not advance:
+        if row["file"] and os.path.exists(os.path.join(IMG_DIR, row["file"])):
+            return os.path.join(IMG_DIR, row["file"]), row["credit"]
+        if row["missing"]:
+            return None, None
+    start = (row["idx"] + 1) if (row and advance) else 0
+    cands = ingredient_candidates(name)
+    if advance or start >= len(cands):
+        try:
+            cands += openverse_candidates(f"{name} food ingredient", 12)
+        except ApiError:
+            pass
+    for idx in range(start, len(cands)):
+        url, credit = cands[idx]
+        try:
+            blob, ctype = _fetch_image(url)
+        except Exception:
+            continue
+        f = _save_pick("ing", key, idx, blob, ctype, credit)
+        return os.path.join(IMG_DIR, f), credit
+    if advance:
+        raise ApiError(404, "No more photos found for this ingredient. Upload your own instead.")
+    _save_pick("ing", key, 0, missing=1)
+    return None, None
+
+
+def recipe_image_next(slug):
+    rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+    row = _pick_row("recipe", rec["id"])
+    idx = (row["idx"] + 1) if row else 0
+    cands = openverse_candidates(f"{rec.get('name')} dish", 20)
+    for i in range(idx, len(cands)):
+        url, credit = cands[i]
+        try:
+            blob, ctype = _fetch_image(url)
+        except Exception:
+            continue
+        _upload_recipe_image(slug, blob, ctype)
+        _save_pick("recipe", rec["id"], i, None, ctype, credit)
+        return {"ok": True, "credit": credit}
+    _save_pick("recipe", rec["id"], -1)
+    raise ApiError(404, "No more photos found. Upload your own instead, or tap Try again to start over.")
+
+
+def _upload_recipe_image(slug, blob, ctype):
+    mealie("PUT", f"/api/recipes/{urllib.parse.quote(slug)}/image",
+           multipart=({"extension": _ext(ctype)}, [("image", f"image.{_ext(ctype)}", ctype, blob)]), timeout=60)
+    _recipe_cache["at"] = 0
+
+
+def decode_upload(data_url):
+    head, _, b64 = (data_url or "").partition(",")
+    m = re.match(r"data:(image/[a-z+.-]+);base64", head)
+    if not m:
+        raise ApiError(400, "Upload a JPG, PNG or WebP image.")
+    blob = base64.b64decode(b64)
+    if len(blob) > MAX_IMG:
+        raise ApiError(413, "That image is too large (8 MB max).")
+    return blob, m.group(1)
+
+
 # ============================================================ meal plan → shopping list
 
 def ensure_list(list_id=None):
@@ -1839,7 +2646,65 @@ def ensure_list(list_id=None):
     return mealie("POST", "/api/households/shopping/lists", {"name": "Groceries"})["id"]
 
 
-def plan_to_list(start, end, list_id=None, skip_pantry=True):
+STAPLES = {"salt", "pepper", "black pepper", "water", "oil", "olive oil", "vegetable oil", "butter", "sugar", "flour",
+           "garlic", "baking soda", "baking powder", "vanilla", "vanilla extract", "soy sauce", "vinegar"}
+
+
+def ing_food(ing):
+    """Food name for a Mealie ingredient, using the local parser when Mealie hasn't parsed it."""
+    fname = (ing.get("food") or {}).get("name") or ""
+    if fname:
+        return fname, None
+    p = parse_ing_text(ing.get("note") or ing.get("display") or ing.get("originalText") or "")
+    return (clean_food(p["food"]), p) if p else ("", None)
+
+
+def local_line(p, scale):
+    q = p["quantity"] * scale
+    unit = (p["unit_plural"] if q > 1 else p["unit"]) if p["unit"] else ""
+    size = f"({p['size']}) " if p.get("size") else ""
+    return " ".join(x for x in (nice_qty(q), size + unit if unit else size.strip(), p["food"]) if x) + (f", {p['note']}" if p["note"] else "")
+
+
+def plan_preview(start, end):
+    """Ingredients a plan needs, flagged with what the pantry says, so the user can confirm what they already have."""
+    entries = [e for e in get_plans(start, end) if (e.get("recipe") or {}).get("id")]
+    with db() as c:
+        pantry = {food_key(it["name"]): it for it in list_pantry(c)}
+    foods = {}
+    for e in entries:
+        slug = e["recipe"].get("slug")
+        if not slug:
+            continue
+        try:
+            rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+        except ApiError:
+            continue
+        for ing in rec.get("recipeIngredient") or []:
+            fname, _ = ing_food(ing)
+            if not fname:
+                continue
+            k = food_key(fname)
+            f = foods.setdefault(k, {"key": k, "name": fname, "emoji": food_emoji(fname), "recipes": [], "pantry": None, "staple": False})
+            if e["recipe"].get("name") not in f["recipes"]:
+                f["recipes"].append(e["recipe"].get("name"))
+            p = pantry.get(k)
+            if p:
+                f["pantry"] = {"amount_left": p["amount_left"], "days_left": p["days_left"], "location": p["location"]}
+            f["staple"] = fname.lower() in STAPLES
+    items = sorted(foods.values(), key=lambda f: (not f["pantry"], not f["staple"], f["name"].lower()))
+    for f in items:   # suggest "have it" when the pantry has a decent amount that won't expire first, or it's a staple
+        pf = f["pantry"]
+        f["have"] = bool(pf and pf["amount_left"] >= 0.25 and (pf["days_left"] is None or pf["days_left"] >= 0)) or f["staple"]
+        f["ask"] = bool(pf) or f["staple"]
+        f["need"] = "For " + ", ".join(x for x in f["recipes"][:3] if x)
+        if pf:
+            f["pantry"] = f"{pf['location'].title()} · {round(pf['amount_left'] * 100)}% left" + (
+                f" · {'expired' if pf['days_left'] < 0 else 'use within ' + str(pf['days_left']) + 'd'}" if pf["days_left"] is not None and pf["days_left"] <= 3 else "")
+    return {"recipes": len({e["recipe"]["id"] for e in entries}), "items": items}
+
+
+def plan_to_list(start, end, list_id=None, skip_pantry=True, skip_keys=None):
     entries = [e for e in get_plans(start, end) if (e.get("recipe") or {}).get("id")]
     if not entries:
         raise ApiError(400, "No recipes planned in that range yet.")
@@ -1849,30 +2714,39 @@ def plan_to_list(start, end, list_id=None, skip_pantry=True):
         rid = e["recipe"]["id"]
         totals.setdefault(rid, {"scale": 0.0, "slug": e["recipe"].get("slug"), "name": e["recipe"].get("name")})
         totals[rid]["scale"] += float(e.get("scale") or 1)
-    have = set()
-    if skip_pantry:
+    have = set(skip_keys or [])
+    if skip_pantry and skip_keys is None:
         with db() as c:
             for it in list_pantry(c):
                 if it["amount_left"] >= 0.25 and (it["days_left"] is None or it["days_left"] >= 0):
                     have.add(food_key(it["name"]))
-    payload, skipped = [], []
+    payload, skipped, extra = [], [], []
     for rid, t in totals.items():
         item = {"recipeId": rid, "recipeIncrementQuantity": round(t["scale"], 2)}
-        if have and t["slug"]:
+        if t["slug"]:
             try:
                 rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(t['slug'])}")
+                ings = rec.get("recipeIngredient") or []
                 keep = []
-                for ing in rec.get("recipeIngredient") or []:
-                    fname = (ing.get("food") or {}).get("name") or ""
+                for ing in ings:
+                    fname, local = ing_food(ing)
                     if fname and food_key(fname) in have:
                         skipped.append(fname)
+                    elif local:
+                        extra.append(local_line(local, t["scale"]))   # plain-text line: scale it here
                     else:
                         keep.append(ing)
-                if len(keep) != len(rec.get("recipeIngredient") or []):
+                if len(keep) != len(ings):
+                    if not keep:
+                        continue
                     item["recipeIngredients"] = keep
             except ApiError:
                 pass
         payload.append(item)
+    if extra:
+        add_items_to_list(extra, list_id)
+    if not payload:
+        return {"list_id": list_id, "recipes": len(totals), "skipped": sorted(set(skipped))}
     try:
         mealie("POST", f"/api/households/shopping/lists/{list_id}/recipe", payload, timeout=60)
     except ApiError:
@@ -1880,7 +2754,7 @@ def plan_to_list(start, end, list_id=None, skip_pantry=True):
         mealie("POST", f"/api/households/shopping/lists/{list_id}/recipe",
                [{"recipeId": p["recipeId"], "recipeIncrementQuantity": p["recipeIncrementQuantity"]} for p in payload], timeout=60)
         skipped = []
-    return {"list_id": list_id, "recipes": len(payload), "skipped": sorted(set(skipped))}
+    return {"list_id": list_id, "recipes": len(totals), "skipped": sorted(set(skipped))}
 
 
 # ============================================================ update check
@@ -1942,6 +2816,28 @@ def scheduler():
                     if items:
                         deliver(msg_expiring(items))
                         log(f"use-soon alert sent ({len(items)} items)")
+            # Pantry check-in reminder (once per due period, at the alert hour)
+            ck = pantry_checkin_status()
+            if ck["due"] and any(channels_ready().values()) and now.hour >= int(s.get("expiry_alert_hour") or 8):
+                flag = f"checkin_nudge_{ck['last']}"
+                if not get_internal(flag):
+                    set_internal(flag, True)
+                    deliver({"subject": "🧺 Time for a quick pantry check",
+                             "text": f"It's been {ck['days_since']} days. Open TablePlan → Pantry → Check-in to confirm what's left. It takes about a minute.",
+                             "html": email_wrap("<p>Time for a quick pantry check. Open TablePlan → Pantry → <b>Check-in</b>.</p>"), "files": []})
+            # Monthly AI budget alert (80% and 100%)
+            budget = float(s.get("ai_budget") or 0)
+            if budget > 0 and any(channels_ready().values()):
+                sp = ai_spending()
+                spent = (sp["exact"] or {}).get("total", sp["estimate_usd"]) if sp["exact"] else sp["estimate_usd"]
+                for level in (1.0, 0.8):
+                    flag = f"ai_budget_{sp['month']}_{int(level * 100)}"
+                    if spent >= budget * level and not get_internal(flag):
+                        set_internal(flag, True)
+                        deliver({"subject": f"💸 AI spending at {int(level * 100)}% of budget",
+                                 "text": f"${spent:.2f} of your ${budget:.2f} monthly OpenAI budget used in {sp['month']}.",
+                                 "html": email_wrap(f"<p>${spent:.2f} of your ${budget:.2f} monthly OpenAI budget used.</p>"), "files": []})
+                        break
         except Exception as e:  # never let the scheduler die
             log("scheduler error:", e)
         time.sleep(300)
@@ -1954,7 +2850,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        if "/health" not in (args[0] if args else ""):
+        if "/health" not in str(args[0] if args else ""):
             sys.stdout.write("[tableplan] %s %s\n" % (self.address_string(), fmt % args))
 
     # ---- helpers
@@ -1967,6 +2863,13 @@ class Handler(BaseHTTPRequestHandler):
                 return True
         return False
 
+    def client_ip(self):
+        return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+
+    def cookie(self, value, max_age=180 * 86400):
+        secure = "; Secure" if getattr(_req, "scheme", "http") == "https" else ""
+        return f"tp_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
+
     def send(self, code, body, ctype="application/json; charset=utf-8", headers=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, default=str)
@@ -1974,8 +2877,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if getattr(self, "_body", None) is None and int(self.headers.get("Content-Length") or 0) > 0:
+            # request body was never read (early 401/403/413/error): close so its bytes aren't parsed as the next request
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
+        if ctype.startswith("text/html"):
+            inline = "'unsafe-inline' " if self.path.startswith("/print/") else ""
+            self.send_header("Content-Security-Policy",
+                             f"default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {inline}; style-src 'self' 'unsafe-inline'; "
+                             "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+        if getattr(_req, "scheme", "http") == "https":
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         if not (headers or {}).get("Cache-Control"):
             self.send_header("Cache-Control", "no-store")
         for k, v in (headers or {}).items():
@@ -1988,13 +2904,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, text, ctype, {"Content-Disposition": f'attachment; filename="{fname}"'})
 
     def body(self):
+        if getattr(self, "_body", None) is None:
+            self._read_body()
+        out = json.loads(self._body) if self._body else {}
+        if not isinstance(out, dict):
+            raise ApiError(400, "Expected a JSON object.")
+        return out
+
+    def _read_body(self):
         n = int(self.headers.get("Content-Length") or 0)
         if n > 40_000_000:
             raise ApiError(413, "Request too large")
-        raw = self.rfile.read(n) if n else b""
-        return json.loads(raw) if raw else {}
+        self._body = self.rfile.read(n) if n else b""
 
     def handle_any(self, method):
+        self._body = None
         url = urllib.parse.urlparse(self.path)
         path, q = url.path, {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         if path == "/health":
@@ -2003,6 +2927,9 @@ class Handler(BaseHTTPRequestHandler):
         _req.host = host.rsplit(":", 1)[0] if not host.endswith("]") else host
         _req.scheme = (self.headers.get("X-Forwarded-Proto") or "http").split(",")[0].strip()
         public = (path == "/" or path.startswith("/static/") or path in ("/manifest.webmanifest", "/api/session", "/api/login"))
+        # CSRF: state-changing requests must carry a custom header, which other sites can't send without CORS (we allow none).
+        if method in ("POST", "PUT", "PATCH", "DELETE") and self.headers.get("X-TablePlan") != "1":
+            return self.send(403, {"error": "Missing X-TablePlan header"})
         if not public and not self.authorized():
             if path.startswith("/api/"):
                 return self.send(401, {"error": "Sign in required", "auth": True})
@@ -2050,17 +2977,22 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- session / auth
         if m == "GET" and path == "/api/session":
-            return self.send(200, {"auth_required": auth_required(), "authed": self.authorized(),
+            return self.send(200, {"auth_required": auth_required(), "authed": self.authorized(), "public": PUBLIC_MODE,
+                                   "needs_setup_code": PUBLIC_MODE and not cfg("app_password_hash"),
                                    "setup_complete": bool(cfg("setup_complete")), "version": APP_VERSION})
         if m == "POST" and path == "/api/login":
+            ip = self.client_ip()
+            if login_throttled(ip):
+                raise ApiError(429, "Too many tries. Wait 10 minutes and try again.")
             pw = self.body().get("password") or ""
-            if not auth_required() or check_password(pw, cfg("app_password_hash")):
-                return self.send(200, {"ok": True}, headers={
-                    "Set-Cookie": f"tp_session={make_session()}; Path=/; Max-Age={180 * 86400}; HttpOnly; SameSite=Lax"})
+            if not auth_required() or password_ok(pw):
+                _login_fails.pop(ip, None)
+                return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie(make_session())})
+            _login_fails.setdefault(ip, []).append(time.time())
             time.sleep(1.0)
-            raise ApiError(401, "Wrong password")
+            raise ApiError(401, "Wrong password" if cfg("app_password_hash") else "Wrong setup code. Find it in the TablePlan server log.")
         if m == "POST" and path == "/api/logout":
-            return self.send(200, {"ok": True}, headers={"Set-Cookie": "tp_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"})
+            return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie("", 0)})
 
         if m == "GET" and path == "/api/config":
             s = get_settings()
@@ -2073,6 +3005,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "household": {"name": cfg("household_name"), "people": cfg("people"),
                                                  "scale": bool(cfg("scale_to_household"))},
                                    "auth_required": auth_required(), "version": APP_VERSION,
+                                   "repo_url": "https://github.com/thomasjvalenzuela/tableplan",
+                                   "ai_key": bool(cfg("openai_key")),
                                    "import_url": f"{base}/g/{slug}/r/create/url",
                                    "import_image": f"{base}/g/{slug}/r/create",
                                    "planner_url": f"{base}/household/mealplan/planner/view"})
@@ -2131,8 +3065,10 @@ class Handler(BaseHTTPRequestHandler):
             pw = self.body().get("password") or ""
             if pw and len(pw) < 4:
                 raise ApiError(400, "Use at least 4 characters.")
+            if not pw and PUBLIC_MODE:
+                raise ApiError(400, "A password is required because this TablePlan is reachable from the internet.")
             set_cfg(app_password_hash=hash_password(pw) if pw else "")
-            hdr = {"Set-Cookie": f"tp_session={make_session()}; Path=/; Max-Age={180 * 86400}; HttpOnly; SameSite=Lax"} if pw else None
+            hdr = {"Set-Cookie": self.cookie(make_session())} if pw else None
             return self.send(200, {"set": bool(pw)}, headers=hdr)
         if m == "POST" and path == "/api/setup/complete":
             set_cfg(setup_complete=True)
@@ -2148,7 +3084,81 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             s0 = parse_date(b.get("start")) or today()
             return self.send(200, plan_to_list(s0, parse_date(b.get("end")) or s0 + timedelta(days=6),
-                                               b.get("list_id"), bool(b.get("skip_pantry", True))))
+                                               b.get("list_id"), bool(b.get("skip_pantry", True)), b.get("skip_keys")))
+        if m == "POST" and path == "/api/plan/preview":
+            b = self.body()
+            s0 = parse_date(b.get("start")) or today()
+            return self.send(200, plan_preview(s0, parse_date(b.get("end")) or s0 + timedelta(days=6)))
+        # ---- barcode lookup (Open Food Facts) & pantry check-ins
+        mm = re.fullmatch(r"/api/upc/(\d{6,14})", path)
+        if m == "GET" and mm:
+            return self.send(200, upc_lookup(mm.group(1)))
+        if m == "POST" and path == "/api/pantry/checked":
+            set_internal("pantry_checked_at", iso(today()))
+            return self.send(200, pantry_checkin_status())
+        if m == "GET" and path == "/api/pantry/checkin":
+            return self.send(200, pantry_checkin_status())
+        # ---- recipes
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})", path)
+        if m == "GET" and mm:
+            return self.send(200, recipe_detail(urllib.parse.unquote(mm.group(1))))
+        if m == "PUT" and mm:
+            return self.send(200, recipe_update(urllib.parse.unquote(mm.group(1)), self.body()))
+        if m == "DELETE" and mm:
+            return self.send(200, recipe_delete(urllib.parse.unquote(mm.group(1))))
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list)", path)
+        if mm:
+            slug, act = urllib.parse.unquote(mm.group(1)), mm.group(2)
+            if act == "favorite" and m == "POST":
+                return self.send(200, set_favorite(slug, bool(self.body().get("favorite", True))))
+            if act == "guided" and m == "GET":
+                return self.send(200, guided(slug, q.get("ai") == "1", q.get("refresh") == "1"))
+            if act == "image/next" and m == "POST":
+                return self.send(200, recipe_image_next(slug))
+            if act == "image/upload" and m == "POST":
+                blob, ctype = decode_upload(self.body().get("data"))
+                _upload_recipe_image(slug, blob, ctype)
+                return self.send(200, {"ok": True})
+            if act == "to-list" and m == "POST":
+                b = self.body()
+                return self.send(200, add_items_to_list(b.get("items") or [], b.get("list_id")))
+        if m == "GET" and path == "/img/ing":
+            name = (q.get("name") or "").strip()[:80]
+            fpath, _ = ingredient_image(name) if name else (None, None)
+            if not fpath:
+                return self.send(404, b"", "image/png", {"Cache-Control": "public, max-age=3600"})
+            with open(fpath, "rb") as f:
+                blob = f.read()
+            return self.send(200, blob, mimetypes.guess_type(fpath)[0] or "image/jpeg", {"Cache-Control": "public, max-age=600"})
+        if m == "POST" and path == "/api/ingredient-image/next":
+            name = (self.body().get("name") or "").strip()[:80]
+            _, credit = ingredient_image(name, advance=True)
+            return self.send(200, {"ok": True, "credit": credit})
+        if m == "POST" and path == "/api/ingredient-image/upload":
+            b = self.body()
+            name = (b.get("name") or "").strip()[:80]
+            blob, ctype = decode_upload(b.get("data"))
+            _save_pick("ing", food_key(name) or name.lower(), 999, blob, ctype, "Your photo")
+            return self.send(200, {"ok": True})
+        # ---- AI spending
+        if m == "GET" and path == "/api/ai/spending":
+            if q.get("refresh") == "1":
+                _costs_cache["at"] = 0
+            return self.send(200, ai_spending())
+        if m == "POST" and path == "/api/setup/openai-admin":
+            k = (self.body().get("key") or "").strip()
+            if k and not k.startswith("sk-admin-"):
+                raise ApiError(400, "That isn't an Admin key. Admin keys start with sk-admin- (OpenAI → Settings → Organization → Admin keys).")
+            prev = cfg("openai_admin_key")
+            set_cfg(openai_admin_key=k)
+            if k:
+                try:
+                    openai_costs(force=True)
+                except ApiError as e:
+                    set_cfg(openai_admin_key=prev or "")
+                    raise ApiError(400, f"OpenAI rejected that key: {e.message}")
+            return self.send(200, ai_spending())
+
         if m == "GET" and path == "/api/version":
             return self.send(200, update_info(force=q.get("refresh") == "1"))
 
@@ -2194,6 +3204,22 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.fullmatch(r"/api/lists/([A-Za-z0-9-]{1,64})", path)
         if m == "GET" and mm:
             return self.send(200, list_json(get_list(mm.group(1))))
+        if m == "POST" and path == "/api/recipes/new":
+            name = (self.body().get("name") or "").strip()[:200]
+            if not name:
+                raise ApiError(400, "Give the recipe a name.")
+            slug = mealie("POST", "/api/recipes", {"name": name})
+            _recipe_cache["at"] = 0
+            return self.send(200, {"slug": slug.strip('"') if isinstance(slug, str) else slug})
+        if m == "POST" and path == "/api/lists":
+            name = (self.body().get("name") or "Groceries").strip()[:80]
+            return self.send(200, {"id": mealie("POST", "/api/households/shopping/lists", {"name": name})["id"]})
+        mm = re.fullmatch(r"/api/lists/([A-Za-z0-9-]{1,64})/items", path)
+        if m == "POST" and mm:
+            items = [str(t).strip()[:200] for t in (self.body().get("items") or []) if str(t).strip()][:100]
+            if not items:
+                raise ApiError(400, "Type at least one item.")
+            return self.send(200, add_items_to_list(items, mm.group(1)))
         mm = re.fullmatch(r"/api/lists/([A-Za-z0-9-]{1,64})/items/([A-Za-z0-9-]{1,64})/(bought|undo)", path)
         if m == "POST" and mm:
             return self.send(200, self.bought(mm.group(1), mm.group(2), mm.group(3), self.body()))
@@ -2304,6 +3330,7 @@ class Handler(BaseHTTPRequestHandler):
         with db() as c:
             out["expiring"] = expiring_items(c, int(s.get("expiring_window_days") or 3))
             out["pantry_count"] = c.execute("SELECT COUNT(*) FROM pantry_items WHERE status='active'").fetchone()[0]
+        out["pantry_checkin"] = pantry_checkin_status()
         try:
             start = today()
             out["week"] = get_plans(start, start + timedelta(days=6))
@@ -2382,6 +3409,8 @@ def main():
                 log(f"USDA FoodKeeper sync skipped ({e}); using starter shelf-life table. Retry from Settings.")
         threading.Thread(target=first_sync, daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
+    if PUBLIC_MODE and not cfg("app_password_hash"):
+        log(f"PUBLIC MODE · one-time setup code: {SETUP_CODE}  (enter it on the sign-in screen, then set a household password)")
     log(f"TablePlan {APP_VERSION} listening on :{LISTEN_PORT} · Mealie {cfg('mealie_url')} · data {DB_PATH} · "
         f"setup {'done' if cfg('setup_complete') else 'pending — open the app to run the wizard'}")
     ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler).serve_forever()

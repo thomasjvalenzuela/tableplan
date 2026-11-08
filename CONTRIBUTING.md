@@ -44,7 +44,9 @@ Change the Mealie image tag in all three places, then push:
 - `install/install.sh` (`MEALIE_IMAGE`)
 - `install/docker-compose.yml`
 
-Check Mealie's release notes for API changes first. TablePlan uses these endpoints:
+You usually don't need to do this by hand. `.github/workflows/mealie-update.yml` runs weekly and, when Mealie has a newer release in the same major version, opens a pull request that bumps the tag in all three files. Merging it triggers a normal release, so users get the new Mealie through TablePlan's **Update** button (Mealie never updates itself). For the workflow to open PRs, turn on **Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"**.
+
+Before merging (or bumping manually), check Mealie's release notes for API changes. TablePlan uses these endpoints:
 
 - auth: `/api/auth/token`, `/api/users/*`, `/api/users/api-tokens`
 - AI providers: `/api/groups/ai-providers/*`
@@ -56,7 +58,7 @@ Check Mealie's release notes for API changes first. TablePlan uses these endpoin
 
 The workflow uses your GitHub username and repo name automatically.
 
-1. Fork the repo. In **Settings → Actions → General → Workflow permissions**, choose **Read and write**.
+1. Fork the repo. In **Settings → Actions → General → Workflow permissions**, choose **Read and write**, and tick **Allow GitHub Actions to create and approve pull requests** (needed for the weekly Mealie update PR).
 2. Push to `main` and wait for the **Release** workflow to go green.
 3. In **Settings → Pages**, choose **Deploy from a branch** → `gh-pages` / `root`.
 4. In your profile → **Packages → tableplan → Package settings**, change visibility to **Public**.
