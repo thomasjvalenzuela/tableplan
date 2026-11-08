@@ -37,7 +37,7 @@ const Setup = {
     const h = st.household || {};
     el.innerHTML = `
       <div class="wgroup">
-        <div class="wfield"><label>Household name</label><input id="hh-name" placeholder="The Valenzuelas" value="${_esc(h.name || "")}"></div>
+        <div class="wfield"><label>Household name</label><input id="hh-name" placeholder="The Smiths" value="${_esc(h.name || "")}"></div>
         <div class="wfield"><label>How many people do you cook for?</label>
           <div class="stepper"><button type="button" data-d="-1">−</button><b id="hh-n">${h.people || 2}</b><button type="button" data-d="1">+</button></div></div>
         <div class="wfield"><label>Scale recipes to fit</label><label class="toggle"><input type="checkbox" id="hh-scale" ${h.scale !== false ? "checked" : ""}><span></span></label></div>

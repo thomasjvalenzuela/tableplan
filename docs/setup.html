@@ -92,7 +92,7 @@ h2.done .n{background:var(--tip)}
 <article class="md">
 
 <h1>🍳 TablePlan: Setup Guide</h1>
-<p>Recipes, auto meal plans, a smart pantry and grocery lists, self-hosted on <b>GrandHub</b>. <b>Mealie is included</b>, so you don't need to install it separately. TablePlan's setup wizard creates your recipe account for you.</p>
+<p>Recipes, auto meal plans, a smart pantry and grocery lists, self-hosted on your own server (ZimaOS, CasaOS or any Docker host). <b>Mealie is included</b>, so you don't need to install it separately. TablePlan's setup wizard creates your recipe account for you.</p>
 
 <div class="progress" aria-hidden="true"><i id="bar"></i></div>
 <div class="ptxt" id="ptxt">Tick each step as you finish it. Your progress is saved in this browser.</div>
@@ -128,6 +128,10 @@ h2.done .n{background:var(--tip)}
 <h3>With the GitHub CLI (one command)</h3>
 <div class="code"><span class="lbl">in the unzipped tableplan folder</span><pre><code>cd ~/Downloads/tableplan
 gh repo create thomasjvalenzuela/tableplan --public --source=. --push</code></pre></div>
+<div class="alert warn"><div class="t">Push rejected with “GH007 … private email address”?</div><p>Your GitHub email is private. Sign commits with your GitHub noreply address instead, then push again:</p><div class="code"><span class="lbl">in the tableplan folder</span><pre><code>NOREPLY="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
+git config --global user.email "$NOREPLY"
+git commit --amend --reset-author --no-edit
+git push -u origin main</code></pre></div></div>
 <h3>Or with the website</h3>
 <ol>
 <li>Go to <a href="https://github.com/new">github.com/new</a>. Name it <code>tableplan</code>, choose <b>Public</b>, and don't add a README.</li>
@@ -136,7 +140,7 @@ gh repo create thomasjvalenzuela/tableplan --public --source=. --push</code></pr
 <div class="code"><span class="lbl">in the unzipped tableplan folder</span><pre><code>cd ~/Downloads/tableplan
 git remote add origin https://github.com/thomasjvalenzuela/tableplan.git
 git push -u origin main</code></pre></div>
-<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Why public?</div><p>ZimaOS downloads the app and its store listing without logging in to GitHub, so the repo, the Pages site and the container image all need to be public. Your recipes and data never leave GrandHub. If you want a private repo later, it's possible, but ZimaOS would need registry credentials.</p></div>
+<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Why public?</div><p>ZimaOS downloads the app and its store listing without logging in to GitHub, so the repo, the Pages site and the container image all need to be public. Your recipes and data never leave your server. If you want a private repo later, it's possible, but ZimaOS would need registry credentials.</p></div>
 
 <h2 id="s2" class="stephead"><span class="step"><input type="checkbox" data-step="2" aria-label="Done"><span class="n">2</span> Turn on Pages &amp; make the image public</span></h2>
 <ol>
@@ -158,15 +162,15 @@ git push -u origin main</code></pre></div>
 <li>Search for <b>TablePlan</b> and tap <b>Install</b>. Mealie downloads with it, which takes a few minutes the first time.</li>
 <li>When the TablePlan tile appears on your ZimaOS dashboard, open it.</li>
 </ol>
-<div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Your data folder</div><p>The store installs to <code>/DATA/AppData/tableplan</code>, the ZimaOS default. To keep it on your big disk, open TablePlan's install settings before tapping Install and change both volume paths to <code>/media/DATA/AppData/tableplan/…</code>. Never use the old MEDIA disk.</p></div>
+<div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Your data folder</div><p>The store installs to <code>/DATA/AppData/tableplan</code>, the ZimaOS default. To keep it on your big disk, open TablePlan's install settings before tapping Install and change both volume paths to a folder on that disk, for example <code>/media/DATA/AppData/tableplan/…</code>.</p></div>
 
 <h3>Option B: one SSH command</h3>
-<div class="code"><span class="lbl">on your computer</span><pre><code>ssh thomasadmin@192.168.0.158</code></pre></div>
-<div class="code"><span class="lbl">then on GrandHub</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo bash</code></pre></div>
+<div class="code"><span class="lbl">on your computer</span><pre><code>ssh YOUR-USER@YOUR-SERVER-IP</code></pre></div>
+<div class="code"><span class="lbl">then on the server</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo bash</code></pre></div>
 <p>The installer:</p>
 <ul>
 <li>checks Docker and that ports 9930 and 9925 are free</li>
-<li>installs to <code>/media/DATA/AppData/tableplan</code></li>
+<li>installs to <code>/media/DATA/AppData/tableplan</code> if that disk exists, otherwise <code>/DATA/AppData/tableplan</code></li>
 <li>starts both containers</li>
 <li>prints the address to open</li>
 </ul>
@@ -176,10 +180,10 @@ sudo tableplan update      <span class="c"># get the latest version</span>
 sudo tableplan logs        <span class="c"># see what it's doing</span>
 sudo tableplan backup      <span class="c"># zip up your data</span>
 sudo tableplan uninstall   <span class="c"># remove containers, keep data</span></code></pre></div>
-<div class="alert important"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/></svg>Confirm the address</div><p>The installer prints GrandHub's current IP address. Use that one, since <code>192.168.0.158</code> can change.</p></div>
+<div class="alert important"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/></svg>Confirm the address</div><p>The installer prints your server's current IP address. Use that one, since home IP addresses can change.</p></div>
 
 <h2 id="s4" class="stephead"><span class="step"><input type="checkbox" data-step="4" aria-label="Done"><span class="n">4</span> Run the setup wizard</span></h2>
-<p>Open <code>http://192.168.0.158:9930</code>. The wizard starts automatically. You can <b>skip</b> any step and finish it later in <b>Settings</b>.</p>
+<p>Open <code>http://YOUR-SERVER-IP:9930</code>. The wizard starts automatically. You can <b>skip</b> any step and finish it later in <b>Settings</b>.</p>
 <table>
 <tr><th>Screen</th><th>What to enter</th><th>Where to get it</th></tr>
 <tr><td><b>Household</b></td><td>A name, and how many people you cook for</td><td>Every recipe you plan is scaled to this number.</td></tr>
@@ -193,7 +197,7 @@ sudo tableplan uninstall   <span class="c"># remove containers, keep data</span>
 <h2 id="s5" class="stephead"><span class="step"><input type="checkbox" data-step="5" aria-label="Done"><span class="n">5</span> Add to your phones</span></h2>
 <table>
 <tr><th>iPhone (Safari)</th><th>Android (Chrome)</th></tr>
-<tr><td>Open <code>http://192.168.0.158:9930</code> → <b>Share</b> → <b>Add to Home Screen</b></td><td>Open it → <b>⋮</b> → <b>Add to Home screen</b></td></tr>
+<tr><td>Open <code>http://YOUR-SERVER-IP:9930</code> → <b>Share</b> → <b>Add to Home Screen</b></td><td>Open it → <b>⋮</b> → <b>Add to Home screen</b></td></tr>
 </table>
 <div class="alert caution"><div class="t"><svg viewBox="0 0 16 16"><path d="M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Away from home</div><p>Use <b>Tailscale</b> on your phone to reach the same address. Don't port-forward 9930 or 9925 on your router.</p></div>
 
@@ -228,12 +232,12 @@ sudo tableplan uninstall   <span class="c"># remove containers, keep data</span>
 <tr><td>Wizard says "This Mealie already has an account"</td><td>Someone already set up this Mealie. Switch to <b>Sign in</b> with that login.</td></tr>
 <tr><td>OpenAI test failed</td><td>The key is wrong, or the account has no credit. Billing is at platform.openai.com.</td></tr>
 <tr><td>Email test failed</td><td>For Gmail, use an <b>App Password</b>, not your normal password. It needs 2-Step Verification turned on.</td></tr>
-<tr><td>Forgot the TablePlan password</td><td>On GrandHub, run <code>sudo docker exec tableplan python -c "import sqlite3;c=sqlite3.connect('/data/tableplan.db');c.execute(&quot;DELETE FROM settings WHERE key='cfg.app_password_hash'&quot;);c.commit()"</code>, then <code>sudo docker restart tableplan</code>.</td></tr>
+<tr><td>Forgot the TablePlan password</td><td>On the server, run <code>sudo docker exec tableplan python -c "import sqlite3;c=sqlite3.connect('/data/tableplan.db');c.execute(&quot;DELETE FROM settings WHERE key='cfg.app_password_hash'&quot;);c.commit()"</code>, then <code>sudo docker restart tableplan</code>.</td></tr>
 </table>
 
 </article>
 </div>
-<div class="footer">TablePlan · self-hosted on GrandHub · Mealie is open source (AGPL-3.0)</div>
+<div class="footer">TablePlan · self-hosted · Mealie is open source (AGPL-3.0)</div>
 </div>
 <script>
 (function(){

@@ -71,8 +71,8 @@ x-casaos:
       en_US: |
         After installing, open TablePlan. A short setup wizard creates your recipe-library login and, if you want, sets up AI import and email.
         Mealie also runs on port 9925 for advanced recipe editing.
-  author: Thomas Valenzuela
-  developer: Thomas Valenzuela
+  author: thomasjvalenzuela
+  developer: thomasjvalenzuela
   category: Home
   architectures:
     - amd64
