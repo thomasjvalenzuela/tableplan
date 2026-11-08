@@ -111,6 +111,8 @@ jobs:
         run: |
           python3 -c "import json,os; json.dump({'version':os.environ['VERSION'],'released':os.environ['DATE'],'notes':os.environ['NOTES']}, open('dist/version.json','w'))"
           cp install/install.sh dist/install.sh
+          cp install/docker-compose.yml dist/docker-compose.yml
+          cp install/docker-compose.existing-mealie.yml dist/docker-compose.existing-mealie.yml
           mkdir -p dist/setup && cp docs/setup.html dist/setup/index.html
           touch dist/.nojekyll
           ls -R dist | head -50

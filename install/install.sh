@@ -7,6 +7,8 @@
 #   TABLEPLAN_DIR=/path      install folder (default: /media/DATA/AppData/tableplan, else /DATA/AppData/tableplan)
 #   TABLEPLAN_PORT=9930      TablePlan port        MEALIE_PORT=9925   Mealie port
 #   TABLEPLAN_IMAGE=...      override the image (default ghcr.io/thomasjvalenzuela/tableplan:latest)
+#   MEALIE_URL=http://...    use a Mealie you ALREADY run instead of installing a new one
+#                            e.g.  curl -fsSL <url>/install.sh | sudo MEALIE_URL=http://192.168.1.50:9925 bash
 #
 # After install, manage it with:  sudo tableplan {status|update|logs|restart|backup|uninstall}
 set -euo pipefail
@@ -15,6 +17,8 @@ IMAGE="${TABLEPLAN_IMAGE:-ghcr.io/thomasjvalenzuela/tableplan:latest}"
 MEALIE_IMAGE="${MEALIE_IMAGE:-ghcr.io/mealie-recipes/mealie:v3.30.0}"
 TP_PORT="${TABLEPLAN_PORT:-9930}"
 ML_PORT="${MEALIE_PORT:-9925}"
+EXT_MEALIE="${MEALIE_URL:-}"          # set = connect to an existing Mealie, don't install one
+EXT_MEALIE="${EXT_MEALIE%/}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -47,14 +51,25 @@ port_busy() {
   if command -v ss >/dev/null 2>&1; then ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}\$"
   else netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}\$"; fi
 }
+if [ -n "$EXT_MEALIE" ]; then
+  case "$EXT_MEALIE" in http://*|https://*) ;; *) die "MEALIE_URL must start with http:// or https://";; esac
+  case "$EXT_MEALIE" in *localhost*|*127.0.0.1*) die "Use your server's network IP in MEALIE_URL, not localhost (TablePlan runs in its own container).";; esac
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS --max-time 8 "$EXT_MEALIE/api/app/about" >/dev/null 2>&1; then ok "Found your Mealie at $EXT_MEALIE"
+    else warn "Couldn't reach $EXT_MEALIE/api/app/about. Check the address; continuing anyway."; fi
+  fi
+  CHECK_PORTS="$TP_PORT"; CHECK_NAMES="tableplan"
+else
+  CHECK_PORTS="$TP_PORT $ML_PORT"; CHECK_NAMES="tableplan tableplan-mealie"
+fi
 if [ "$UPGRADE" -eq 0 ]; then
-  for p in "$TP_PORT" "$ML_PORT"; do
+  for p in $CHECK_PORTS; do
     port_busy "$p" && die "Port $p is already in use. Re-run with TABLEPLAN_PORT=… / MEALIE_PORT=… to pick another."
   done
-  for n in tableplan tableplan-mealie; do
+  for n in $CHECK_NAMES; do
     docker ps -a --format '{{.Names}}' | grep -qx "$n" && die "A container named '$n' already exists. Remove it or run 'sudo tableplan uninstall' first."
   done
-  ok "Ports $TP_PORT and $ML_PORT are free"
+  ok "Port(s) $CHECK_PORTS free"
 fi
 
 TZ_VAL="$(cat /etc/timezone 2>/dev/null || true)"
@@ -62,10 +77,34 @@ TZ_VAL="$(cat /etc/timezone 2>/dev/null || true)"
 [ -z "$TZ_VAL" ] && TZ_VAL="UTC"
 
 # ---------- files
-mkdir -p "$DIR/data" "$DIR/mealie"
+mkdir -p "$DIR/data"
+[ -z "$EXT_MEALIE" ] && mkdir -p "$DIR/mealie"
 ok "Install folder: $DIR"
 
-cat > "$DIR/docker-compose.yml" <<YAML
+if [ -n "$EXT_MEALIE" ]; then
+  ML_PUBLIC_PORT="$(printf '%s' "$EXT_MEALIE" | sed -n 's#^https\?://[^/:]*:\([0-9]*\).*#\1#p')"
+  cat > "$DIR/docker-compose.yml" <<YAML
+# Managed by the TablePlan installer (connected to your existing Mealie). Re-running rewrites this file; data is kept.
+name: tableplan
+
+services:
+  tableplan:
+    container_name: tableplan
+    image: ${IMAGE}
+    restart: unless-stopped
+    ports: ["${TP_PORT}:8080"]
+    environment:
+      TZ: "${TZ_VAL}"
+      MEALIE_URL: "${EXT_MEALIE}"
+      MEALIE_PUBLIC_URL: "${EXT_MEALIE}"
+      MEALIE_PUBLIC_PORT: "${ML_PUBLIC_PORT:-9925}"
+      TABLEPLAN_INSTALL: cli
+    volumes:
+      - ./data:/data
+    security_opt: ["no-new-privileges:true"]
+YAML
+else
+  cat > "$DIR/docker-compose.yml" <<YAML
 # Managed by the TablePlan installer. Re-running the installer rewrites this file; your data is kept.
 name: tableplan
 
@@ -103,6 +142,7 @@ services:
           memory: 1000M
     security_opt: ["no-new-privileges:true"]
 YAML
+fi
 
 cat > "$DIR/tableplan" <<'CLI'
 #!/usr/bin/env bash
@@ -128,7 +168,7 @@ if ln -sf "$DIR/tableplan" /usr/local/bin/tableplan 2>/dev/null; then CLI_CMD="s
 
 # ---------- start
 echo
-bold "Downloading TablePlan and Mealie (first time takes a few minutes)…"
+if [ -n "$EXT_MEALIE" ]; then bold "Downloading TablePlan…"; else bold "Downloading TablePlan and Mealie (first time takes a few minutes)…"; fi
 cd "$DIR"
 $DC pull
 $DC up -d --remove-orphans
@@ -148,14 +188,21 @@ IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){p
 [ -z "$IP" ] && IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [ -z "$IP" ] && IP="<server-ip>"
 
+if [ -n "$EXT_MEALIE" ]; then
+  WIZ_HINT="In the setup wizard, choose \"Sign in\" on the Recipe library step and use your Mealie login."
+  ML_ADDR="$EXT_MEALIE"
+else
+  WIZ_HINT="The setup wizard creates your recipe login and sets up AI import and email."
+  ML_ADDR="http://${IP}:${ML_PORT}"
+fi
 echo
 if [ "$UPGRADE" -eq 1 ]; then bold "✅  TablePlan updated"; else bold "✅  TablePlan is installed"; fi
 cat <<DONE
 
   Open on your phone:   http://${IP}:${TP_PORT}
-  The setup wizard creates your recipe login and sets up AI import and email.
+  ${WIZ_HINT}
 
-  Recipe editor (Mealie): http://${IP}:${ML_PORT}
+  Recipe editor (Mealie): ${ML_ADDR}
   Manage:  ${CLI_CMD} status | update | logs | backup | uninstall
   Data:    ${DIR}
 

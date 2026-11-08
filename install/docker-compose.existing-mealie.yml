@@ -1,0 +1,24 @@
+# TablePlan only. Use this if you already run Mealie (v3.x) somewhere.
+#
+# In the setup wizard, choose "Sign in" with your Mealie account, or "Use API token".
+name: tableplan
+
+services:
+  tableplan:
+    container_name: tableplan
+    image: ghcr.io/thomasjvalenzuela/tableplan:latest
+    restart: unless-stopped
+    ports:
+      - "9930:8080"
+    environment:
+      TZ: America/Chicago
+      # How TablePlan's server reaches your Mealie (from inside Docker):
+      MEALIE_URL: http://192.168.1.50:9925
+      # How your phone/browser reaches Mealie (for "Open recipe" links). Leave blank to reuse
+      # the host you open TablePlan on with MEALIE_PUBLIC_PORT.
+      MEALIE_PUBLIC_URL: ""
+      MEALIE_PUBLIC_PORT: "9925"
+      TABLEPLAN_INSTALL: manual
+    volumes:
+      - ./data:/data
+    security_opt: ["no-new-privileges:true"]

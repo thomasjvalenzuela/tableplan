@@ -1,0 +1,44 @@
+# TablePlan + Mealie for any Docker host (Docker Compose, Portainer stacks, Dockge, Unraid compose, …)
+#
+#   mkdir tableplan && cd tableplan
+#   curl -fsSLO https://thomasjvalenzuela.github.io/tableplan/docker-compose.yml
+#   docker compose up -d
+#
+# Then open http://<your-server-ip>:9930. The setup wizard does the rest.
+name: tableplan
+
+services:
+  tableplan:
+    container_name: tableplan
+    image: ghcr.io/thomasjvalenzuela/tableplan:latest
+    restart: unless-stopped
+    depends_on: [mealie]
+    ports:
+      - "9930:8080"                 # change the left number to use another port
+    environment:
+      TZ: America/Chicago           # your time zone; used for use-by dates
+      MEALIE_URL: http://mealie:9000
+      MEALIE_PUBLIC_PORT: "9925"    # keep in sync with Mealie's left-hand port below
+      TABLEPLAN_INSTALL: manual
+    volumes:
+      - ./data:/data
+    security_opt: ["no-new-privileges:true"]
+
+  mealie:
+    container_name: tableplan-mealie
+    image: ghcr.io/mealie-recipes/mealie:v3.30.0
+    restart: unless-stopped
+    ports:
+      - "9925:9000"
+    environment:
+      TZ: America/Chicago
+      ALLOW_SIGNUP: "false"
+      MAX_WORKERS: "1"
+      WEB_CONCURRENCY: "1"
+    volumes:
+      - ./mealie:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1000M
+    security_opt: ["no-new-privileges:true"]

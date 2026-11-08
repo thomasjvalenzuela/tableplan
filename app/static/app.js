@@ -794,7 +794,7 @@ async function openSettings() {
         <button class="row" id="st-wizard"><div class="main"><div class="a">Run setup wizard again</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
-      <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server</p>`;
+      <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server<br><a href="https://github.com/thomasjvalenzuela/tableplan" target="_blank" rel="noopener" style="color:var(--sub)">Source code (AGPL-3.0)</a></p>`;
     $$("#st-types .tag").forEach((b) => (b.onclick = async () => { const t = b.dataset.t; const mt = s.meal_types.includes(t) ? s.meal_types.filter((x) => x !== t) : [...s.meal_types, t]; if (!mt.length) return; await save({ meal_types: mt }); b.classList.toggle("on"); }));
     $("#st-nr").onchange = (e) => save({ no_repeat_days: +e.target.value || 0 });
     $("#st-exp").onchange = (e) => save({ prefer_expiring: e.target.checked });

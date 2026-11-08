@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TablePlan — Setup Guide</title>
+<title>TablePlan — Install Guide</title>
 <style>
 :root{
   --fg:#1f2328;--muted:#59636e;--bg:#fff;--canvas:#f6f8fa;--border:#d1d9e0;--border-soft:#d1d9e0b3;
@@ -84,165 +84,162 @@ h2.done .n{background:var(--tip)}
 </head>
 <body>
 <div class="wrap">
-<div class="repo">
-  <span>thomasjvalenzuela / <b>tableplan</b></span><span class="badge">Public</span><span class="badge">Docker</span><span class="badge">ZimaOS</span>
-</div>
+<div class="repo"><span>thomasjvalenzuela / <b>tableplan</b></span><span class="badge">AGPL-3.0</span><span class="badge">Docker</span><span class="badge">ZimaOS</span><span class="badge">amd64 · arm64</span></div>
 <div class="box">
-<div class="box-h">SETUP.md</div>
+<div class="box-h">INSTALL.md</div>
 <article class="md">
 
-<h1>🍳 TablePlan: Setup Guide</h1>
-<p>Recipes, auto meal plans, a smart pantry and grocery lists, self-hosted on your own server (ZimaOS, CasaOS or any Docker host). <b>Mealie is included</b>, so you don't need to install it separately. TablePlan's setup wizard creates your recipe account for you.</p>
+<h1>🍳 Install TablePlan</h1>
+<p>TablePlan is a self-hosted household kitchen app. It handles recipes from links and screenshots, auto-generated meal plans, a pantry that tracks real use-by dates, and grocery lists you can email or print. It runs on your own server, and <a href="https://github.com/mealie-recipes/mealie">Mealie</a> is bundled as the recipe engine.</p>
 
 <div class="progress" aria-hidden="true"><i id="bar"></i></div>
 <div class="ptxt" id="ptxt">Tick each step as you finish it. Your progress is saved in this browser.</div>
 
 <div class="toc"><b>Contents</b>
 <ol>
-<li><a href="#how">How it fits together</a></li>
-<li><a href="#s1">Publish the code to GitHub</a></li>
-<li><a href="#s2">Turn on Pages &amp; the image</a></li>
-<li><a href="#s3">Install on ZimaOS</a></li>
-<li><a href="#s4">Run the setup wizard</a></li>
-<li><a href="#s5">Add to your phones</a></li>
-<li><a href="#updates">How updates reach you</a></li>
-<li><a href="#use">Everyday use</a></li>
+<li><a href="#need">What you need</a></li>
+<li><a href="#s1">Install</a></li>
+<li><a href="#s2">Run the setup wizard</a></li>
+<li><a href="#s3">Add it to your phone</a></li>
+<li><a href="#updates">Updating</a></li>
+<li><a href="#backup">Backup &amp; uninstall</a></li>
+<li><a href="#remote">Using it away from home</a></li>
 <li><a href="#trouble">Troubleshooting</a></li>
+<li><a href="#faq">FAQ</a></li>
 </ol></div>
 
-<h2 id="how">How it fits together</h2>
+<h2 id="need">What you need</h2>
 <div class="cards">
-  <div class="card"><b>🏠 TablePlan · port 9930</b><span>The app you use every day: plans, pantry, lists, email and print. The setup wizard lives here.</span></div>
-  <div class="card"><b>🍲 Mealie · port 9925</b><span>The recipe engine, installed automatically. It stores recipes, does AI imports and scales servings. You rarely need to open it.</span></div>
-  <div class="card"><b>🐙 GitHub</b><span>Holds the code. Every push builds a new version and publishes it to your private ZimaOS app store.</span></div>
+  <div class="card"><b>🖥️ A server with Docker</b><span>ZimaOS, CasaOS, Ubuntu/Debian, a NAS, or a Raspberry Pi 4/5. Both Intel/AMD (amd64) and ARM (arm64) work.</span></div>
+  <div class="card"><b>💾 1.5 GB RAM, 2 GB disk</b><span>Mealie uses most of it. Your recipes and photos take more space over time.</span></div>
+  <div class="card"><b>🔌 Ports 9930 and 9925</b><span>TablePlan on 9930 and Mealie on 9925. You can change both.</span></div>
 </div>
-<div class="diagram">  git push ──► GitHub Actions ─┬─► container image  ghcr.io/thomasjvalenzuela/tableplan
-                               └─► ZimaOS app store  thomasjvalenzuela.github.io/tableplan
-                                          │
-                     ZimaOS App Store ◄───┘  shows "Update" whenever you push</div>
+<p><b>Optional:</b></p>
+<ul>
+<li>An <b>OpenAI API key</b> to import recipes from screenshots, photos and video links. It costs a few cents per recipe.</li>
+<li>An <b>email account</b> that allows SMTP, such as Gmail with an App Password, to email yourself lists and plans.</li>
+</ul>
 
-<p>You do steps 1–2 once, as the developer. Steps 3–5 are the install. They're also what anyone else you share TablePlan with would do.</p>
+<h2 id="s1" class="stephead"><span class="step"><input type="checkbox" data-step="1" aria-label="Done"><span class="n">1</span> Install</span></h2>
+<h3>First: do you already use Mealie?</h3>
+<table>
+<tr><th></th><th>No, I don't have Mealie (most people)</th><th>Yes, I already run Mealie</th></tr>
+<tr><td>What gets installed</td><td>TablePlan <b>plus</b> a fresh Mealie</td><td><b>Only</b> TablePlan, connected to your Mealie</td></tr>
+<tr><td>Install with</td><td>Any method below</td><td>The one-command installer with <code>MEALIE_URL=…</code>, or <code>docker-compose.existing-mealie.yml</code>. Not the ZimaOS App Store version, which adds a second Mealie.</td></tr>
+<tr><td>In the wizard</td><td><b>Create account</b></td><td><b>Sign in</b> with your Mealie login (an admin, for AI setup)</td></tr>
+</table>
+<p>Everything else is the same. If you already have Mealie, use your server's network IP in <code>MEALIE_URL</code> (for example <code>http://192.168.1.50:9925</code>), never <code>localhost</code>:</p>
+<div class="code"><span class="lbl">existing Mealie, one command</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo MEALIE_URL=http://192.168.1.50:9925 bash</code></pre></div>
+<p>Otherwise, choose the method that matches your server.</p>
 
-<h2 id="s1" class="stephead"><span class="step"><input type="checkbox" data-step="1" aria-label="Done"><span class="n">1</span> Publish the code to GitHub</span></h2>
-<p>Unzip <b>tableplan-repo.zip</b> from the chat. It's already a git repository with one commit. Then create the GitHub repo and push it, using either way below.</p>
-<h3>With the GitHub CLI (one command)</h3>
-<div class="code"><span class="lbl">in the unzipped tableplan folder</span><pre><code>cd ~/Downloads/tableplan
-gh repo create thomasjvalenzuela/tableplan --public --source=. --push</code></pre></div>
-<div class="alert warn"><div class="t">Push rejected with “GH007 … private email address”?</div><p>Your GitHub email is private. Sign commits with your GitHub noreply address instead, then push again:</p><div class="code"><span class="lbl">in the tableplan folder</span><pre><code>NOREPLY="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
-git config --global user.email "$NOREPLY"
-git commit --amend --reset-author --no-edit
-git push -u origin main</code></pre></div></div>
-<h3>Or with the website</h3>
+<h3>ZimaOS (App Store, recommended)</h3>
 <ol>
-<li>Go to <a href="https://github.com/new">github.com/new</a>. Name it <code>tableplan</code>, choose <b>Public</b>, and don't add a README.</li>
-<li>Then run:</li>
-</ol>
-<div class="code"><span class="lbl">in the unzipped tableplan folder</span><pre><code>cd ~/Downloads/tableplan
-git remote add origin https://github.com/thomasjvalenzuela/tableplan.git
-git push -u origin main</code></pre></div>
-<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Why public?</div><p>ZimaOS downloads the app and its store listing without logging in to GitHub, so the repo, the Pages site and the container image all need to be public. Your recipes and data never leave your server. If you want a private repo later, it's possible, but ZimaOS would need registry credentials.</p></div>
-
-<h2 id="s2" class="stephead"><span class="step"><input type="checkbox" data-step="2" aria-label="Done"><span class="n">2</span> Turn on Pages &amp; make the image public</span></h2>
-<ol>
-<li>Open the repo → <b>Actions</b>. The <b>Release</b> workflow runs automatically on your push. Wait for the green check, about 5–8 minutes the first time.</li>
-<li><b>Settings → Pages</b>: under <i>Build and deployment</i>, set Source to <b>Deploy from a branch</b>, and Branch to <b><code>gh-pages</code></b> / <code>root</code>. Save.</li>
-<li>Your GitHub profile → <b>Packages → tableplan → Package settings</b>. Scroll to <i>Danger Zone</i> → <b>Change visibility → Public</b>.</li>
-<li>Check that it worked by opening <a href="https://thomasjvalenzuela.github.io/tableplan/store.json">thomasjvalenzuela.github.io/tableplan/store.json</a>. It should show a short block of text that includes "TablePlan". Pages can take a minute to go live.</li>
-</ol>
-
-<h2 id="s3" class="stephead"><span class="step"><input type="checkbox" data-step="3" aria-label="Done"><span class="n">3</span> Install on ZimaOS</span></h2>
-<p>Pick <b>one</b> of these. Option A gives you update prompts in ZimaOS.</p>
-<h3>Option A: ZimaOS App Store (recommended, gives update prompts)</h3>
-<ol>
-<li>Open ZimaOS → <b>App Store</b>.</li>
-<li>Click <b>Community store</b> (top right, next to any stores you already added, such as <i>bigbeartechworld</i>) → <b>Add</b>.</li>
-<li>Paste this address and confirm:</li>
+<li>Open <b>App Store</b> → <b>Community store</b> → <b>Add</b>, and paste:</li>
 </ol>
 <div class="code"><span class="lbl">community store URL</span><pre><code>https://thomasjvalenzuela.github.io/tableplan/store.json</code></pre></div>
-<ol start="4">
-<li>Select the <b>TablePlan</b> store, find <b>TablePlan</b> (category <i>Home</i>) and click <b>Install</b>. Mealie downloads with it, which takes a few minutes the first time.</li>
-<li>Click the TablePlan tile on your dashboard to start the setup wizard.</li>
+<ol start="2">
+<li>Switch to the <b>TablePlan</b> store and click <b>TablePlan → Install</b>. Mealie installs with it.</li>
+<li>Optional: before installing, change the volume paths if you keep app data on a different disk. The default is <code>/DATA/AppData/tableplan</code>.</li>
 </ol>
-<div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Your data folder</div><p>The store installs to <code>/DATA/AppData/tableplan</code>, the ZimaOS default. To keep it on your big disk, open TablePlan's install settings before tapping Install and change both volume paths to a folder on that disk, for example <code>/media/DATA/AppData/tableplan/…</code>.</p></div>
-<div class="alert warn"><div class="t">"Failed to add community store"?</div><p>Open <code>https://thomasjvalenzuela.github.io/tableplan/store.json</code> in a browser. If you get a 404, GitHub Pages isn't switched on yet (step 2). Also check that the address ends in <code>/store.json</code> and has no spaces.</p></div>
+<p>ZimaOS shows an <b>Update</b> button whenever a new version is released.</p>
 
-<h3>Option A2: paste it as a Custom App (no store)</h3>
-<p>Go to App Store → <b>My Apps</b> → <b>Install Custom App</b> → <b>YAML</b>, paste the file from <a href="https://thomasjvalenzuela.github.io/tableplan/apps/io.github.thomasjvalenzuela.tableplan/docker-compose.yml">this link</a>, and click Install. Leave <b>Ignore updates</b> off, so ZimaOS can still notice new versions of the <code>:latest</code> image.</p>
-
-<h3>Option B: one SSH command</h3>
-<div class="code"><span class="lbl">on your computer</span><pre><code>ssh YOUR-USER@YOUR-SERVER-IP</code></pre></div>
-<div class="code"><span class="lbl">then on the server</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo bash</code></pre></div>
+<h3>Any Linux server with Docker (one command)</h3>
+<p>This covers CasaOS, Ubuntu/Debian and similar. SSH into the server and run:</p>
+<div class="code"><span class="lbl">on the server</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo bash</code></pre></div>
 <p>The installer:</p>
 <ul>
 <li>checks Docker and that ports 9930 and 9925 are free</li>
-<li>installs to <code>/media/DATA/AppData/tableplan</code> if that disk exists, otherwise <code>/DATA/AppData/tableplan</code></li>
+<li>picks an install folder: <code>/media/DATA/AppData/tableplan</code>, <code>/DATA/AppData/tableplan</code> or <code>/opt/tableplan</code>, whichever exists</li>
 <li>starts both containers</li>
 <li>prints the address to open</li>
 </ul>
-<p>Running it again later updates TablePlan. Your data is kept. You can also manage it with:</p>
-<div class="code"><span class="lbl">manage</span><pre><code>sudo tableplan status      <span class="c"># is it running?</span>
-sudo tableplan update      <span class="c"># get the latest version</span>
-sudo tableplan logs        <span class="c"># see what it's doing</span>
-sudo tableplan backup      <span class="c"># zip up your data</span>
-sudo tableplan uninstall   <span class="c"># remove containers, keep data</span></code></pre></div>
-<div class="alert important"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/></svg>Confirm the address</div><p>The installer prints your server's current IP address. Use that one, since home IP addresses can change.</p></div>
+<p>You can choose different ports or a different folder:</p>
+<div class="code"><span class="lbl">custom ports / folder</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo TABLEPLAN_PORT=8930 MEALIE_PORT=8925 TABLEPLAN_DIR=/srv/tableplan bash</code></pre></div>
+<div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Want to read it first?</div><p>It's a good habit to read a script before piping it to <code>sudo</code>. Download it and read it first:<br><code>curl -fsSLO https://thomasjvalenzuela.github.io/tableplan/install.sh &amp;&amp; less install.sh &amp;&amp; sudo bash install.sh</code></p></div>
 
-<h2 id="s4" class="stephead"><span class="step"><input type="checkbox" data-step="4" aria-label="Done"><span class="n">4</span> Run the setup wizard</span></h2>
-<p>Open <code>http://YOUR-SERVER-IP:9930</code>. The wizard starts automatically. You can <b>skip</b> any step and finish it later in <b>Settings</b>.</p>
+<h3>Docker Compose / Portainer / Dockge / Unraid</h3>
+<div class="code"><span class="lbl">terminal</span><pre><code>mkdir tableplan &amp;&amp; cd tableplan
+curl -fsSLO https://thomasjvalenzuela.github.io/tableplan/docker-compose.yml
+nano docker-compose.yml        <span class="c"># optional: set TZ, change ports</span>
+docker compose up -d</code></pre></div>
+<p>In <b>Portainer</b>, go to <i>Stacks → Add stack</i> and paste the contents of <a href="https://thomasjvalenzuela.github.io/tableplan/docker-compose.yml">docker-compose.yml</a>.</p>
+<p>Already running Mealie v3? Use <a href="https://thomasjvalenzuela.github.io/tableplan/docker-compose.existing-mealie.yml">docker-compose.existing-mealie.yml</a> instead, set <code>MEALIE_URL</code> to your Mealie address, and choose <b>Sign in</b> in the wizard.</p>
+
+<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>First start takes a few minutes</div><p>Mealie downloads about 500 MB and sets up its database on first start. Wait for both containers to show <b>Running</b> or <b>healthy</b>.</p></div>
+
+<h2 id="s2" class="stephead"><span class="step"><input type="checkbox" data-step="2" aria-label="Done"><span class="n">2</span> Run the setup wizard</span></h2>
+<p>Open <code>http://YOUR-SERVER-IP:9930</code> in a browser. The wizard starts on its own, and you can <b>skip</b> any step and finish it later in <b>Settings</b>.</p>
 <table>
-<tr><th>Screen</th><th>What to enter</th><th>Where to get it</th></tr>
-<tr><td><b>Household</b></td><td>A name, and how many people you cook for</td><td>Every recipe you plan is scaled to this number.</td></tr>
-<tr><td><b>Recipe library</b></td><td>Your name, email and a password (8+ characters)</td><td>This creates your Mealie login and replaces Mealie's default account. TablePlan makes its own secure token, so you never copy one by hand.</td></tr>
-<tr><td><b>Import from screenshots</b></td><td>An OpenAI API key. Leave the model as <code>gpt-5-mini</code>.</td><td><a href="https://platform.openai.com/api-keys">platform.openai.com/api-keys</a> → <i>Create new secret key</i>. Add about $5 of credit, which covers hundreds of imports. TablePlan tests the key before saving it.</td></tr>
-<tr><td><b>Email</b></td><td>Provider, your address, and an app password</td><td><b>Gmail / Workspace:</b> Google Account → Security → 2-Step Verification → <a href="https://myaccount.google.com/apppasswords">App passwords</a>. TablePlan sends a test email to confirm it works.</td></tr>
-<tr><td><b>Lock it</b></td><td>Optional household password</td><td>Leave it blank if only your home Wi-Fi can reach TablePlan.</td></tr>
+<tr><th>Screen</th><th>What it does</th><th>What you need</th></tr>
+<tr><td><b>Household</b></td><td>Sets how many people you cook for. Planned meals and shopping lists scale to that number.</td><td>A name and a number</td></tr>
+<tr><td><b>Recipe library</b></td><td>Creates your Mealie login and replaces Mealie's default <code>changeme@example.com</code> account. TablePlan then creates its own access token, so you never copy keys by hand.</td><td>Your name, email, and a password with at least 8 characters</td></tr>
+<tr><td><b>Import from screenshots</b></td><td>Connects AI so photos, screenshots and TikTok/YouTube links become recipes. The key is tested before it's saved.</td><td>An OpenAI key from <a href="https://platform.openai.com/api-keys">platform.openai.com/api-keys</a>, with a little prepaid credit</td></tr>
+<tr><td><b>Email</b></td><td>Sends a test message, then lets you email shopping lists, meal plans and pantry reports.</td><td>Gmail/Google Workspace: an <a href="https://myaccount.google.com/apppasswords">App Password</a>. Outlook, iCloud, Yahoo and any SMTP server also work.</td></tr>
+<tr><td><b>Lock it</b></td><td>Adds an optional household password.</td><td>Recommended if anyone outside your home can reach the server</td></tr>
 </table>
-<div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Change anything later</div><p>Go to <b>Settings → Setup</b> to change the household size, reconnect Mealie, replace the OpenAI key, change email settings, or add or remove the password. <i>Run setup wizard again</i> is at the bottom of Settings.</p></div>
 
-<h2 id="s5" class="stephead"><span class="step"><input type="checkbox" data-step="5" aria-label="Done"><span class="n">5</span> Add to your phones</span></h2>
+<h2 id="s3" class="stephead"><span class="step"><input type="checkbox" data-step="3" aria-label="Done"><span class="n">3</span> Add it to your phone</span></h2>
 <table>
-<tr><th>iPhone (Safari)</th><th>Android (Chrome)</th></tr>
+<tr><th>iPhone / iPad (Safari)</th><th>Android (Chrome)</th></tr>
 <tr><td>Open <code>http://YOUR-SERVER-IP:9930</code> → <b>Share</b> → <b>Add to Home Screen</b></td><td>Open it → <b>⋮</b> → <b>Add to Home screen</b></td></tr>
 </table>
-<div class="alert caution"><div class="t"><svg viewBox="0 0 16 16"><path d="M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Away from home</div><p>Use <b>Tailscale</b> on your phone to reach the same address. Don't port-forward 9930 or 9925 on your router.</p></div>
+<p>It opens full-screen with its own icon, like a native app.</p>
 
-<h2 id="updates">How updates reach you</h2>
+<h2 id="updates">Updating</h2>
+<p>TablePlan checks for new versions and shows a blue <b>Update available</b> banner on Home and in Settings.</p>
 <table>
-<tr><th>You do</th><th>What happens automatically</th></tr>
-<tr><td>Edit the code and run <code>git push</code></td><td>GitHub Actions builds version <code>0.2.N</code> for both Intel and ARM servers. It publishes the image and the updated store listing, using the first line of your commit message as the release note.</td></tr>
-<tr><td>Nothing</td><td><b>ZimaOS:</b> the App Store sees the new version and shows <b>Update</b> on TablePlan.<br><b>TablePlan:</b> a blue "Update available" banner appears on Home and in Settings, telling you how to update.</td></tr>
-<tr><td>Bigger release</td><td>Change <code>VERSION</code> (for example <code>0.2</code> → <code>0.3</code>) and push.</td></tr>
-<tr><td>Upgrade Mealie</td><td>Change the Mealie image tag in <code>zimaos-store/Apps/TablePlan/docker-compose.yml</code> and <code>install/install.sh</code>, then push.</td></tr>
+<tr><th>Installed with</th><th>How to update</th></tr>
+<tr><td>ZimaOS App Store</td><td>App Store → <b>My Apps</b> → TablePlan → <b>Update</b></td></tr>
+<tr><td>One-command installer</td><td><code>sudo tableplan update</code></td></tr>
+<tr><td>Docker Compose</td><td><code>docker compose pull &amp;&amp; docker compose up -d</code> in your TablePlan folder</td></tr>
+<tr><td>Portainer</td><td>Stacks → tableplan → <b>Update the stack</b> with <i>Re-pull image</i> checked</td></tr>
 </table>
-<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>SSH installs</div><p>If you used Option B, updates arrive as the in-app banner. Run <code>sudo tableplan update</code> to install them.</p></div>
+<p>Your data is kept across updates.</p>
 
-<h2 id="use">Everyday use</h2>
-<table>
-<tr><th>I want to…</th><th>Do this</th></tr>
-<tr><td>Save a recipe</td><td>Home → <b>+</b> → paste a link, or switch to <b>Screenshot / Photo</b> and pick images</td></tr>
-<tr><td>Plan the week or month</td><td>Meals → <b>Auto-plan</b> → Generate → swap 🔀 or remove ✕ any pick → Save</td></tr>
-<tr><td>Make the grocery list</td><td>Meals → <b>Add to list</b>. Ingredients are scaled for your household, merged, and anything already in the pantry is skipped.</td></tr>
-<tr><td>Shop</td><td><b>List</b> tab → tap each item as it goes in the cart. Food moves into the pantry with a use-by date.</td></tr>
-<tr><td>Log what we used</td><td>Pantry → item → ¼ / ½ / ¾ / All. The first use switches the item to its after-opening date (heavy cream → 7 days).</td></tr>
-<tr><td>Share or print</td><td>The <b>Share</b> button on Meals, List or Pantry: email, print, CSV, or calendar (.ics)</td></tr>
-</table>
+<h2 id="backup">Backup &amp; uninstall</h2>
+<p>Everything lives in two folders: <code>data/</code> for TablePlan (pantry, settings and shelf-life rules) and <code>mealie/</code> for recipes, photos, plans and lists. Back up both.</p>
+<div class="code"><span class="lbl">installer users</span><pre><code>sudo tableplan backup      <span class="c"># writes tableplan-backup-DATE.tgz next to the install folder</span>
+sudo tableplan uninstall   <span class="c"># removes containers, keeps your data</span></code></pre></div>
+<div class="code"><span class="lbl">compose users</span><pre><code>docker compose stop &amp;&amp; tar czf tableplan-backup.tgz data mealie &amp;&amp; docker compose start
+docker compose down        <span class="c"># uninstall; delete the folder to remove data too</span></code></pre></div>
+<p>Mealie also has built-in backups under Settings → Backups.</p>
+
+<h2 id="remote">Using it away from home</h2>
+<ul>
+<li><b>Recommended:</b> a private network such as <a href="https://tailscale.com">Tailscale</a>, so your phone reaches the server as if you were at home. Nothing is exposed to the internet.</li>
+<li><b>Public domain:</b> put TablePlan and Mealie behind a reverse proxy with HTTPS, such as Caddy, Nginx Proxy Manager or Traefik. Set a <b>household password</b> in the wizard, and set <code>MEALIE_PUBLIC_URL</code> so recipe links use your domain.</li>
+<li><b>Don't</b> port-forward 9930 or 9925 directly on your router.</li>
+</ul>
 
 <h2 id="trouble">Troubleshooting</h2>
 <table>
 <tr><th>Symptom</th><th>Fix</th></tr>
-<tr><td>The Release workflow fails at "Log in to GHCR" or "push"</td><td>Repo <b>Settings → Actions → General → Workflow permissions</b> → <b>Read and write</b>, then re-run the workflow.</td></tr>
-<tr><td>ZimaOS can't add the store, or shows no apps</td><td>Use the address ending in <code>/store.json</code>. Check that Pages is on (step 2) and that the URL opens in a browser. New Pages sites can take up to 10 minutes.</td></tr>
-<tr><td>Install fails with "pull access denied"</td><td>The image is still private. Do step 2.3 (make the package public).</td></tr>
-<tr><td>Wizard says "Can't reach Mealie yet"</td><td>Mealie needs about a minute on first start. Tap <b>Check again</b>.</td></tr>
-<tr><td>Wizard says "This Mealie already has an account"</td><td>Someone already set up this Mealie. Switch to <b>Sign in</b> with that login.</td></tr>
-<tr><td>OpenAI test failed</td><td>The key is wrong, or the account has no credit. Billing is at platform.openai.com.</td></tr>
-<tr><td>Email test failed</td><td>For Gmail, use an <b>App Password</b>, not your normal password. It needs 2-Step Verification turned on.</td></tr>
-<tr><td>Forgot the TablePlan password</td><td>On the server, run <code>sudo docker exec tableplan python -c "import sqlite3;c=sqlite3.connect('/data/tableplan.db');c.execute(&quot;DELETE FROM settings WHERE key='cfg.app_password_hash'&quot;);c.commit()"</code>, then <code>sudo docker restart tableplan</code>.</td></tr>
+<tr><td>ZimaOS: "Failed to add community store"</td><td>Use the full address ending in <code>/store.json</code>, with no spaces or extra characters.</td></tr>
+<tr><td>Wizard: "Can't reach Mealie yet"</td><td>Mealie is still starting, which takes about a minute the first time. Tap <b>Check again</b>.</td></tr>
+<tr><td>Wizard: "This Mealie already has an account"</td><td>Your Mealie was set up before. Choose <b>Sign in</b> and use that login.</td></tr>
+<tr><td>OpenAI test failed</td><td>The key is wrong, or the account has no credit. Check billing at platform.openai.com.</td></tr>
+<tr><td>Email test failed</td><td>Gmail and Yahoo need an <b>App Password</b> (2-Step Verification must be on), not your normal password.</td></tr>
+<tr><td>Use-by dates are off by a day</td><td>Set <code>TZ</code> to your time zone, for example <code>America/New_York</code>, and recreate the container.</td></tr>
+<tr><td>"Open recipe" links go to the wrong address</td><td>Set <code>MEALIE_PUBLIC_URL</code>, for example <code>https://recipes.example.com</code>.</td></tr>
+<tr><td>Forgot the TablePlan password</td><td><code>docker exec tableplan python -c "import sqlite3;c=sqlite3.connect('/data/tableplan.db');c.execute(&quot;DELETE FROM settings WHERE key='cfg.app_password_hash'&quot;);c.commit()"</code>, then <code>docker restart tableplan</code></td></tr>
+<tr><td>Something else</td><td>Check <code>docker logs tableplan</code> and <code>docker logs tableplan-mealie</code>, then <a href="https://github.com/thomasjvalenzuela/tableplan/issues">open an issue</a> with the error.</td></tr>
 </table>
+
+<h2 id="faq">FAQ</h2>
+<p><b>Does my data leave my server?</b><br>
+No, with two exceptions you turn on yourself: screenshot imports go to OpenAI, and emails go through your mail provider. The only other outside requests are one download of the public USDA FoodKeeper shelf-life database and a version check against GitHub Pages.</p>
+<p><b>Where do the use-by dates come from?</b><br>
+From the USDA FoodKeeper database, always using the low end of its ranges to stay safe. When you open or freeze something, it switches to the matching "after opening" or "freezer" time. A date you type from the package always wins. You can edit any rule in Settings.</p>
+<p><b>Can I use my existing Mealie?</b><br>
+Yes. Use <code>docker-compose.existing-mealie.yml</code> and sign in during the wizard. Your recipes, plans and lists stay in Mealie.</p>
+<p><b>What does it cost?</b><br>
+TablePlan and Mealie are free and open source. AI imports use your own OpenAI account, at a few cents per recipe.</p>
+<p><b>License</b><br>
+TablePlan is <a href="https://github.com/thomasjvalenzuela/tableplan/blob/main/LICENSE">AGPL-3.0</a>. Mealie is AGPL-3.0. USDA FoodKeeper data is public domain.</p>
 
 </article>
 </div>
-<div class="footer">TablePlan · self-hosted · Mealie is open source (AGPL-3.0)</div>
+<div class="footer">TablePlan · <a href="https://github.com/thomasjvalenzuela/tableplan">GitHub</a> · <a href="https://github.com/thomasjvalenzuela/tableplan/issues">Report an issue</a></div>
 </div>
 <script>
 (function(){
@@ -263,7 +260,7 @@ sudo tableplan uninstall   <span class="c"># remove containers, keep data</span>
   function fallback(t){var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}a.remove()}
 
   // step checklist with saved progress
-  var KEY='tableplan.setup.steps', saved={};
+  var KEY='tableplan.install.steps', saved={};
   try{saved=JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){}
   var boxes=[].slice.call(document.querySelectorAll('input[data-step]'));
   function render(){

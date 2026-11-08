@@ -1670,7 +1670,8 @@ def update_info(force=False):
 
     available = bool(latest and APP_VERSION != "dev" and vt(latest) > vt(APP_VERSION))
     how = {"zimaos": "Open ZimaOS → App Store → My Apps → TablePlan → Update.",
-           "cli": "On the server run:  sudo tableplan update"}.get(INSTALL_METHOD, "Pull the new image and restart the container.")
+           "cli": "On the server run:  sudo tableplan update"}.get(
+        INSTALL_METHOD, "In your TablePlan folder run:  docker compose pull && docker compose up -d")
     return {"version": APP_VERSION, "latest": latest, "update_available": available,
             "notes": feed.get("notes"), "released": feed.get("released"), "how": how, "install": INSTALL_METHOD}
 
