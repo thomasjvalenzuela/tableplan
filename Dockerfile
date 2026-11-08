@@ -13,6 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # tzdata so TZ=America/Chicago etc. gives correct local dates for use-by math
 RUN apk add --no-cache tzdata
+# yt-dlp reads public Instagram / TikTok / YouTube / Facebook recipe videos (caption + audio)
+RUN pip install --no-cache-dir -U yt-dlp
 
 WORKDIR /app
 COPY app/ /app/

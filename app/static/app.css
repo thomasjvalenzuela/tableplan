@@ -430,3 +430,7 @@ input::placeholder,textarea::placeholder{color:var(--sub2)}
 .update-bar #upd-later{padding:6px;display:grid;place-items:center}
 .round-btn.dot,.tab.dot{position:relative}
 .round-btn.dot::after,.tab.dot::after{content:"";position:absolute;top:6px;right:6px;width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 0 2px var(--bg)}
+
+.pdf-thumb{width:64px;height:64px;border-radius:10px;background:var(--card2);display:grid;place-items:center;font-size:26px;text-align:center;overflow:hidden}
+.pdf-thumb small{display:block;font-size:9px;color:var(--sub);max-width:60px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+code{font-size:12.5px;background:var(--fill);padding:1px 5px;border-radius:5px;word-break:break-all}

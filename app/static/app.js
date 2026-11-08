@@ -694,34 +694,39 @@ function openAddPantry(after) {
 }
 
 // ------------------------------------------------------------------ add recipe (imports run through Mealie in the background)
-function openAddRecipe() {
+function openAddRecipe(prefill) {
   const c = state.cfg;
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ...(state.setup || {}), ai: a }; const h = $("#ar-aihint"); if (h && a.enabled) h.textContent = "Usually takes 20–60 seconds. Check the ingredients afterwards."; }).catch(() => {});
   const imgs = [];
   openSheet("Add a Recipe", `
-    <div class="seg" id="ar-mode"><button data-m="link" class="on">Link</button><button data-m="photo">Screenshot</button><button data-m="type">Type it</button></div>
+    <div class="seg" id="ar-mode"><button data-m="link" class="on">Link</button><button data-m="photo">Screenshot</button><button data-m="paste">Paste</button><button data-m="type">Type it</button></div>
     <div id="ar-body"></div>
     <div id="ar-result"></div>`, {
     onMount() {
       const body = $("#ar-body");
       const drawLink = () => {
-        body.innerHTML = `<div class="group" style="margin-top:12px"><div class="field"><input class="full" type="url" id="ar-url" placeholder="Paste a recipe, TikTok or YouTube link" autocomplete="off"></div></div>
+        body.innerHTML = `<div class="group" style="margin-top:12px"><div class="field"><input class="full" type="url" id="ar-url" placeholder="Recipe site, Instagram, TikTok, YouTube or Google Doc link" autocomplete="off"></div></div>
           <div style="height:12px"></div><button class="btn" id="ar-go">${ic("link")} Import</button>
-          <p class="hint">Most recipe sites import in a few seconds. Video links need AI import turned on in Settings.</p>`;
+          <p class="hint">Recipe sites import in seconds. Videos read the caption first; if the recipe is only spoken, AI listens to it (needs your OpenAI key, ~30–90 s). Google Docs must be shared as “Anyone with the link”.</p>`;
         $("#ar-go").onclick = () => { const u = $("#ar-url").value.trim(); if (!/^https?:\/\//i.test(u)) return toast("Paste a full link starting with https://"); run("link", () => api("POST", "/api/import/url", { url: u })); };
         if (navigator.clipboard && navigator.clipboard.readText) {
           $("#ar-url").addEventListener("focus", async () => { try { const t = await navigator.clipboard.readText(); if (/^https?:\/\//.test(t) && !$("#ar-url").value) $("#ar-url").value = t.trim(); } catch (_) {} }, { once: true });
         }
       };
       const drawPhoto = () => {
-        body.innerHTML = `<label class="drop" style="margin-top:12px">${ic("camera")}<div style="margin-top:6px"><b>Choose screenshots or photos</b><br><span class="muted">Up to 8 images: a recipe card, cookbook page or a screenshot of a post</span></div>
-          <input type="file" id="ar-files" accept="image/*" multiple hidden></label>
+        body.innerHTML = `<label class="drop" style="margin-top:12px">${ic("camera")}<div style="margin-top:6px"><b>Choose screenshots, photos or a PDF</b><br><span class="muted">Up to 8 files: a recipe card, cookbook page or a screenshot of a post</span></div>
+          <input type="file" id="ar-files" accept="image/*,application/pdf" multiple hidden></label>
           <div class="thumbs" id="ar-thumbs"></div>
           <div style="height:12px"></div><button class="btn" id="ar-go" ${imgs.length ? "" : "disabled"}>${ic("sparkle")} Read recipe with AI</button>
           <p class="hint" id="ar-aihint">${state.setup?.ai?.enabled === false ? "AI import isn't set up yet. Add your OpenAI key in Settings → AI recipe import." : "Usually takes 20–60 seconds. Check the ingredients afterwards."}</p>`;
-        const thumbs = () => { $("#ar-thumbs").innerHTML = imgs.map((im) => `<img src="${im.data}" alt="">`).join(""); $("#ar-go").disabled = !imgs.length; };
+        const thumbs = () => { $("#ar-thumbs").innerHTML = imgs.map((im) => im.type === "application/pdf" ? `<div class="pdf-thumb">📄<small>${esc(im.name)}</small></div>` : `<img src="${im.data}" alt="">`).join(""); $("#ar-go").disabled = !imgs.length; };
         $("#ar-files").onchange = async (e) => {
-          for (const f of [...e.target.files].slice(0, 8 - imgs.length)) imgs.push({ name: f.name, type: "image/jpeg", data: await shrink(f) });
+          for (const f of [...e.target.files].slice(0, 8 - imgs.length)) {
+            if (f.type === "application/pdf") {
+              if (f.size > 15e6) { toast("That PDF is over 15 MB"); continue; }
+              imgs.push({ name: f.name, type: f.type, data: await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(f); }) });
+            } else imgs.push({ name: f.name, type: "image/jpeg", data: await shrink(f) });
+          }
           thumbs();
         };
         thumbs();
@@ -744,6 +749,12 @@ function openAddRecipe() {
           if (state.tab === "recipes") rstate.list = null;
         } catch (e) { prog.stop(); btn.disabled = false; btn.innerHTML = label; $("#ar-result").innerHTML = `<div class="banner" style="margin-top:12px">${esc(e.message)}</div>`; }
       };
+      const drawPaste = () => {
+        body.innerHTML = `<div class="group" style="margin-top:12px"><textarea class="full-area" id="ar-text" rows="10" placeholder="Paste the whole recipe: title, ingredients and steps. From Notes, a Google Doc, an email or a text message."></textarea></div>
+          <div style="height:12px"></div><button class="btn" id="ar-go">${ic("file")} Import text</button>
+          <p class="hint">Works without AI when the text has “Ingredients” and “Instructions” headings. With AI, any layout works.</p>`;
+        $("#ar-go").onclick = () => { const t = $("#ar-text").value.trim(); if (t.length < 20) return toast("Paste the recipe text first"); run("link", () => api("POST", "/api/import/text", { text: t })); };
+      };
       const drawType = () => {
         body.innerHTML = `<div class="group" style="margin-top:12px"><div class="field"><input class="full" id="ar-name" placeholder="Recipe name, e.g. Grandma's lasagna" autocomplete="off"></div></div>
           <div style="height:12px"></div><button class="btn" id="ar-go">${ic("edit")} Start writing</button><p class="hint">You'll add ingredients and steps on the next screen.</p>`;
@@ -752,8 +763,9 @@ function openAddRecipe() {
           try { const r = await api("POST", "/api/recipes/new", { name }); closeSheet(true); location.hash = "edit/" + encodeURIComponent(r.slug); } catch (e) { fail(e); }
         };
       };
-      $$("#ar-mode button").forEach((bt) => (bt.onclick = () => { $$("#ar-mode button").forEach((x) => x.classList.toggle("on", x === bt)); ({ link: drawLink, photo: drawPhoto, type: drawType })[bt.dataset.m](); }));
+      $$("#ar-mode button").forEach((bt) => (bt.onclick = () => { $$("#ar-mode button").forEach((x) => x.classList.toggle("on", x === bt)); ({ link: drawLink, photo: drawPhoto, paste: drawPaste, type: drawType })[bt.dataset.m](); }));
       drawLink();
+      if (prefill) { $("#ar-url").value = prefill; setTimeout(() => $("#ar-go").click(), 200); }
     },
   });
 }
@@ -935,6 +947,8 @@ async function openSettings() {
       <p class="hint">Weekly is recommended: a quick “still have it?” review keeps use-by dates and shopping lists honest.</p>
       <div class="group-label">AI</div>
       <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${s.ai_budget}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
+      <div class="group-label">Import</div>
+      <div class="group"><button class="row" id="st-share"><span class="ic bg-pink" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;background:#E1306C">${ic("share")}</span><div class="main"><div class="a">Share to TablePlan from your phone</div><div class="b">Send Instagram, TikTok and recipe links straight in</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Shelf life data</div>
       <div class="group">
         <div class="row"><div class="main"><div class="a">USDA FoodKeeper</div><div class="b">${counts.usda ? `${counts.usda} foods · synced ${esc((c.usda_synced_at || "").replace("T", " "))}` : "Not synced yet — using starter table"}</div></div></div>
@@ -966,6 +980,7 @@ async function openSettings() {
     const titles = { household: "Household", mealie: "Recipe library", ai: "AI recipe import", notify: "Notifications", password: "Password" };
     $$("[data-sec]").forEach((b) => (b.onclick = () => openSetupSection(b.dataset.sec, titles[b.dataset.sec], reloadCfg)));
     $("#st-mimport") && ($("#st-mimport").onclick = () => openMealieImport());
+    $("#st-share").onclick = () => openShareSetup();
     $("#st-wizard").onclick = () => { closeSheet(true); runWizard(() => location.reload()); };
     $("#st-logout") && ($("#st-logout").onclick = async () => { await api("POST", "/api/logout"); location.reload(); });
     $("#st-up") && ($("#st-up").onclick = () => openUpdateHelp());
@@ -977,6 +992,24 @@ async function openSettings() {
     $("#st-rules").onclick = () => rulesBrowser(draw);
   };
   openSheet("Settings", loading(), { onMount: draw });
+}
+
+function openShareSetup() {
+  const base = location.origin;
+  openSheet("Share to TablePlan", `
+    <div class="group-label">iPhone & iPad (one-time, 1 minute)</div>
+    <div class="whatsnew"><ul>
+      <li><span class="ic bg-blue">1</span><span><b>Open the Shortcuts app → tap +</b><span>Name it “TablePlan”.</span></span></li>
+      <li><span class="ic bg-blue">2</span><span><b>Tap the ⓘ info button → turn on “Show in Share Sheet”</b><span>Set it to receive <b>URLs</b> and <b>Text</b>.</span></span></li>
+      <li><span class="ic bg-blue">3</span><span><b>Add the action “URL”</b><span>Set it to: <code id="sc-url">${esc(base)}/?url=</code> then tap after the = and insert the variable <b>Shortcut Input</b>.</span></span></li>
+      <li><span class="ic bg-blue">4</span><span><b>Add the action “Open URLs”</b><span>Done. Now in Instagram tap Share → <b>TablePlan</b> (under “More” the first time).</span></span></li>
+    </ul></div>
+    <button class="btn sec" id="sc-copy">${ic("link")} Copy the address for step 3</button>
+    <div class="group-label">Android</div>
+    <p class="hint" style="margin:0 4px">Add TablePlan to your home screen from Chrome (⋮ → Install app). It then appears in every app's Share menu.</p>
+    <p class="hint">Shared posts open TablePlan and import automatically. Public posts work best; private accounts need screenshots.</p>`, {
+    onMount() { $("#sc-copy").onclick = async () => { try { await navigator.clipboard.writeText(base + "/?url="); toast("Copied"); } catch (_) { toast(base + "/?url="); } }; },
+  });
 }
 
 function openMealieImport() {
@@ -1056,6 +1089,9 @@ function openUpdateHelp() {
   checkUpdate(); setInterval(checkUpdate, 3600e3);
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ai: a }; }).catch(() => {});
   route();
+  const qs = new URLSearchParams(location.search);
+  const shared = qs.get("share_url") || qs.get("url") || (qs.get("share_text") || "").match(/https?:\/\/\S+/)?.[0];
+  if (shared) { history.replaceState(null, "", "/" + location.hash); setTimeout(() => openAddRecipe(shared), 400); }
   window.addEventListener("popstate", route);
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });

@@ -3,6 +3,7 @@
   "short_name": "TablePlan",
   "start_url": "/",
   "display": "standalone",
+  "share_target": {"action": "/", "method": "GET", "params": {"title": "share_title", "text": "share_text", "url": "share_url"}},
   "background_color": "#4a3e7a",
   "theme_color": "#e9906b",
   "icons": [

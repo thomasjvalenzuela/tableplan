@@ -913,9 +913,9 @@ def _fetch_page(url):
 
 AI_RECIPE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["found", "source_url", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags"],
+    "required": ["found", "complete", "missing", "source_url", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags"],
     "properties": {
-        "found": {"type": "boolean"}, "source_url": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"},
+        "found": {"type": "boolean"}, "complete": {"type": "boolean"}, "missing": {"type": "string"}, "source_url": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"},
         "servings": {"type": "number"}, "prep_minutes": {"type": "integer"}, "cook_minutes": {"type": "integer"},
         "total_minutes": {"type": "integer"},
         "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["section", "line"],
@@ -931,12 +931,15 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
     if not cfg("openai_key"):
         raise ApiError(400, "This needs AI. Add your OpenAI key in Settings → AI recipe import.")
     content = [{"type": "text", "text": (
-        "Extract the single recipe from the material below. Copy ingredient lines exactly with amounts, amount first "
+        "Extract the single recipe from the material below. Clean up typos, spacing and formatting, but never change the recipe: keep every amount, ingredient, temperature, time and step exactly. Copy ingredient lines with amounts, amount first "
         "(e.g. '1 1/2 cups heavy cream'); put section headings in 'section' (empty if none). Steps are the instructions "
-        "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content.")
+        "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content. Set complete=false when part of the recipe is clearly missing: no ingredient list, no instructions, text cut off mid-list or mid-step (e.g. a second page or screenshot wasn't included), or steps that use ingredients the list doesn't include; then explain what's missing in 'missing' (one short sentence). Missing amounts in a spoken video recipe do not count as incomplete.")
         + (f"\n\n{text[:30000]}" if text else "")}]
     for im in images or []:
         data = im.get("data") or ""
+        if data.startswith("data:application/pdf"):
+            content.append({"type": "file", "file": {"filename": im.get("name") or "recipe.pdf", "file_data": data}})
+            continue
         if not data.startswith("data:image/"):
             data = "data:image/jpeg;base64," + data.split(",", 1)[-1]
         content.append({"type": "image_url", "image_url": {"url": data, "detail": "high"}})
@@ -948,9 +951,12 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
             "SOURCE: <web address shown in the material, or blank>\nTITLE: <name>\nDESCRIPTION: <one sentence or blank>\nSERVINGS: <number or 0>\nPREP: <minutes or 0>\n"
             "COOK: <minutes or 0>\nTOTAL: <minutes or 0>\nTAGS: <comma separated>\nINGREDIENTS:\n<one ingredient per line, amount first; "
             "a line starting with # is a section heading>\nSTEPS:\n<one step per line>\n"
-            "Copy amounts exactly and never invent content. If there is no recipe, reply only: NO RECIPE")
+            "Copy amounts exactly and never invent content. If there is no recipe, reply only: NO RECIPE. If part of the recipe is clearly missing (no ingredients, no steps, or cut off), reply only: INCOMPLETE: <what's missing>")
             + (f"\n\n{text[:30000]}" if text else "")}
         out = parse_recipe_text(openai_text([{"role": "user", "content": content}], feature + " (text)", detail))
+    if out.get("complete") is False or out.get("incomplete"):
+        raise ApiError(422, "This recipe looks incomplete, so it wasn't saved: " + (out.get("missing") or out.get("incomplete") or "part of it is missing")
+                       + " Add the missing part (another screenshot or the rest of the text) and try again.")
     if not out.get("found") or not (out.get("ingredients") or out.get("steps")):
         raise ApiError(422, "No recipe found there. Try a clearer screenshot that shows the ingredients and steps.")
     ings = [{"referenceId": str(uuid.uuid4()), "title": (x.get("section") or None), "note": x["line"], "display": x["line"],
@@ -2142,8 +2148,15 @@ def setup_status():
 # ============================================================ recipe import (headless Mealie)
 
 def import_url(url):
-    if not re.match(r"^https?://", url or ""):
+    url = (url or "").strip()
+    m = re.search(r"https?://\S+", url)   # share sheets often send "Check this out! https://…"
+    url = m.group(0).rstrip(").,") if m else url
+    if not re.match(r"^https?://", url):
         raise ApiError(400, "Paste a full link starting with https://")
+    if NATIVE and GDOC_RE.match(url):
+        return import_gdoc(url)
+    if NATIVE and VIDEO_HOSTS.search(urllib.parse.urlparse(url).hostname or ""):
+        return import_video(url)
     slug = mealie("POST", "/api/recipes/create/url", {"url": url, "includeTags": True}, timeout=180)
     return _imported(slug)
 
@@ -2391,6 +2404,165 @@ def import_from_mealie(b):
         ls = n_lists.migrate_from_mealie(c, m)
     _recipe_cache["at"] = 0
     return {"recipes": rec, "plans": pl, "lists": ls}
+
+
+# ============================================================ more import sources: videos, Google Docs, pasted text
+
+VIDEO_HOSTS = re.compile(r"(^|\.)(instagram\.com|tiktok\.com|youtube\.com|youtu\.be|facebook\.com|fb\.watch|pinterest\.com|pin\.it|threads\.net)$", re.I)
+GDOC_RE = re.compile(r"^https://docs\.google\.com/document/d/([A-Za-z0-9_-]{20,})")
+
+
+def _looks_like_recipe(text):
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    amounts = sum(1 for l in lines if re.search(r"(^|\s)(\d+([./]\d+)?|[½⅓⅔¼¾⅛])\s*(cups?|tbsp|tsp|tablespoons?|teaspoons?|oz|ounces?|lbs?|pounds?|g|grams?|ml|cloves?|large|medium|small)\b", l, re.I))
+    return amounts >= 3
+
+
+def local_recipe_from_text(text, title=""):
+    """No-AI reader for plain recipes with 'Ingredients' and 'Instructions/Directions/Method' headings."""
+    lines = [l.strip() for l in (text or "").splitlines()]
+    name, mode, ings, steps, cur = title.strip(), None, [], [], []
+    for l in lines:
+        if not l:
+            continue
+        low = l.lower().rstrip(":").strip("*# ")
+        if re.match(r"^ingredients?\b", low):
+            mode = "i"; continue
+        if re.match(r"^(instructions?|directions?|method|preparation|steps?)\b", low):
+            mode = "s"; continue
+        if mode is None:
+            if not name:
+                name = l.strip("*# ")
+            continue
+        item = re.sub(r"^([-•*●▪◦]|\d+[.)])\s*", "", l)
+        if mode == "i":
+            ings.append(item)
+        elif re.match(r"^(\d+[.)]|step\s*\d+)", l, re.I):
+            if cur:
+                steps.append(" ".join(cur))
+            cur = [item + ":"] if len(item) <= 40 and not re.search(r"[.!]$", item) else [item]
+        else:
+            cur.append(item)
+    if cur:
+        steps.append(" ".join(cur))
+    if len(ings) < 2 or not steps:
+        if ings and not steps or steps and not ings:
+            raise ApiError(422, "This recipe looks incomplete, so it wasn't saved: it has " + ("ingredients but no instructions." if ings else "instructions but no ingredient list.")
+                           + " Add the missing part and try again.")
+        return None
+    return {"name": name or "Untitled recipe", "description": "",
+            "recipeIngredient": [{"referenceId": str(uuid.uuid4()), "title": None, "note": x, "display": x, "originalText": x,
+                                  "quantity": 0, "unit": None, "food": None} for x in ings],
+            "recipeInstructions": [{"id": str(uuid.uuid4()), "title": "", "text": x, "ingredientReferences": []} for x in steps]}
+
+
+def recipe_from_text(text, title="", source="", feature="text import"):
+    data = local_recipe_from_text(text, title)
+    if cfg("openai_key"):   # AI reads messy text better; the local reader is the no-key fallback
+        try:
+            data = ai_recipe((f"Title: {title}\n" if title else "") + text, feature=feature, detail=(source or title)[:80])
+        except ApiError:
+            if not data:
+                raise
+    if not data:
+        raise ApiError(422, "Couldn't find ingredients and steps in that text. Add an 'Ingredients' and an 'Instructions' heading, "
+                            "or add your OpenAI key so AI can read it.")
+    if source:
+        data["orgURL"] = source
+    return data
+
+
+def import_text(text, title=""):
+    text = (text or "").strip()
+    if len(text) < 20:
+        raise ApiError(400, "Paste the recipe text (ingredients and steps).")
+    return _imported(_save_new_recipe(recipe_from_text(text[:40000], title)))
+
+
+def import_gdoc(url):
+    doc = GDOC_RE.match(url).group(1)
+    req = urllib.request.Request(f"https://docs.google.com/document/d/{doc}/export?format=txt", headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            final = r.geturl()
+            body = r.read(3_000_000).decode("utf-8-sig", errors="replace")
+    except urllib.error.HTTPError:
+        body, final = "", ""
+    if "accounts.google.com" in final or "<html" in body[:500].lower() or not body.strip():
+        raise ApiError(403, "That Google Doc is private. In Google Docs tap Share → General access → 'Anyone with the link', "
+                            "then try again. (Or copy the text and use the Paste tab.)")
+    title = body.strip().splitlines()[0].strip()[:120]
+    return _imported(_save_new_recipe(recipe_from_text(body, title, url, "google doc import")))
+
+
+def _transcribe(path):
+    """Speech-to-text for a short video/audio file with OpenAI (≤25 MB)."""
+    key = cfg("openai_key")
+    boundary = "----tp" + uuid.uuid4().hex
+    with open(path, "rb") as f:
+        blob = f.read()
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\ngpt-4o-mini-transcribe\r\n'.encode(),
+             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="clip{os.path.splitext(path)[1] or ".mp4"}"\r\n'
+             f'Content-Type: application/octet-stream\r\n\r\n'.encode() + blob + b"\r\n", f"--{boundary}--\r\n".encode()]
+    res = _https_json("https://api.openai.com/v1/audio/transcriptions", data=b"".join(parts),
+                      ctype=f"multipart/form-data; boundary={boundary}", headers={"Authorization": f"Bearer {key}"}, timeout=180)
+    log_ai("video transcription", "gpt-4o-mini-transcribe", res.get("usage", {}).get("input_tokens"), res.get("usage", {}).get("output_tokens"), os.path.basename(path))
+    return (res.get("text") or "").strip()
+
+
+class _YtdlpQuiet:
+    def debug(self, msg): pass
+    def info(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): log("yt-dlp:", msg[:200])
+
+
+def import_video(url):
+    try:
+        import yt_dlp
+    except ImportError:
+        raise ApiError(501, "Video import isn't available in this install. Update TablePlan, or use screenshots of the post.")
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "logger": _YtdlpQuiet(), "noplaylist": True, "skip_download": True, "socket_timeout": 20}
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+    except Exception as e:
+        msg = str(e)
+        if re.search(r"login|log in|private|rate|cookies", msg, re.I):
+            raise ApiError(502, "That post can't be opened without logging in (private account or the site is blocking). "
+                                "Take screenshots of the caption and use the Screenshot tab.")
+        reason = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?[^:]*:\s*", "", msg.splitlines()[0]).split(";")[0][:90]
+        raise ApiError(502, f"Couldn't open that video ({reason}). Try again in a minute, or use screenshots of the post.")
+    title = (info.get("title") or "").strip()
+    caption = (info.get("description") or "").strip()
+    thumb = info.get("thumbnail")
+    text = caption
+    if not _looks_like_recipe(caption):
+        if not cfg("openai_key"):
+            if not caption:
+                raise ApiError(400, "This video's recipe is spoken, not written. Add your OpenAI key in Settings → AI recipe import so TablePlan can listen to it.")
+        else:   # recipe is spoken: grab the smallest version and transcribe it
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                dl = {**opts, "skip_download": False, "outtmpl": os.path.join(tmp, "clip.%(ext)s"),
+                      "format": "worstaudio[filesize<24M]/worst[filesize<24M]/worstaudio/worst", "max_filesize": 24_000_000}
+                try:
+                    with yt_dlp.YoutubeDL(dl) as y:
+                        y.download([url])
+                    files = [os.path.join(tmp, f) for f in os.listdir(tmp)]
+                    if files and os.path.getsize(files[0]) < 25_000_000:
+                        spoken = _transcribe(files[0])
+                        text = f"Caption:\n{caption}\n\nWhat the cook says in the video:\n{spoken}"
+                except ApiError:
+                    raise
+                except Exception as e:
+                    log("video download/transcribe failed:", e)
+    if not text.strip():
+        raise ApiError(422, "Couldn't find a recipe in that video's caption or audio. Try screenshots instead.")
+    data = recipe_from_text(text, title, url, "video import")
+    if not data.get("name") or data["name"] == "Untitled recipe":
+        data["name"] = title or "Video recipe"
+    return _imported(_save_new_recipe(data, thumb))
 
 
 def _imported(slug):
@@ -2723,6 +2895,10 @@ def parse_recipe_text(t):
     for raw in (t or "").splitlines():
         line = raw.strip().strip("*").strip()
         if not line:
+            continue
+        inc = re.match(r"^INCOMPLETE\s*:?\s*(.*)$", line, re.I)
+        if inc:
+            out["incomplete"] = inc.group(1) or "part of it is missing"
             continue
         m = re.match(r"^(SOURCE|TITLE|DESCRIPTION|SERVINGS|PREP|COOK|TOTAL|TAGS|INGREDIENTS|STEPS|NO RECIPE)\s*:?\s*(.*)$", line, re.I)
         if m:
@@ -3552,6 +3728,9 @@ class Handler(BaseHTTPRequestHandler):
         # ---- import & updates
         if m == "POST" and path == "/api/import/url":
             return self.send(200, import_url(self.body().get("url", "").strip()))
+        if m == "POST" and path == "/api/import/text":
+            b = self.body()
+            return self.send(200, import_text(b.get("text"), b.get("title") or ""))
         if m == "POST" and path == "/api/import/images":
             b = self.body()
             return self.send(200, import_images(b.get("images") or [], b.get("text")))
