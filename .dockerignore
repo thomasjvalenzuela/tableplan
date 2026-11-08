@@ -1,0 +1,7 @@
+.git
+.github
+zimaos-store
+install
+docs
+**/__pycache__
+*.md

@@ -1,0 +1,133 @@
+# Every push to main:
+#   1. builds the TablePlan image (amd64 + arm64) → ghcr.io/<owner>/tableplan:<version> and :latest
+#   2. stamps that version into the ZimaOS store definition and publishes the store to GitHub Pages
+#   3. publishes version.json (the in-app "update available" banner reads it) and the setup guide
+# ZimaOS sees the store's new version/content hash and offers "Update" for TablePlan.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out version and names
+        id: v
+        run: |
+          base="$(tr -d '[:space:]' < VERSION)"
+          version="${base}.${{ github.run_number }}"
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          repo="${repo,,}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${owner}/${repo}" >> "$GITHUB_OUTPUT"
+          echo "pages=https://${owner}.github.io/${repo}" >> "$GITHUB_OUTPUT"
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+          # First line of the commit message becomes the release note
+          printf 'notes<<EOF\n%s\nEOF\n' "$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
+
+      # ---------- image
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ steps.v.outputs.version }}
+          tags: |
+            ${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}
+            ${{ steps.v.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---------- ZimaOS store
+      - name: Stamp version into the store definition
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE: ${{ steps.v.outputs.image }}
+          OWNER: ${{ steps.v.outputs.owner }}
+          REPO: ${{ steps.v.outputs.repo }}
+          DATE: ${{ steps.v.outputs.date }}
+          NOTES: ${{ steps.v.outputs.notes }}
+        run: |
+          f=zimaos-store/Apps/TablePlan/docker-compose.yml
+          python3 - "$f" <<'PY'
+          import os, re, sys
+          p = sys.argv[1]; s = open(p).read()
+          v, img = os.environ["VERSION"], os.environ["IMAGE"]
+          owner, repo = os.environ["OWNER"], os.environ["REPO"]
+          s = re.sub(r"image: ghcr\.io/[^/\s]+/tableplan:\S+", f"image: {img}:{v}", s)
+          s = re.sub(r'version: "[^"]*"', f'version: "{v}"', s, count=1)
+          s = re.sub(r'update_at: "[^"]*"', f'update_at: "{os.environ["DATE"]}"', s, count=1)
+          notes = os.environ["NOTES"].replace('"', "'")
+          s = re.sub(r"(release_notes:\n\s+en_US: ).*", lambda m: m.group(1) + notes, s, count=1)
+          s = s.replace("thomasjvalenzuela/tableplan", f"{owner}/{repo}")
+          s = s.replace("io.github.thomasjvalenzuela.tableplan", f"io.github.{owner}.{repo}")
+          open(p, "w").write(s)
+          PY
+          sed -i "s#thomasjvalenzuela/tableplan#${OWNER}/${REPO}#g" zimaos-store/store-config.json
+          grep -nE "image:|version:|update_at" "$f"
+
+      - name: Build ZimaOS store (v2)
+        uses: IceWhaleTech/build-appstore-action@v1
+        with:
+          source: zimaos-store
+          output: dist
+          base-url: ${{ steps.v.outputs.pages }}
+
+      - name: Add version feed, installer and setup guide
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          DATE: ${{ steps.v.outputs.date }}
+          NOTES: ${{ steps.v.outputs.notes }}
+        run: |
+          python3 -c "import json,os; json.dump({'version':os.environ['VERSION'],'released':os.environ['DATE'],'notes':os.environ['NOTES']}, open('dist/version.json','w'))"
+          cp install/install.sh dist/install.sh
+          mkdir -p dist/setup && cp docs/setup.html dist/setup/index.html
+          touch dist/.nojekyll
+          ls -R dist | head -50
+
+      - name: Publish to GitHub Pages (gh-pages branch)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./dist
+          force_orphan: true
+          commit_message: "Release ${{ steps.v.outputs.version }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### TablePlan ${{ steps.v.outputs.version }}"
+            echo "- Image: \`${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}\`"
+            echo "- ZimaOS store URL: ${{ steps.v.outputs.pages }}"
+            echo "- SSH install: \`curl -fsSL ${{ steps.v.outputs.pages }}/install.sh | sudo bash\`"
+          } >> "$GITHUB_STEP_SUMMARY"
