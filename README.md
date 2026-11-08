@@ -24,11 +24,11 @@ Built on <a href="https://github.com/mealie-recipes/mealie">Mealie</a>. Made for
 
 ### Option A: ZimaOS App Store (recommended, with update prompts)
 
-1. In ZimaOS open **App Store → ⋯ / Settings → Add source** and paste:
+1. In ZimaOS open **App Store → Community store → Add** and paste:
    ```
-   https://thomasjvalenzuela.github.io/tableplan
+   https://thomasjvalenzuela.github.io/tableplan/store.json
    ```
-2. Find **TablePlan** and tap **Install**. Mealie is installed with it.
+2. Pick the **TablePlan** store, find **TablePlan** and tap **Install**. Mealie is installed with it.
 3. Open TablePlan. The setup wizard walks you through the rest.
 
 Every push to `main` publishes a new version to that store. ZimaOS then shows **Update** on TablePlan, and the app shows an update banner too.

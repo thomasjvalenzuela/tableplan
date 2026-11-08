@@ -129,6 +129,6 @@ jobs:
           {
             echo "### TablePlan ${{ steps.v.outputs.version }}"
             echo "- Image: \`${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}\`"
-            echo "- ZimaOS store URL: ${{ steps.v.outputs.pages }}"
+            echo "- ZimaOS community store URL: ${{ steps.v.outputs.pages }}/store.json"
             echo "- SSH install: \`curl -fsSL ${{ steps.v.outputs.pages }}/install.sh | sudo bash\`"
           } >> "$GITHUB_STEP_SUMMARY"

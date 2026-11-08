@@ -147,22 +147,27 @@ git push -u origin main</code></pre></div>
 <li>Open the repo → <b>Actions</b>. The <b>Release</b> workflow runs automatically on your push. Wait for the green check, about 5–8 minutes the first time.</li>
 <li><b>Settings → Pages</b>: under <i>Build and deployment</i>, set Source to <b>Deploy from a branch</b>, and Branch to <b><code>gh-pages</code></b> / <code>root</code>. Save.</li>
 <li>Your GitHub profile → <b>Packages → tableplan → Package settings</b>. Scroll to <i>Danger Zone</i> → <b>Change visibility → Public</b>.</li>
-<li>Check that it worked by opening <a href="https://thomasjvalenzuela.github.io/tableplan/version.json">thomasjvalenzuela.github.io/tableplan/version.json</a>. It should show the version number. Pages can take a minute to go live.</li>
+<li>Check that it worked by opening <a href="https://thomasjvalenzuela.github.io/tableplan/store.json">thomasjvalenzuela.github.io/tableplan/store.json</a>. It should show a short block of text that includes "TablePlan". Pages can take a minute to go live.</li>
 </ol>
 
 <h2 id="s3" class="stephead"><span class="step"><input type="checkbox" data-step="3" aria-label="Done"><span class="n">3</span> Install on ZimaOS</span></h2>
 <p>Pick <b>one</b> of these. Option A gives you update prompts in ZimaOS.</p>
-<h3>Option A: ZimaOS App Store (recommended)</h3>
+<h3>Option A: ZimaOS App Store (recommended, gives update prompts)</h3>
 <ol>
-<li>Open ZimaOS → <b>App Store</b> → the <b>⋯ / settings</b> menu → <b>Add source</b> (on some versions it's called <i>App Store sources</i> or <i>Third-party store</i>).</li>
-<li>Paste the address below and save:</li>
+<li>Open ZimaOS → <b>App Store</b>.</li>
+<li>Click <b>Community store</b> (top right, next to any stores you already added, such as <i>bigbeartechworld</i>) → <b>Add</b>.</li>
+<li>Paste this address and confirm:</li>
 </ol>
-<div class="code"><span class="lbl">store source</span><pre><code>https://thomasjvalenzuela.github.io/tableplan</code></pre></div>
-<ol start="3">
-<li>Search for <b>TablePlan</b> and tap <b>Install</b>. Mealie downloads with it, which takes a few minutes the first time.</li>
-<li>When the TablePlan tile appears on your ZimaOS dashboard, open it.</li>
+<div class="code"><span class="lbl">community store URL</span><pre><code>https://thomasjvalenzuela.github.io/tableplan/store.json</code></pre></div>
+<ol start="4">
+<li>Select the <b>TablePlan</b> store, find <b>TablePlan</b> (category <i>Home</i>) and click <b>Install</b>. Mealie downloads with it, which takes a few minutes the first time.</li>
+<li>Click the TablePlan tile on your dashboard to start the setup wizard.</li>
 </ol>
 <div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Your data folder</div><p>The store installs to <code>/DATA/AppData/tableplan</code>, the ZimaOS default. To keep it on your big disk, open TablePlan's install settings before tapping Install and change both volume paths to a folder on that disk, for example <code>/media/DATA/AppData/tableplan/…</code>.</p></div>
+<div class="alert warn"><div class="t">"Failed to add community store"?</div><p>Open <code>https://thomasjvalenzuela.github.io/tableplan/store.json</code> in a browser. If you get a 404, GitHub Pages isn't switched on yet (step 2). Also check that the address ends in <code>/store.json</code> and has no spaces.</p></div>
+
+<h3>Option A2: paste it as a Custom App (no store)</h3>
+<p>Go to App Store → <b>My Apps</b> → <b>Install Custom App</b> → <b>YAML</b>, paste the file from <a href="https://thomasjvalenzuela.github.io/tableplan/apps/io.github.thomasjvalenzuela.tableplan/docker-compose.yml">this link</a>, and click Install. Leave <b>Ignore updates</b> off, so ZimaOS can still notice new versions of the <code>:latest</code> image.</p>
 
 <h3>Option B: one SSH command</h3>
 <div class="code"><span class="lbl">on your computer</span><pre><code>ssh YOUR-USER@YOUR-SERVER-IP</code></pre></div>
@@ -226,7 +231,7 @@ sudo tableplan uninstall   <span class="c"># remove containers, keep data</span>
 <table>
 <tr><th>Symptom</th><th>Fix</th></tr>
 <tr><td>The Release workflow fails at "Log in to GHCR" or "push"</td><td>Repo <b>Settings → Actions → General → Workflow permissions</b> → <b>Read and write</b>, then re-run the workflow.</td></tr>
-<tr><td>ZimaOS can't add the store, or shows no apps</td><td>Check that Pages is on (step 2) and that <code>…github.io/tableplan/index.json</code> opens. New Pages sites can take up to 10 minutes.</td></tr>
+<tr><td>ZimaOS can't add the store, or shows no apps</td><td>Use the address ending in <code>/store.json</code>. Check that Pages is on (step 2) and that the URL opens in a browser. New Pages sites can take up to 10 minutes.</td></tr>
 <tr><td>Install fails with "pull access denied"</td><td>The image is still private. Do step 2.3 (make the package public).</td></tr>
 <tr><td>Wizard says "Can't reach Mealie yet"</td><td>Mealie needs about a minute on first start. Tap <b>Check again</b>.</td></tr>
 <tr><td>Wizard says "This Mealie already has an account"</td><td>Someone already set up this Mealie. Switch to <b>Sign in</b> with that login.</td></tr>
