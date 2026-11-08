@@ -231,7 +231,7 @@ async function renderHome() {
   // Quick actions
   html += `<div class="section-h"><h2>Quick Actions</h2></div><div class="grid">
     <button class="tile" id="qa-import"><span class="ic bg-purple">${ic("camera")}</span><span><div class="t-title">Add Recipe</div><div class="t-sub">Screenshot or link</div></span></button>
-    <button class="tile" id="qa-plan"><span class="ic bg-orange">${ic("sparkle")}</span><span><div class="t-title">Auto-Plan</div><div class="t-sub">Week or month</div></span></button>
+    <button class="tile" id="qa-plan"><span class="ic bg-orange">${ic("sparkle")}</span><span><div class="t-title">Plan My Meals</div><div class="t-sub">Week or month</div></span></button>
     <button class="tile" id="qa-list"><span class="ic bg-blue">${ic("mail")}</span><span><div class="t-title">Send List</div><div class="t-sub">Telegram, email or print</div></span></button>
     <button class="tile" id="qa-pantry"><span class="ic bg-green">${ic("scan")}</span><span><div class="t-title">Scan to Pantry</div><div class="t-sub">Barcode or type it in</div></span></button>
   </div>`;
@@ -353,20 +353,20 @@ async function openGenerate(opts = {}) {
     const presets = [[7, "Week"], [14, "2 Wks"], [30, "Month"]];
     sheetBody().innerHTML = `
       <div class="group">
-        <div class="field"><label>Start</label><input type="date" id="g-start" value="${g.start}"></div>
-        <div class="field"><label>Length</label><div class="seg" style="margin:0;flex:1;max-width:230px">${presets.map(([n, l]) => `<button data-days="${n}" class="${g.days === n ? "on" : ""}">${l}</button>`).join("")}</div></div>
+        <div class="field"><label>Starting</label><input type="date" id="g-start" value="${g.start}"></div>
+        <div class="field"><label>How long</label><div class="seg" style="margin:0;flex:1;max-width:230px">${presets.map(([n, l]) => `<button data-days="${n}" class="${g.days === n ? "on" : ""}">${l}</button>`).join("")}</div></div>
       </div>
-      <div class="group-label">Meals</div>
+      <div class="group-label">Which meals should I plan?</div>
       <div class="group"><div class="tag-cloud" id="g-types">${["breakfast", "lunch", "dinner", "side"].map((t) => `<button class="tag ${g.meal_types.includes(t) ? "on" : ""}" data-t="${t}">${cap(t)}</button>`).join("")}</div></div>
-      <div class="group-label">Rules</div>
+      <div class="group-label">Preferences</div>
       <div class="group">
-        <div class="field"><label>Don't repeat within</label><input type="number" id="g-nr" min="0" max="90" value="${g.no_repeat_days}"> <span class="muted">days</span></div>
-        <div class="field"><label>Use up expiring food first</label><label class="toggle"><input type="checkbox" id="g-exp" ${g.prefer_expiring ? "checked" : ""}><span></span></label></div>
-        <div class="field"><label>Keep meals already planned</label><label class="toggle"><input type="checkbox" id="g-fill" ${g.fill_empty_only ? "checked" : ""}><span></span></label></div>
-        <button class="row" id="g-tags"><div class="main"><div class="a">Tags & categories</div><div class="b">${tagSummary(g)}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <div class="field"><label>No repeats for<small class="lh">The same recipe won't show up again within this many days.</small></label><input type="number" id="g-nr" min="0" max="90" value="${g.no_repeat_days}"> <span class="muted">days</span></div>
+        <div class="field"><label>Use food before it goes bad<small class="lh">Favors recipes that use pantry items close to their use-by date.</small></label><label class="toggle"><input type="checkbox" id="g-exp" ${g.prefer_expiring ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Only fill empty days<small class="lh">Leaves meals you already picked alone. Turn off to replace everything.</small></label><label class="toggle"><input type="checkbox" id="g-fill" ${g.fill_empty_only ? "checked" : ""}><span></span></label></div>
+        <button class="row" id="g-tags"><div class="main"><div class="a">Kinds of recipes</div><div class="b">${tagSummary(g)} · only use or skip tags like Vegetarian or Soup</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <div style="height:16px"></div>
-      <button class="btn" id="g-go">${ic("sparkle")} Generate</button>`;
+      <button class="btn" id="g-go">${ic("sparkle")} Suggest meals</button><p class="hint" style="text-align:center">You can swap or remove any suggestion before saving.</p>`;
     $("#g-start").onchange = (e) => (g.start = e.target.value);
     $$("[data-days]").forEach((b) => (b.onclick = () => { g.days = +b.dataset.days; draw(); }));
     $$("#g-types .tag").forEach((b) => (b.onclick = () => { const t = b.dataset.t; g.meal_types = g.meal_types.includes(t) ? g.meal_types.filter((x) => x !== t) : [...g.meal_types, t]; draw(); }));
@@ -376,10 +376,10 @@ async function openGenerate(opts = {}) {
     $("#g-tags").onclick = () => pickTags(g, draw);
     $("#g-go").onclick = () => runGenerate(g);
   };
-  openSheet("Auto-Plan", "", { onMount: draw });
+  openSheet("Plan meals for me", "", { onMount: draw });
 }
 const tagSummary = (g) => {
-  const a = g.include_tags.length ? `Only: ${g.include_tags.join(", ")}` : "All recipes";
+  const a = g.include_tags.length ? `Only: ${g.include_tags.join(", ")}` : "Any recipe";
   return esc(a + (g.exclude_tags.length ? ` · Skip: ${g.exclude_tags.join(", ")}` : ""));
 };
 async function pickTags(g, back) {
@@ -894,15 +894,16 @@ async function openSettings() {
       </div>
       <p class="hint"><b>Classic</b> lists ingredients, then instructions. <b>Step-by-step</b> puts each ingredient inside the step that uses it, adds preheating at the right moment, and gives you timers.</p>
       <div class="group-label">Meal planning</div>
+      <p class="hint" style="margin-top:-2px">Meals to plan</p>
       <div class="group">
         <div class="tag-cloud" id="st-types">${["breakfast", "lunch", "dinner", "side"].map((t) => `<button class="tag ${s.meal_types.includes(t) ? "on" : ""}" data-t="${t}">${cap(t)}</button>`).join("")}</div>
-        <div class="field"><label>Don't repeat within (days)</label><input type="number" id="st-nr" value="${s.no_repeat_days}" min="0" max="90"></div>
-        <div class="field"><label>Use up expiring food first</label><label class="toggle"><input type="checkbox" id="st-exp" ${s.prefer_expiring ? "checked" : ""}><span></span></label></div>
-        <div class="field"><label>"Use soon" window (days)</label><input type="number" id="st-win" value="${s.expiring_window_days}" min="1" max="14"></div>
-        <div class="field"><label>Auto-plan next week every</label><select id="st-auto">${[["", "Off"], ["sun", "Sunday"], ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"], ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"]].map(([v, l]) => `<option value="${v}" ${s.auto_plan_day === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-        <div class="field"><label>Send the plan when it's made</label><label class="toggle"><input type="checkbox" id="st-aemail" ${s.auto_plan_email ? "checked" : ""}><span></span></label></div>
-        <div class="field"><label>Daily "use soon" alert</label><label class="toggle"><input type="checkbox" id="st-xa" ${s.expiry_alert ? "checked" : ""}><span></span></label></div>
-        <div class="field"><label>Alert time</label><select id="st-xh">${[6,7,8,9,10,12,15,17,18,19].map((h) => `<option value="${h}" ${+s.expiry_alert_hour === h ? "selected" : ""}>${((h + 11) % 12) + 1}:00 ${h < 12 ? "AM" : "PM"}</option>`).join("")}</select></div>
+        <div class="field"><label>No repeats for (days)<small class="lh">The same recipe won't come back within this many days.</small></label><input type="number" id="st-nr" value="${s.no_repeat_days}" min="0" max="90"></div>
+        <div class="field"><label>Use food before it goes bad<small class="lh">Plans favor recipes using items close to their use-by date.</small></label><label class="toggle"><input type="checkbox" id="st-exp" ${s.prefer_expiring ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Warn me this many days early<small class="lh">Items show as “use soon” when they're this close to their use-by date.</small></label><input type="number" id="st-win" value="${s.expiring_window_days}" min="1" max="14"></div>
+        <div class="field"><label>Plan next week automatically on<small class="lh">TablePlan fills next week's empty days for you at 8 AM.</small></label><select id="st-auto">${[["", "Off"], ["sun", "Sunday"], ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"], ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"]].map(([v, l]) => `<option value="${v}" ${s.auto_plan_day === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div class="field"><label>Send me the plan<small class="lh">Get the new week's plan on your phone or by email.</small></label><label class="toggle"><input type="checkbox" id="st-aemail" ${s.auto_plan_email ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Daily “use soon” reminder<small class="lh">A morning message listing food that's about to expire.</small></label><label class="toggle"><input type="checkbox" id="st-xa" ${s.expiry_alert ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Reminder time</label><select id="st-xh">${[6,7,8,9,10,12,15,17,18,19].map((h) => `<option value="${h}" ${+s.expiry_alert_hour === h ? "selected" : ""}>${((h + 11) % 12) + 1}:00 ${h < 12 ? "AM" : "PM"}</option>`).join("")}</select></div>
       </div>
       <p class="hint">Auto-plan runs at 8 AM on that day, fills empty days for the following week, and keeps anything you've already planned. Plans and alerts go to every notification channel you've set up.</p>
 

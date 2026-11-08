@@ -891,8 +891,9 @@ def _ing_line(ing):
 def _fetch_page(url):
     if not re.match(r"^https?://", url or "") or not _public_host(url):
         raise ApiError(400, "That link can't be opened. Use a public https:// recipe page.")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; TablePlan/%s)" % APP_VERSION,
-                                               "Accept": "text/html,application/xhtml+xml"})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"})
     try:
         with urllib.request.urlopen(req, timeout=25) as r:
             final = r.geturl()
@@ -901,7 +902,10 @@ def _fetch_page(url):
             raw = r.read(6_000_000)
             charset = r.headers.get_content_charset() or "utf-8"
     except urllib.error.HTTPError as e:
-        raise ApiError(502, f"The site refused the request ({e.code}). Try a screenshot instead.")
+        if e.code in (401, 402, 403, 429):
+            raise ApiError(502, "That site blocks apps from reading its recipes (it may need a subscription). "
+                                "Take screenshots of the recipe and use the Screenshot tab instead.")
+        raise ApiError(502, f"The site returned an error ({e.code}). Try a screenshot instead.")
     except urllib.error.URLError as e:
         raise ApiError(502, f"Couldn't open that page ({e.reason}).")
     return final, raw.decode(charset, errors="replace")
@@ -1084,6 +1088,9 @@ def native_api(method, path, body=None, multipart=None):
         try:
             data = n_scraper.scrape(url, _fetch_page)
         except n_scraper.NoRecipe as e:
+            if not cfg("openai_key") or len(e.page_text or "") < 300:
+                raise ApiError(422, "Couldn't find a recipe on that page (it may be behind a login or paywall). "
+                                    "Take screenshots of the recipe and use the Screenshot tab instead.")
             data = ai_recipe(f"Web page: {url}\n\n{e.page_text}", feature="link import", detail=url[:80])
             data["orgURL"] = url
         return _save_new_recipe(data, data.pop("image_url", None))
