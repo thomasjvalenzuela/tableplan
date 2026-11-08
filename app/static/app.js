@@ -248,7 +248,7 @@ async function renderHome() {
   $$("[data-item]").forEach((b) => (b.onclick = () => openPantryItem(exp.find((i) => String(i.id) === b.dataset.item), renderHome)));
   $("#qa-import").onclick = openAddRecipe;
   $("#qa-plan").onclick = () => openGenerate();
-  $("#qa-list").onclick = async () => { const l = s.lists[0]; if (!l) return toast("No shopping list in Mealie yet"); openShare("list", { id: l.id, name: l.name }); };
+  $("#qa-list").onclick = async () => { const l = s.lists[0]; if (!l) return toast("No shopping list yet"); openShare("list", { id: l.id, name: l.name }); };
   $("#qa-pantry").onclick = () => openScanner(renderHome);
 }
 const entryName = (e) => (e.recipe && e.recipe.name) || e.title || "Note";
@@ -879,7 +879,7 @@ async function openSettings() {
       <div class="group-label">Setup</div>
       <div class="group">
         <button class="row" data-sec="household"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("home")}</span><div class="main"><div class="a">Household</div><div class="b">${esc(hh.name || "Household")} · cooking for ${hh.people || 2}${hh.scale === false ? " · scaling off" : ""}</div></div><span class="chev">${ic("chevR")}</span></button>
-        <button class="row" data-sec="mealie"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Recipe library (Mealie)</div><div class="b">${c.connected ? "Connected" : "Not connected"}</div></div><span class="chev">${ic("chevR")}</span></button>
+        ${c.backend === "native" ? "" : `<button class="row" data-sec="mealie"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Recipe library (Mealie)</div><div class="b">${c.connected ? "Connected" : "Not connected"}</div></div><span class="chev">${ic("chevR")}</span></button>`}
         <button class="row" data-sec="ai"><span class="ic bg-indigo" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("sparkle")}</span><div class="main"><div class="a">AI recipe import</div><div class="b">OpenAI key for screenshots, photos & videos</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="notify"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Notifications</div><div class="b">${Object.entries(c.channels || {}).filter(([, v]) => v).map(([k]) => CH_LABEL[k][0].toUpperCase() + CH_LABEL[k].slice(1)).join(", ") || "Not set up · Telegram, ntfy or email"}</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="password"><span class="ic bg-gray" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("open")}</span><div class="main"><div class="a">Password</div><div class="b">${c.auth_required ? "On" : "Off (anyone on your Wi-Fi)"}</div></div><span class="chev">${ic("chevR")}</span></button>
@@ -922,7 +922,7 @@ async function openSettings() {
 
       <div class="group-label">Advanced</div>
       <div class="group">
-        <a class="row" href="${esc(c.mealie_url)}" target="_blank" rel="noopener" style="text-decoration:none"><div class="main"><div class="a">Mealie admin</div><div class="b">Not needed day to day. TablePlan handles everything.</div></div><span class="chev">${ic("ext")}</span></a>
+        ${c.backend === "native" ? `<button class="row" id="st-mimport"><div class="main"><div class="a">Import from Mealie</div><div class="b">Copy recipes, photos, plans and lists from an old Mealie</div></div><span class="chev">${ic("chevR")}</span></button>` : `<a class="row" href="${esc(c.mealie_url)}" target="_blank" rel="noopener" style="text-decoration:none"><div class="main"><div class="a">Mealie admin</div><div class="b">Not needed day to day. TablePlan handles everything.</div></div><span class="chev">${ic("ext")}</span></a>`}
         <button class="row" id="st-wizard"><div class="main"><div class="a">Run setup wizard again</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
@@ -943,6 +943,7 @@ async function openSettings() {
     $("#st-ai").onclick = () => openAiSpending();
     const titles = { household: "Household", mealie: "Recipe library", ai: "AI recipe import", notify: "Notifications", password: "Password" };
     $$("[data-sec]").forEach((b) => (b.onclick = () => openSetupSection(b.dataset.sec, titles[b.dataset.sec], reloadCfg)));
+    $("#st-mimport") && ($("#st-mimport").onclick = () => openMealieImport());
     $("#st-wizard").onclick = () => { closeSheet(true); runWizard(() => location.reload()); };
     $("#st-logout") && ($("#st-logout").onclick = async () => { await api("POST", "/api/logout"); location.reload(); });
     $("#st-up") && ($("#st-up").onclick = () => openUpdateHelp());
@@ -954,6 +955,24 @@ async function openSettings() {
     $("#st-rules").onclick = () => rulesBrowser(draw);
   };
   openSheet("Settings", loading(), { onMount: draw });
+}
+
+function openMealieImport() {
+  openSheet("Import from Mealie", `<p class="hint" style="margin:0 4px 12px">Copies recipes, photos, favorites, meal plans and shopping lists. Safe to run again. Afterwards you can uninstall Mealie.</p>
+    <div class="group"><div class="field"><input class="full" id="mi-url" placeholder="Mealie address, e.g. http://192.168.1.50:9925" autocomplete="off"></div>
+    <div class="field"><input class="full" id="mi-tok" type="password" placeholder="API token (Mealie → Profile → API Tokens)" autocomplete="off"></div></div>
+    <div style="height:12px"></div><button class="btn" id="mi-go">Import</button><div id="mi-res"></div>`, {
+    onMount() {
+      $("#mi-go").onclick = async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.textContent = "Importing…";
+        try {
+          const r = await api("POST", "/api/setup/import-mealie", { url: $("#mi-url").value.trim(), token: $("#mi-tok").value.trim() });
+          $("#mi-res").innerHTML = `<div class="wstatus ok" style="margin-top:12px"><b>Done</b><span>${r.recipes.recipes ?? 0} recipes (${r.recipes.images ?? 0} photos) · ${r.plans.imported ?? 0} planned meals · ${r.lists.items ?? 0} list items</span></div>`;
+          b.textContent = "Import again"; b.disabled = false;
+        } catch (x) { fail(x); b.disabled = false; b.textContent = "Import"; }
+      };
+    },
+  });
 }
 
 function rulesBrowser(back) {

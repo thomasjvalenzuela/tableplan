@@ -65,7 +65,8 @@ LISTEN_PORT = int(env("LISTEN_PORT", "8080"))
 APP_VERSION = (open(os.path.join(HERE, "VERSION")).read().strip()
                if os.path.exists(os.path.join(HERE, "VERSION")) else "dev")
 UPDATE_FEED = env("TABLEPLAN_UPDATE_FEED", "https://thomasjvalenzuela.github.io/tableplan/version.json")
-INSTALL_METHOD = env("TABLEPLAN_INSTALL", "zimaos")   # zimaos | cli | manual
+INSTALL_METHOD = env("TABLEPLAN_INSTALL", "zimaos")
+NATIVE = env("TABLEPLAN_BACKEND", "native").lower() != "mealie"   # native = TablePlan's own storage (no Mealie)   # zimaos | cli | manual
 # Set TABLEPLAN_PUBLIC=1 when TablePlan is reachable from the internet (custom domain, Railway, …):
 # sign-in is then always required, and until a household password exists the one-time setup code
 # printed in the server log is the only way in.
@@ -177,6 +178,7 @@ def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     with db() as c:
         c.executescript(SCHEMA)
+        n_recipes.init(c); n_plans.init(c); n_lists.init(c)
         if c.execute("SELECT COUNT(*) FROM shelf_rules").fetchone()[0] == 0:
             seed = json.load(open(SEED_FILE, encoding="utf-8"))
             for r in seed["rules"]:
@@ -826,6 +828,8 @@ class MealieHTTPError(ApiError):
 
 
 def mealie(method, path, body=None, timeout=25, **kw):
+    if NATIVE:
+        return native_api(method, path, body, kw.get("multipart"))
     token = cfg("mealie_token")
     if not token:
         raise ApiError(503, "TablePlan isn't connected to Mealie yet — open Settings → Mealie to finish setup.")
@@ -839,6 +843,257 @@ def mealie(method, path, body=None, timeout=25, **kw):
 
 _recipe_cache = {"at": 0, "items": []}
 _recipe_lock = threading.Lock()
+
+# ============================================================ native backend (replaces Mealie)
+# Answers the subset of Mealie's REST API TablePlan uses, from TablePlan's own SQLite + image files,
+# so the rest of the server is backend-agnostic. TABLEPLAN_BACKEND=mealie keeps the old behaviour.
+
+sys.path.insert(0, HERE) if HERE not in sys.path else None  # python -I omits the script dir
+from native import lists as n_lists, plans as n_plans, recipes as n_recipes, scraper as n_scraper  # noqa: E402
+
+AISLES = [
+    ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
+                "pepper lettuce spinach kale cabbage broccoli cauliflower cucumber zucchini squash corn mushroom herb basil cilantro "
+                "parsley thyme rosemary mint dill ginger scallion leek jalapeno salad greens arugula"),
+    ("Meat & Seafood", "chicken beef pork bacon sausage ham turkey steak lamb ground salmon shrimp fish tuna cod tilapia crab scallop"),
+    ("Dairy & Eggs", "milk cream butter cheese parmesan mozzarella cheddar yogurt egg sour cream half-and-half ricotta feta"),
+    ("Bakery", "bread bun roll tortilla bagel pita baguette croissant"),
+    ("Frozen", "frozen ice cream peas"),
+    ("Spices", "salt pepper cumin paprika oregano cinnamon nutmeg chili powder spice seasoning bay leaf vanilla"),
+    ("Pantry", "flour sugar rice pasta noodle spaghetti fettuccine penne oil vinegar sauce broth stock bean lentil oat cereal "
+               "honey syrup peanut nut almond can tomato paste soy ketchup mustard mayo baking chocolate coffee tea"),
+    ("Beverages", "juice soda water wine beer"),
+    ("Household", "paper towel toilet soap detergent foil wrap bag trash sponge"),
+]
+_AISLE_RE = [(name, re.compile(r"\b(" + "|".join(re.escape(w) for w in words.split()) + r")", re.I)) for name, words in AISLES]
+
+
+def aisle_for(text):
+    t = (text or "").lower()
+    if "frozen" in t:
+        return "Frozen"
+    for name, rx in _AISLE_RE:
+        if rx.search(t):
+            return name
+    return None
+
+
+def _lookup_summary(c, rid):
+    r = n_recipes.get(c, rid)
+    return {"id": r["id"], "name": r.get("name"), "slug": r.get("slug"), "has_image": bool(r.get("image")),
+            "image_v": r.get("image") or ""} if r else None
+
+
+def _ing_line(ing):
+    return (ing.get("originalText") or ing.get("display") or ing.get("note") or "").strip()
+
+
+def _fetch_page(url):
+    if not re.match(r"^https?://", url or "") or not _public_host(url):
+        raise ApiError(400, "That link can't be opened. Use a public https:// recipe page.")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; TablePlan/%s)" % APP_VERSION,
+                                               "Accept": "text/html,application/xhtml+xml"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            final = r.geturl()
+            if not _public_host(final):
+                raise ApiError(400, "That link redirects somewhere TablePlan can't open.")
+            raw = r.read(6_000_000)
+            charset = r.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as e:
+        raise ApiError(502, f"The site refused the request ({e.code}). Try a screenshot instead.")
+    except urllib.error.URLError as e:
+        raise ApiError(502, f"Couldn't open that page ({e.reason}).")
+    return final, raw.decode(charset, errors="replace")
+
+
+AI_RECIPE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["found", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags"],
+    "properties": {
+        "found": {"type": "boolean"}, "name": {"type": "string"}, "description": {"type": "string"},
+        "servings": {"type": "number"}, "prep_minutes": {"type": "integer"}, "cook_minutes": {"type": "integer"},
+        "total_minutes": {"type": "integer"},
+        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["section", "line"],
+                                                    "properties": {"section": {"type": "string"}, "line": {"type": "string"}}}},
+        "steps": {"type": "array", "items": {"type": "string"}},
+        "tags": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
+def ai_recipe(text, images=None, feature="recipe import", detail=""):
+    """Turn free text and/or images into a recipe (Mealie-shaped dict) with OpenAI."""
+    if not cfg("openai_key"):
+        raise ApiError(400, "This needs AI. Add your OpenAI key in Settings → AI recipe import.")
+    content = [{"type": "text", "text": (
+        "Extract the single recipe from the material below. Copy ingredient lines exactly with amounts, amount first "
+        "(e.g. '1 1/2 cups heavy cream'); put section headings in 'section' (empty if none). Steps are the instructions "
+        "in order, one per item. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content.")
+        + (f"\n\n{text[:30000]}" if text else "")}]
+    for im in images or []:
+        data = im.get("data") or ""
+        if not data.startswith("data:image/"):
+            data = "data:image/jpeg;base64," + data.split(",", 1)[-1]
+        content.append({"type": "image_url", "image_url": {"url": data, "detail": "high"}})
+    out = openai_chat([{"role": "user", "content": content}], "recipe", AI_RECIPE_SCHEMA, feature, detail)
+    if not out.get("found") or not (out.get("ingredients") or out.get("steps")):
+        raise ApiError(422, "No recipe found there. Try a clearer screenshot that shows the ingredients and steps.")
+    ings = [{"referenceId": str(uuid.uuid4()), "title": (x.get("section") or None), "note": x["line"], "display": x["line"],
+             "originalText": x["line"], "quantity": 0, "unit": None, "food": None} for x in out["ingredients"] if x.get("line")]
+    last = None
+    for g in ings:   # only the first line of a section carries its title
+        g["title"], last = (g["title"] if g["title"] != last else None), g["title"] or last
+    mins = lambda v: int(v) * 60 if v else None  # noqa: E731
+    return {"name": out["name"] or "Untitled recipe", "description": out.get("description") or "",
+            "recipeServings": float(out.get("servings") or 0), "prepTimeSeconds": mins(out.get("prep_minutes")),
+            "performTimeSeconds": mins(out.get("cook_minutes")),
+            "totalTimeSeconds": mins(out.get("total_minutes")) or ((mins(out.get("prep_minutes")) or 0) + (mins(out.get("cook_minutes")) or 0)) or None,
+            "recipeIngredient": ings,
+            "recipeInstructions": [{"id": str(uuid.uuid4()), "title": "", "text": s, "ingredientReferences": []} for s in out["steps"] if s.strip()],
+            "tags": [{"name": t} for t in (out.get("tags") or [])[:8]]}
+
+
+def _save_new_recipe(data, image_url=None):
+    with db() as c:
+        slug = n_recipes.create(c, data.get("name") or "Untitled recipe", data)
+        rid = n_recipes.get(c, slug)["id"]
+    if image_url:
+        try:
+            blob, ctype = _fetch_image(image_url)
+            with db() as c:
+                n_recipes.save_image(IMG_DIR, rid, blob, _ext(ctype), c=c)
+        except Exception as e:
+            log("recipe image skipped:", e)
+    _recipe_cache["at"] = 0
+    return slug
+
+
+def _multipart_text(multipart, field):
+    fields, files = multipart or ({}, [])
+    return fields.get(field), files
+
+
+def native_api(method, path, body=None, multipart=None):
+    p = path.split("?")[0]
+    with db() as c:
+        # ---- recipes
+        if p == "/api/recipes" and method == "GET":
+            return {"items": n_recipes.list_summaries(c)}
+        if p == "/api/recipes" and method == "POST":
+            return n_recipes.create(c, (body or {}).get("name") or "Untitled recipe")
+        mm = re.fullmatch(r"/api/recipes/([^/]+)/image", p)
+        if mm and method == "PUT":
+            _, files = _multipart_text(multipart, "extension")
+            rec = n_recipes.get(c, urllib.parse.unquote(mm.group(1)))
+            if not rec or not files:
+                raise ApiError(404, "Recipe not found")
+            _, fname, ctype, blob = files[0]
+            try:
+                return {"image": n_recipes.save_image(IMG_DIR, rec["id"], blob, _ext(ctype), c=c)}
+            except ValueError as e:
+                raise ApiError(400, str(e))
+        mm = re.fullmatch(r"/api/recipes/([^/]+)", p)
+        if mm and mm.group(1) not in ("create", "create-url"):
+            key = urllib.parse.unquote(mm.group(1))
+            if method == "GET":
+                rec = n_recipes.get(c, key)
+                if not rec:
+                    raise ApiError(404, "Recipe not found")
+                return rec
+            if method == "PUT":
+                return n_recipes.get(c, n_recipes.update(c, key, body or {}))
+            if method == "DELETE":
+                n_recipes.delete(c, key, images_dir=IMG_DIR)
+                c.execute("DELETE FROM meal_plans WHERE recipe_id NOT IN (SELECT id FROM recipes) AND recipe_id IS NOT NULL")
+                return {}
+        # ---- favorites / user
+        if p == "/api/users/self":
+            return {"id": "native", "groupSlug": cfg("group_slug") or "home", "fullName": cfg("household_name") or "Household"}
+        if re.fullmatch(r"/api/users/[^/]+/favorites", p):
+            return {"ratings": [{"recipeId": i, "isFavorite": True} for i in n_recipes.favorite_ids(c)]}
+        mm = re.fullmatch(r"/api/users/[^/]+/favorites/([^/]+)", p)
+        if mm:
+            rec = n_recipes.get(c, urllib.parse.unquote(mm.group(1)))
+            if not rec:
+                raise ApiError(404, "Recipe not found")
+            n_recipes.set_favorite(c, rec["id"], method == "POST")
+            return {}
+        # ---- meal plans
+        if p == "/api/households/mealplans" and method == "GET":
+            q = dict(urllib.parse.parse_qsl(path.partition("?")[2]))
+            items = []
+            for e in n_plans.get_plans(c, q.get("start_date"), q.get("end_date"), lambda rid: _lookup_summary(c, rid)):
+                r = e.get("recipe")
+                items.append({"id": e["id"], "date": e["date"], "entryType": e["entry_type"], "title": e["title"], "text": e["text"],
+                              "recipeScale": e["scale"], "recipeId": e["recipeId"],
+                              "recipe": {"id": r["id"], "name": r["name"], "slug": r["slug"], "image": r["image_v"] or None} if r else None})
+            return {"items": items}
+        if p == "/api/households/mealplans" and method == "POST":
+            b = body or {}
+            try:
+                eid = n_plans.add_entry(c, b.get("date"), b.get("entryType") or "dinner", b.get("recipeId"),
+                                        b.get("title") or "", b.get("text") or "", b.get("recipeScale") or 1)
+            except ValueError as e:
+                raise ApiError(400, str(e))
+            return {"id": eid, **b}
+        mm = re.fullmatch(r"/api/households/mealplans/(\d+)", p)
+        if mm and method == "DELETE":
+            n_plans.delete_entry(c, int(mm.group(1)))
+            return {}
+        # ---- shopping lists
+        if p == "/api/households/shopping/lists" and method == "GET":
+            return {"items": n_lists.list_lists(c)}
+        if p == "/api/households/shopping/lists" and method == "POST":
+            lid = n_lists.create_list(c, (body or {}).get("name") or "Groceries")
+            return {"id": lid, "name": (body or {}).get("name") or "Groceries"}
+        mm = re.fullmatch(r"/api/households/shopping/lists/([^/]+)/recipe", p)
+        if mm and method == "POST":
+            lid = urllib.parse.unquote(mm.group(1))
+            for it in body or []:
+                rec = n_recipes.get(c, it["recipeId"])
+                if not rec:
+                    continue
+                ings = it.get("recipeIngredients") if it.get("recipeIngredients") is not None else rec.get("recipeIngredient") or []
+                lines = [_ing_line(g) for g in ings if _ing_line(g)]
+                n_lists.add_recipe_ingredients(c, lid, rec["id"], lines, it.get("recipeIncrementQuantity") or 1, parse_ing_text, aisle_for)
+            return n_lists.get_list(c, lid)
+        mm = re.fullmatch(r"/api/households/shopping/lists/([^/]+)", p)
+        if mm and method == "GET":
+            sl = n_lists.get_list(c, urllib.parse.unquote(mm.group(1)))
+            if not sl:
+                raise ApiError(404, "Shopping list not found")
+            return sl
+        if p == "/api/households/shopping/items/create-bulk" and method == "POST":
+            by_list = {}
+            for x in body or []:
+                by_list.setdefault(x["shoppingListId"], []).append(x.get("note") or x.get("display") or "")
+            for lid, texts in by_list.items():
+                n_lists.add_items(c, lid, texts, parse_ing_text, aisle_for)
+            return {}
+        mm = re.fullmatch(r"/api/households/shopping/items/([^/]+)", p)
+        if mm and method == "PUT":
+            row = c.execute("SELECT list_id FROM shopping_items WHERE id=?", (mm.group(1),)).fetchone()
+            if not row:
+                raise ApiError(404, "Item not on this list")
+            n_lists.set_checked(c, row["list_id"], mm.group(1), bool((body or {}).get("checked")))
+            return {}
+    # ---- imports (network/AI work happens outside the db transaction)
+    if p == "/api/recipes/create/url":
+        url = (body or {}).get("url") or ""
+        try:
+            data = n_scraper.scrape(url, _fetch_page)
+        except n_scraper.NoRecipe as e:
+            data = ai_recipe(f"Web page: {url}\n\n{e.page_text}", feature="link import", detail=url[:80])
+            data["orgURL"] = url
+        return _save_new_recipe(data, data.pop("image_url", None))
+    if p == "/api/recipes/create/ai":
+        text, files = _multipart_text(multipart, "content")
+        imgs = [{"data": f"data:{ct};base64," + base64.b64encode(blob).decode()} for _, _, ct, blob in files]
+        data = ai_recipe(text or "", imgs, "screenshot import", f"{len(imgs)} image(s)" if imgs else "text")
+        return _save_new_recipe(data)
+    raise ApiError(501, f"Not available without Mealie: {method} {p}")
+
 
 
 def recipe_pool(refresh=False):
@@ -868,6 +1123,8 @@ def recipe_pool(refresh=False):
 
 
 def recipe_link(slug):
+    if NATIVE:
+        return f"/#recipe/{urllib.parse.quote(slug or '')}" if slug else "/#recipes"
     base = mealie_public()
     return f"{base}/g/{cfg('group_slug')}/r/{slug}" if slug else base
 
@@ -1662,6 +1919,8 @@ def notify_status():
 # ============================================================ setup: Mealie account, AI, email
 
 def mealie_status():
+    if NATIVE:
+        return {"native": True, "connected": True, "reachable": True, "error": None}
     out = {"url": cfg("mealie_url"), "public_url": mealie_public(), "public_url_set": bool(cfg("mealie_public_url")),
            "reachable": False, "connected": False, "first_login": False,
            "version": None, "user": None, "group_slug": cfg("group_slug"), "error": None}
@@ -1755,6 +2014,10 @@ def mealie_use_token(token, url=None):
 
 
 def ai_status():
+    if NATIVE:
+        on = bool(cfg("openai_key"))
+        return {"available": True, "enabled": on, "images": on, "audio": False,
+                "providers": ["OpenAI"] if on else [], "model": cfg("openai_model") or "gpt-5-mini"}
     if not cfg("mealie_token"):
         return {"available": False, "enabled": False}
     try:
@@ -1773,6 +2036,13 @@ def ai_setup(api_key, model, audio, base_url=None):
     model = (model or "gpt-5-mini").strip()
     if not api_key:
         raise ApiError(400, "Paste your OpenAI API key.")
+    if NATIVE:
+        try:
+            _https_json(f"https://api.openai.com/v1/models/{urllib.parse.quote(model)}", headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
+        except ApiError as e:
+            raise ApiError(400, f"OpenAI didn't accept that key or model ({e.message}).")
+        set_cfg(openai_key=api_key, openai_model=model)
+        return {**ai_status(), "supports_images": True}
     provider = {"name": "OpenAI", "baseUrl": base_url or None, "apiKey": api_key, "model": model, "timeout": 300,
                 "requestHeaders": {}, "requestParams": {}}
     test = mealie("POST", "/api/groups/ai-providers/providers/test", provider, timeout=90)
@@ -1871,6 +2141,8 @@ def import_images(images, text=None):
         if total > 25_000_000:
             raise ApiError(413, "Those images are too large together (25 MB max).")
         files.append(("images", im.get("name") or f"image{i}.jpg", im.get("type") or "image/jpeg", blob))
+    if NATIVE:
+        return _imported(_save_new_recipe(ai_recipe(text or "", images[:8], "screenshot import", f"{len(images[:8])} image(s)")))
     if cfg("openai_key"):
         transcript = transcribe_images(images, text)
         slug = mealie("POST", "/api/recipes/create/ai", multipart=({"content": transcript}, []), timeout=300)
@@ -2054,6 +2326,40 @@ def ensure_image_provider():
                    "imageProviderId": st["defaultProviderId"], "audioProviderId": st.get("audioProviderId")})
         except ApiError:
             pass
+
+
+def import_from_mealie(b):
+    """One-time copy of recipes, photos, favorites, plans and lists from an existing Mealie (safe to re-run)."""
+    if not NATIVE:
+        raise ApiError(400, "Already using Mealie as the backend.")
+    base = (b.get("url") or "").strip().rstrip("/")
+    token = (b.get("token") or "").strip()
+    if not re.match(r"^https?://", base) or not token:
+        raise ApiError(400, "Enter your Mealie address (http://…:9925) and an API token from Mealie → Profile → API Tokens.")
+
+    def m(method, path, body=None):
+        try:
+            return mealie_raw(method, path, body=body, token=token, base=base, timeout=60)
+        except MealieHTTPError as e:
+            raise ApiError(502, f"Mealie said {e.code} for {path.split('?')[0]}" + (" (check the API token)" if e.code in (401, 403) else ""))
+
+    def mb(path):
+        try:
+            req = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read(MAX_IMG + 1)
+        except Exception:
+            return None
+    m("GET", "/api/users/self")
+    os.makedirs(IMG_DIR, exist_ok=True)
+    with db() as c:
+        rec = n_recipes.migrate_from_mealie(c, m, mb, IMG_DIR)
+    with db() as c:
+        pl = n_plans.migrate_from_mealie(c, m)
+    with db() as c:
+        ls = n_lists.migrate_from_mealie(c, m)
+    _recipe_cache["at"] = 0
+    return {"recipes": rec, "plans": pl, "lists": ls}
 
 
 def _imported(slug):
@@ -2978,7 +3284,7 @@ class Handler(BaseHTTPRequestHandler):
         # ---- session / auth
         if m == "GET" and path == "/api/session":
             return self.send(200, {"auth_required": auth_required(), "authed": self.authorized(), "public": PUBLIC_MODE,
-                                   "needs_setup_code": PUBLIC_MODE and not cfg("app_password_hash"),
+                                   "needs_setup_code": PUBLIC_MODE and not cfg("app_password_hash"), "backend": "native" if NATIVE else "mealie",
                                    "setup_complete": bool(cfg("setup_complete")), "version": APP_VERSION})
         if m == "POST" and path == "/api/login":
             ip = self.client_ip()
@@ -3001,7 +3307,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "email_ready": email_ready(), "mail_to": cfg("mail_to") or [], "settings": s,
                                    "channels": channels_ready(), "telegram_chat": cfg("telegram_chat_name"),
                                    "usda_synced_at": get_internal("usda_synced_at"),
-                                   "setup_complete": bool(cfg("setup_complete")), "connected": bool(cfg("mealie_token")),
+                                   "setup_complete": bool(cfg("setup_complete")), "connected": NATIVE or bool(cfg("mealie_token")), "backend": "native" if NATIVE else "mealie",
                                    "household": {"name": cfg("household_name"), "people": cfg("people"),
                                                  "scale": bool(cfg("scale_to_household"))},
                                    "auth_required": auth_required(), "version": APP_VERSION,
@@ -3070,6 +3376,8 @@ class Handler(BaseHTTPRequestHandler):
             set_cfg(app_password_hash=hash_password(pw) if pw else "")
             hdr = {"Set-Cookie": self.cookie(make_session())} if pw else None
             return self.send(200, {"set": bool(pw)}, headers=hdr)
+        if m == "POST" and path == "/api/setup/import-mealie":
+            return self.send(200, import_from_mealie(self.body()))
         if m == "POST" and path == "/api/setup/complete":
             set_cfg(setup_complete=True)
             return self.send(200, {"ok": True})
@@ -3364,6 +3672,12 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": True}
 
     def image(self, recipe_id, size):
+        if NATIVE:
+            fp = n_recipes.image_path(IMG_DIR, recipe_id)
+            if not fp:
+                return self.send(404, b"", "image/webp", {"Cache-Control": "public, max-age=600"})
+            with open(fp, "rb") as f:
+                return self.send(200, f.read(), mimetypes.guess_type(fp)[0] or "image/jpeg", {"Cache-Control": "public, max-age=86400"})
         fname = {"min": "min-original.webp", "tiny": "tiny-original.webp", "full": "original.webp"}.get(size, "min-original.webp")
         try:
             req = urllib.request.Request(f"{cfg('mealie_url')}/api/media/recipes/{recipe_id}/images/{fname}")

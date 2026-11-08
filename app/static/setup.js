@@ -286,7 +286,7 @@ const WIZ_STEPS = [
   { key: "welcome", title: "Welcome to TablePlan", sub: "Recipes, meal plans, a smart pantry and grocery lists for your household. This takes about 3 minutes, and you can skip anything and finish it later in Settings." },
   { key: "household", title: "Your household", sub: "This sets how much every recipe makes." , section: "household" },
   { key: "mealie", title: "Recipe library", sub: "TablePlan keeps recipes in Mealie, which is included and runs on your server.", section: "mealie", skippable: true },
-  { key: "ai", title: "Import from screenshots", sub: "Let AI read recipe photos, screenshots and videos.", section: "ai", skippable: true },
+  { key: "ai", title: "Import from screenshots", sub: "Let AI read recipe photos, screenshots and tricky web pages.", section: "ai", skippable: true },
   { key: "notify", title: "Notifications", sub: "Get grocery lists, meal plans and use-soon alerts on your phone.", section: "notify", skippable: true },
   { key: "password", title: "Lock it (optional)", sub: "Protect TablePlan with a household password.", section: "password", skippable: true },
   { key: "done", title: "You're all set", sub: "" },
@@ -297,6 +297,7 @@ async function runWizard(onFinish) {
   const root = document.getElementById("app");
   root.innerHTML = `<div class="wiz"><div class="spinner"></div></div>`;
   let st = await _api("GET", "/api/setup/status").catch(() => ({}));
+  if (st.mealie?.native) { const k = WIZ_STEPS.findIndex((s) => s.key === "mealie"); if (k >= 0) WIZ_STEPS.splice(k, 1); }
   let i = 0, submit = null;
 
   const draw = () => {
@@ -323,7 +324,7 @@ async function runWizard(onFinish) {
     if (step.key === "done") {
       const row = (ok, label, todo) => `<li class="${ok ? "ok" : ""}"><b>${ok ? "✓" : "○"} ${label}</b><span>${ok ? "" : _esc(todo)}</span></li>`;
       body.innerHTML = `<ul class="wiz-feats">
-        ${row(st.mealie?.connected, "Recipe library connected", "Settings → Mealie")}
+        ${st.mealie?.native ? "" : row(st.mealie?.connected, "Recipe library connected", "Settings → Mealie")}
         ${row(st.ai?.enabled, "Screenshot import", "Settings → AI recipe import")}
         ${row(st.notify?.channels && Object.values(st.notify.channels).some(Boolean), "Notifications", "Settings → Notifications")}
         ${row(true, `Cooking for ${st.household?.people || 2}`, "")}</ul>

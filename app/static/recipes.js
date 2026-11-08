@@ -306,7 +306,7 @@ async function openAiSpending() {
         ${days.length ? `<div class="bars">${days.map((x) => `<i title="${x.date}: $${x.usd.toFixed(4)}" style="height:${(x.usd / max) * 100}%"></i>`).join("")}</div>` : ""}</div>
       <div class="group-label">This month by feature</div>
       <div class="group">${d.by_feature.length ? d.by_feature.map((r) => `<div class="row flush"><div class="main"><div class="a">${esc(cap(r.feature))}</div><div class="b">${r.n} call${r.n === 1 ? "" : "s"}${r.tin ? ` · ${(r.tin / 1000).toFixed(1)}k in / ${(r.tout / 1000).toFixed(1)}k out tokens` : ""}</div></div><b>${r.usd ? "$" + r.usd.toFixed(4) : "—"}</b></div>`).join("") : `<div class="row flush muted">No AI use yet this month.</div>`}</div>
-      <p class="hint">Screenshot and video imports run inside Mealie, so only OpenAI's own numbers (below) include them. Estimates use list prices (${esc(d.model || "gpt-5-mini")}: $${(d.prices[d.model] || d.prices["gpt-5-mini"]).input}/1M in, $${(d.prices[d.model] || d.prices["gpt-5-mini"]).output}/1M out).</p>
+      <p class="hint">Video imports aren't tracked here; OpenAI's own numbers (below) include everything. Estimates use list prices (${esc(d.model || "gpt-5-mini")}: $${(d.prices[d.model] || d.prices["gpt-5-mini"]).input}/1M in, $${(d.prices[d.model] || d.prices["gpt-5-mini"]).output}/1M out).</p>
       <div class="group-label">Monthly budget</div>
       <div class="group"><div class="field"><label>Alert me at (USD / month)</label><input type="number" id="ai-b" min="0" step="1" value="${d.budget || ""}" placeholder="Off"></div></div>
       <p class="hint">You get a notification at 80% and 100%. To hard-cap spending, also set a limit in OpenAI → Settings → Limits.</p>
@@ -437,6 +437,15 @@ async function openCheckin(after) {
 
 // ------------------------------------------------------------------ what's new (shown once per new version)
 const WHATS_NEW = {
+  "0.4": {
+    title: "TablePlan stands on its own",
+    items: [
+      ["box", "bg-green", "One app, no Mealie", "Recipes, plans and lists now live in TablePlan itself. It's faster, simpler and there's nothing else to keep updated."],
+      ["link", "bg-blue", "Smarter link import", "TablePlan reads recipe pages itself and uses AI only when a page is messy."],
+      ["camera", "bg-purple", "Faster screenshot import", "Screenshots are read in a single AI step."],
+      ["refresh", "bg-orange", "Coming from Mealie?", "Settings → Advanced → Import from Mealie copies everything over, photos included."],
+    ],
+  },
   "0.3": {
     title: "What's new in TablePlan",
     items: [

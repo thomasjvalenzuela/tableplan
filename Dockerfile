@@ -2,7 +2,7 @@ FROM python:3.12-alpine
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="TablePlan" \
-      org.opencontainers.image.description="Household recipes, meal plans, smart pantry and grocery lists on top of Mealie" \
+      org.opencontainers.image.description="Household recipes, meal plans, smart pantry and grocery lists" \
       org.opencontainers.image.source="https://github.com/thomasjvalenzuela/tableplan" \
       org.opencontainers.image.version="${VERSION}"
 

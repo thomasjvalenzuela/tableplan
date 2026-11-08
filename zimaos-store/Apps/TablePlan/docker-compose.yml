@@ -5,37 +5,13 @@ services:
     container_name: tableplan
     image: ghcr.io/thomasjvalenzuela/tableplan:latest
     restart: unless-stopped
-    depends_on:
-      - mealie
     ports:
       - "9930:8080"
     environment:
       TZ: $TZ
-      MEALIE_URL: http://mealie:9000
-      MEALIE_PUBLIC_PORT: "9925"
       TABLEPLAN_INSTALL: zimaos
     volumes:
       - /DATA/AppData/tableplan/data:/data
-    networks:
-      - tableplan
-
-  mealie:
-    container_name: tableplan-mealie
-    image: ghcr.io/mealie-recipes/mealie:v3.30.0
-    restart: unless-stopped
-    ports:
-      - "9925:9000"
-    environment:
-      TZ: $TZ
-      ALLOW_SIGNUP: "false"
-      MAX_WORKERS: "1"
-      WEB_CONCURRENCY: "1"
-    volumes:
-      - /DATA/AppData/tableplan/mealie:/app/data
-    deploy:
-      resources:
-        limits:
-          memory: 1000M
     networks:
       - tableplan
 
@@ -65,22 +41,21 @@ x-casaos:
       • Smart pantry: check items off the shopping list and they get real use-by dates (USDA FoodKeeper). Use half the cream and the date resets to after-opening.
       • Email, print or export shopping lists, meal plans (.ics calendar) and pantry reports
 
-      Includes Mealie (open source, AGPL-3.0) as the recipe engine. Open TablePlan after installing and the setup wizard does the rest.
+      One app, one container: recipes, plans, lists and pantry are stored in TablePlan itself. Open TablePlan after installing and the setup wizard does the rest.
   tips:
     before_install:
       en_US: |
-        After installing, open TablePlan. A short setup wizard creates your recipe-library login and, if you want, sets up AI import and email.
-        Mealie also runs on port 9925 for advanced recipe editing.
+        After installing, open TablePlan. A short setup wizard creates your login and, if you want, sets up AI import and email.
   author: thomasjvalenzuela
   developer: thomasjvalenzuela
   category: Home
   architectures:
     - amd64
     - arm64
-  version: "0.2.0"
+  version: "0.4.0"
   update_at: "2026-11-08"
   release_notes:
-    en_US: First release with the setup wizard.
+    en_US: "One app, one container, no separate recipe engine; link import uses TablePlan's own recipe reader with AI fallback; screenshot import is a single AI call."
   website: https://github.com/thomasjvalenzuela/tableplan
   repo: https://github.com/thomasjvalenzuela/tableplan
   support: https://github.com/thomasjvalenzuela/tableplan/issues
