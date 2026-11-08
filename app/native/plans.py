@@ -131,6 +131,33 @@ def update_entry(c, id, **fields):
     return c.execute(f"UPDATE meal_plans SET {cols} WHERE id = ?", (*f.values(), id)).rowcount > 0
 
 
+def get_entry(c, id):
+    r = c.execute("SELECT * FROM meal_plans WHERE id = ?", (id,)).fetchone()
+    return dict(r) if r else None
+
+
+def entries_on(c, day, entry_type, exclude_id=None):
+    """Entries of one meal type on one day (normally zero or one)."""
+    return [dict(r) for r in c.execute(
+        "SELECT * FROM meal_plans WHERE date = ? AND entry_type = ? AND id IS NOT ? ORDER BY id",
+        (_date(day), _entry_type(entry_type), exclude_id))]
+
+
+def recipe_planned(c, recipe_id, start_iso, end_iso, exclude_id=None):
+    """True if the recipe is planned on any day in [start, end] other than the excluded entry."""
+    return c.execute("SELECT 1 FROM meal_plans WHERE recipe_id = ? AND date BETWEEN ? AND ? AND id IS NOT ? LIMIT 1",
+                     (str(recipe_id), _date(start_iso), _date(end_iso), exclude_id)).fetchone() is not None
+
+
+def planned_dates(c, start_iso, end_iso, entry_types):
+    """Sorted distinct dates in [start, end] that have an entry of one of the given types."""
+    types = [_entry_type(t) for t in entry_types] or ["dinner"]
+    q = ",".join("?" * len(types))
+    return [r[0] for r in c.execute(
+        f"SELECT DISTINCT date FROM meal_plans WHERE date BETWEEN ? AND ? AND entry_type IN ({q}) ORDER BY date",
+        (_date(start_iso), _date(end_iso), *types))]
+
+
 def migrate_from_mealie(c, mealie, days_back=365, days_forward=365, today=None):
     """Copy Mealie meal plans in the window into SQLite. Safe to re-run."""
     t = today or date.today()

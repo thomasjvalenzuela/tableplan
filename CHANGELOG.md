@@ -5,6 +5,17 @@ All notable changes to TablePlan are documented here. The format is based on
 `<VERSION>.<build>` (for example `0.4.12`), so each minor version below covers every build
 published from it.
 
+## [0.5.0] - 2026-11-08
+### Added
+- Plan tab: a rolling two-week dinner board. Tap a day to pick a recipe, drag meals between days (touch and hold on phones), remove with Undo.
+- Planning a meal adds its ingredients to the shopping list (skipping what the pantry covers); removing it takes unbought items back off.
+- "Your plan runs out" reminder through Telegram, ntfy or email (Settings → Planning).
+- One ongoing shopping list with stores (Aldi and Costco to start, add your own). Each item remembers its store; filter by the store you're in.
+- "I have this" on list items; Start cooking shows missing ingredients until you have them.
+- Recipe Share & Export: print or save as PDF on index cards (3×5, 4×6), 5×7, half letter, Letter or A4; send, share, copy, or download as text, Markdown or JSON.
+- Automatic nightly backups (14 kept) plus a snapshot before every update; Settings → Backups to download a backup or everything as a .zip.
+- A warning banner if data isn't on a persistent volume.
+
 ## [Unreleased]
 
 ### Added

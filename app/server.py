@@ -20,6 +20,7 @@ import hashlib
 import http.client
 import ipaddress
 import secrets
+import shutil
 import socket
 import hmac
 import html
@@ -33,6 +34,7 @@ import smtplib
 import sqlite3
 import ssl
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -40,6 +42,7 @@ import urllib.error
 import urllib.parse
 import uuid
 import urllib.request
+import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -94,6 +97,7 @@ SESSION_DAYS = 180
 FOODKEEPER_URL = env("FOODKEEPER_URL", "https://www.fsis.usda.gov/shared/data/EN/foodkeeper.json")
 
 LOCATIONS = ("fridge", "freezer", "pantry")
+DEFAULT_STORES = ("Aldi", "Costco")
 DEFAULT_SETTINGS = {
     "meal_types": ["dinner"],
     "no_repeat_days": 14,
@@ -112,6 +116,8 @@ DEFAULT_SETTINGS = {
     "ai_budget": 0,                   # monthly USD; 0 = no alert
     "pantry_check_days": 7,           # remind to review the pantry every N days (0 = off)
     "expiring_window_days": 3,
+    "plan_horizon_days": 14,          # how many days the planner board shows
+    "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
 }
 
 
@@ -125,6 +131,7 @@ def db():
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=FULL")   # writes are rare; never lose one to a power cut
     return conn
 
 
@@ -197,6 +204,11 @@ def init_db():
     with db() as c:
         c.executescript(SCHEMA)
         n_recipes.init(c); n_plans.init(c); n_lists.init(c)
+        if not c.execute("SELECT 1 FROM settings WHERE key='stores_seeded'").fetchone():
+            n_lists.seed_stores(c, DEFAULT_STORES)
+            c.execute("INSERT INTO settings(key, value) VALUES ('stores_seeded', 'true')")
+        if NATIVE:
+            n_lists.single_list(c)   # one ongoing list; older installs with several get merged once
         if c.execute("SELECT COUNT(*) FROM shelf_rules").fetchone()[0] == 0:
             seed = json.load(open(SEED_FILE, encoding="utf-8"))
             for r in seed["rules"]:
@@ -314,6 +326,8 @@ SETTINGS_VALIDATORS = {
     "ai_budget": _v_num(0, 100_000),
     "pantry_check_days": _v_int(0, 365),
     "expiring_window_days": _v_int(0, 60),
+    "plan_horizon_days": _v_int(7, 28),
+    "plan_reminder_days": _v_int(0, 7),
 }
 
 
@@ -1301,10 +1315,11 @@ def native_api(method, path, body=None, multipart=None):
             return {}
         # ---- shopping lists
         if p == "/api/households/shopping/lists" and method == "GET":
+            n_lists.single_list(c)
             return {"items": n_lists.list_lists(c)}
         if p == "/api/households/shopping/lists" and method == "POST":
-            lid = n_lists.create_list(c, (body or {}).get("name") or "Groceries")
-            return {"id": lid, "name": (body or {}).get("name") or "Groceries"}
+            lid = n_lists.single_list(c)   # one ongoing list: "new list" points at it
+            return {"id": lid, "name": n_lists.get_list(c, lid)["name"]}
         mm = re.fullmatch(r"/api/households/shopping/lists/([^/]+)/recipe", p)
         if mm and method == "POST":
             lid = urllib.parse.unquote(mm.group(1))
@@ -1314,7 +1329,8 @@ def native_api(method, path, body=None, multipart=None):
                     continue
                 ings = it.get("recipeIngredients") if it.get("recipeIngredients") is not None else rec.get("recipeIngredient") or []
                 lines = [_ing_line(g) for g in ings if _ing_line(g)]
-                n_lists.add_recipe_ingredients(c, lid, rec["id"], lines, it.get("recipeIncrementQuantity") or 1, parse_ing_text, aisle_for)
+                n_lists.add_recipe_ingredients(c, lid, rec["id"], lines, it.get("recipeIncrementQuantity") or 1, parse_ing_text,
+                                               aisle_for, food_key)
             return n_lists.get_list(c, lid)
         mm = re.fullmatch(r"/api/households/shopping/lists/([^/]+)", p)
         if mm and method == "GET":
@@ -1327,7 +1343,7 @@ def native_api(method, path, body=None, multipart=None):
             for x in body or []:
                 by_list.setdefault(x["shoppingListId"], []).append(x.get("note") or x.get("display") or "")
             for lid, texts in by_list.items():
-                n_lists.add_items(c, lid, texts, parse_ing_text, aisle_for)
+                n_lists.add_items(c, lid, texts, parse_ing_text, aisle_for, food_key)
             return {}
         mm = re.fullmatch(r"/api/households/shopping/items/([^/]+)", p)
         if mm and method == "PUT":
@@ -1439,7 +1455,8 @@ def get_plans(start, end):
             "title": p.get("title") or "", "text": p.get("text") or "",
             "scale": p.get("recipeScale") or 1,
             "recipe": {"id": rec.get("id") or p.get("recipeId"), "name": rec.get("name"), "slug": rec.get("slug"),
-                       "has_image": bool(rec.get("image")), "link": recipe_link(rec.get("slug"))} if (rec or p.get("recipeId")) else None,
+                       "has_image": bool(rec.get("image")), "image_v": rec.get("image") or "",
+                       "link": recipe_link(rec.get("slug"))} if (rec or p.get("recipeId")) else None,
         })
     return out
 
@@ -1668,6 +1685,38 @@ def grouped(sl, include_checked=False):
     return [(l, groups[l]) for l in order]
 
 
+ANY_STORE = "Any store"
+
+
+def store_names():
+    """[(id, name)] in the household's store order (native backend only)."""
+    if not NATIVE:
+        return []
+    with db() as c:
+        return [(s["id"], s["name"]) for s in n_lists.list_stores(c)]
+
+
+def grouped_by_store(sl, include_checked=False):
+    """[(store name, [(aisle, items)])]: stores in their set order, then "Any store" for unassigned items."""
+    stores = store_names()
+    known = {sid for sid, _ in stores}
+    buckets = {}
+    for it in sl.get("listItems") or []:
+        sid = it.get("storeId")
+        buckets.setdefault(sid if sid in known else None, []).append(it)
+    out = []
+    for sid, name in stores + [(None, ANY_STORE)]:
+        g = grouped({"listItems": buckets.get(sid, [])}, include_checked)
+        if g:
+            out.append((name, g))
+    return out
+
+
+def _store_headers(by_store):
+    """Only show store headers when at least one item is assigned to a store."""
+    return not (len(by_store) <= 1 and (not by_store or by_store[0][0] == ANY_STORE))
+
+
 def list_json(sl):
     return {
         "id": sl.get("id"), "name": sl.get("name") or "Shopping list",
@@ -1715,24 +1764,29 @@ def entry_name(e):
 
 def render_list_text(sl):
     lines = [sl.get("name") or "Shopping list", ""]
-    g = grouped(sl)
-    if not g:
+    by_store = grouped_by_store(sl)
+    if not by_store:
         lines.append("(Nothing left to buy.)")
-    for label, items in g:
-        lines.append(label.upper())
-        lines += [f"  [ ] {item_text(i)}" for i in items]
-        lines.append("")
+    headers = _store_headers(by_store)
+    for store, groups in by_store:
+        if headers:
+            lines += [f"== {store} ==", ""]
+        for label, items in groups:
+            lines.append(label.upper())
+            lines += [f"  [ ] {item_text(i)}" for i in items]
+            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
 def render_list_csv(sl):
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Section", "Item", "Quantity", "Unit", "Food", "Note"])
-    for label, items in grouped(sl):
-        for i in items:
-            w.writerow([label, item_text(i), nice_qty(i.get("quantity")), (i.get("unit") or {}).get("name", ""),
-                        (i.get("food") or {}).get("name", ""), i.get("note") or ""])
+    w.writerow(["Store", "Section", "Item", "Quantity", "Unit", "Food", "Note"])
+    for store, groups in grouped_by_store(sl):
+        for label, items in groups:
+            for i in items:
+                w.writerow([store, label, item_text(i), nice_qty(i.get("quantity")), (i.get("unit") or {}).get("name", ""),
+                            (i.get("food") or {}).get("name", ""), i.get("note") or ""])
     return buf.getvalue()
 
 
@@ -1816,6 +1870,7 @@ ul{list-style:none;padding:0;margin:0}li{padding:6px 0;font-size:15px;display:fl
 table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:8px 6px;border-bottom:1px solid #e5e5ea;vertical-align:top}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#8e8e93}
 .day{font-weight:600;white-space:nowrap;width:110px}.meal{color:#8e8e93;font-size:12px;text-transform:uppercase;width:80px}
+.store{font-size:18px;margin:26px 0 0;letter-spacing:-.01em}
 .red{color:#d70015;font-weight:600}.amber{color:#b25000;font-weight:600}
 .bar{position:fixed;top:12px;right:12px;display:flex;gap:8px}
 .bar button{font:inherit;font-size:14px;padding:8px 14px;border-radius:999px;border:0;background:#007aff;color:#fff}
@@ -1839,11 +1894,14 @@ if(location.search.includes('auto=1'))setTimeout(()=>window.print(),300)</script
 
 def print_list(sl):
     e = html.escape
-    g = grouped(sl)
-    body = '<div class="cols">' + "".join(
-        f'<div class="section"><h2>{e(l)}</h2><ul>' +
-        "".join(f'<li><span class="box"></span>{e(item_text(i))}</li>' for i in items) + "</ul></div>"
-        for l, items in g) + "</div>" if g else "<p>Nothing left to buy.</p>"
+    by_store = grouped_by_store(sl)
+    headers = _store_headers(by_store)
+    body = "".join(
+        (f'<h3 class="store">{e(store)}</h3>' if headers else "") + '<div class="cols">' + "".join(
+            f'<div class="section"><h2>{e(l)}</h2><ul>' +
+            "".join(f'<li><span class="box"></span>{e(item_text(i))}</li>' for i in items) + "</ul></div>"
+            for l, items in groups) + "</div>"
+        for store, groups in by_store) if by_store else "<p>Nothing left to buy.</p>"
     return print_page(sl.get("name") or "Shopping list", datetime.now().strftime("Printed %a %b %d, %Y"), body)
 
 
@@ -2022,6 +2080,8 @@ def build_msg(b):
         return msg_pantry()
     if kind == "test":
         return msg_test(b.get("channel") or "notification")
+    if kind == "recipe":
+        return msg_recipe(_slug_arg(b.get("slug")), _servings_arg(b.get("servings")))
     raise ApiError(400, "Unknown message kind")
 
 
@@ -2991,6 +3051,8 @@ def set_favorite(slug, on):
 
 
 FOOD_EMOJI = [
+    ("paper towel", "🧻"), ("toilet paper", "🧻"), ("napkin", "🧻"), ("tissue", "🧻"), ("soap", "🧼"), ("detergent", "🧴"), ("dish", "🧽"), ("sponge", "🧽"),
+    ("trash bag", "🗑️"), ("foil", "🧻"), ("plastic wrap", "🧻"),
     ("egg", "🥚"), ("milk", "🥛"), ("cream", "🥛"), ("butter", "🧈"), ("cheese", "🧀"), ("parmesan", "🧀"), ("yogurt", "🥛"),
     ("chicken", "🍗"), ("turkey", "🦃"), ("beef", "🥩"), ("steak", "🥩"), ("pork", "🥓"), ("bacon", "🥓"), ("sausage", "🌭"),
     ("ham", "🍖"), ("salmon", "🐟"), ("fish", "🐟"), ("tuna", "🐟"), ("shrimp", "🦐"), ("crab", "🦀"),
@@ -3102,6 +3164,7 @@ def recipe_detail(slug):
         "ingredients": ings, "steps": steps, "source_url": r.get("orgURL") or "",
         "link": recipe_link(r.get("slug")), "updated": r.get("dateUpdated") or r.get("updatedAt") or "",
         "unparsed": 0, "total_minutes": round(int(r.get("totalTimeSeconds") or 0) / 60) or None,
+        "missing": recipe_missing(r["id"]),
     }
 
 
@@ -3915,6 +3978,732 @@ def plan_to_list(start, end, list_id=None, skip_pantry=True, skip_keys=None):
     return {"list_id": list_id, "recipes": len(totals), "skipped": sorted(set(skipped))}
 
 
+# ============================================================ planner board (assign / move / delete keep the list in sync)
+
+PLAN_LOOKAHEAD_DAYS = 30   # a recipe planned again within this many days keeps its list items when one entry goes
+SLUG_RE = re.compile(r"[A-Za-z0-9_.~%-]{1,200}")
+
+
+def require_native():
+    if not NATIVE:
+        raise ApiError(501, "This needs TablePlan's built-in storage (TABLEPLAN_BACKEND=native).")
+
+
+def _strict_date(v, field="date"):
+    if not isinstance(v, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+        raise ApiError(400, f"Pick a valid {field} (YYYY-MM-DD).")
+    d = parse_date(v)
+    if not d:
+        raise ApiError(400, f"Pick a valid {field} (YYYY-MM-DD).")
+    if abs((d - today()).days) > 3660:
+        raise ApiError(400, "That date is too far away.")
+    return d
+
+
+def _entry_type_arg(v):
+    t = "dinner" if v in (None, "") else v
+    if t not in n_plans.ENTRY_TYPES:
+        raise ApiError(400, "Unknown meal type.")
+    return t
+
+
+def _int_id(v, what="entry"):
+    if isinstance(v, bool) or not isinstance(v, (int, str)) or not re.fullmatch(r"\d{1,15}", str(v)):
+        raise ApiError(400, f"Bad {what} id.")
+    return int(v)
+
+
+def _pantry_have_keys():
+    """Food keys the pantry covers: at least 25% left and not expired."""
+    have = set()
+    with db() as c:
+        for it in list_pantry(c):
+            if it["amount_left"] >= 0.25 and (it["days_left"] is None or it["days_left"] >= 0):
+                have.add(food_key(it["name"]))
+    return have
+
+
+def _drop_entry_items(c, list_id, entry):
+    """An entry was removed: drop its recipe's unchecked list items, unless that recipe is planned again soon."""
+    rid = entry.get("recipe_id")
+    if not rid:
+        return 0
+    t = today()
+    if n_plans.recipe_planned(c, rid, iso(t), iso(t + timedelta(days=PLAN_LOOKAHEAD_DAYS)), entry.get("id")):
+        return 0
+    return n_lists.remove_recipe_items(c, list_id, rid)
+
+
+def missing_counts():
+    if not NATIVE:
+        return {}
+    with db() as c:
+        return n_lists.missing_counts(c, n_lists.single_list(c))
+
+
+def enrich_plan(entries):
+    """Add recipe minutes and the "missing N" readiness count to plan entries."""
+    try:
+        pool = {r["id"]: r for r in recipe_pool()}
+    except ApiError:
+        pool = {}
+    counts = missing_counts()
+    for e in entries:
+        r = e.get("recipe")
+        if r:
+            r["minutes"] = (pool.get(r.get("id")) or {}).get("minutes")
+            r.setdefault("image_v", "")
+        e["missing"] = counts.get((r or {}).get("id"), 0) if r else 0
+    return entries
+
+
+def plan_entry(entry_id, day):
+    return next((e for e in enrich_plan(get_plans(day, day)) if str(e["id"]) == str(entry_id)), None)
+
+
+def plan_assign(b):
+    """Put a recipe on a day (replacing that day's entry of the same type) and add its ingredients to the list."""
+    require_native()
+    d = _strict_date(b.get("date"))
+    et = _entry_type_arg(b.get("entry_type"))
+    key = _s(b.get("recipe_id"), 200).strip()
+    if not key:
+        raise ApiError(400, "Pick a recipe.")
+    with db() as c:
+        rec = n_recipes.get(c, key)
+    if not rec:
+        raise ApiError(404, "Recipe not found")
+    rid = rec["id"]
+    # Everything that reads through other connections happens before the write transaction.
+    scale = household_scale(rid)
+    have = _pantry_have_keys()
+    lines, skipped = [], []
+    for ing in rec.get("recipeIngredient") or []:
+        line = _ing_line(ing)
+        if not line:
+            continue
+        fname, _ = ing_food(ing)
+        if fname and food_key(fname) in have:
+            skipped.append(fname)
+            continue
+        lines.append(line)
+    added, replaced = [], 0
+    with db() as c:
+        lid = n_lists.single_list(c)
+        existing = n_plans.entries_on(c, iso(d), et)
+        same = next((x for x in existing if x["recipe_id"] == rid), None)
+        if same:
+            eid, skipped = same["id"], []
+        else:
+            for old in existing:
+                n_plans.delete_entry(c, old["id"])
+                replaced += _drop_entry_items(c, lid, old)
+            eid = n_plans.add_entry(c, iso(d), et, rid, scale=scale)
+            added = n_lists.add_recipe_ingredients(c, lid, rid, lines, scale, parse_ing_text, aisle_for, food_key)
+    return {"entry": plan_entry(eid, d), "added": len(set(added)),
+            "skipped": sorted(set(skipped), key=str.lower), "replaced_removed": replaced}
+
+
+def plan_move(b):
+    """Move an entry to another day; if that day already has one of the same type, the two swap."""
+    require_native()
+    eid = _int_id(b.get("id"))
+    d = _strict_date(b.get("date"))
+    with db() as c:
+        e = n_plans.get_entry(c, eid)
+        if not e:
+            raise ApiError(404, "Plan entry not found")
+        if e["date"] == iso(d):
+            return {"ok": True, "swapped_with": None}
+        other = n_plans.entries_on(c, iso(d), e["entry_type"], exclude_id=eid)
+        swapped = None
+        if other:
+            n_plans.update_entry(c, other[0]["id"], date=e["date"])
+            swapped = other[0]["id"]
+        n_plans.update_entry(c, eid, date=iso(d))
+    return {"ok": True, "swapped_with": swapped}
+
+
+def plan_delete(eid):
+    if not NATIVE:
+        mealie("DELETE", f"/api/households/mealplans/{eid}")
+        return {"ok": True, "removed": 0, "undo": None}
+    with db() as c:
+        e = n_plans.get_entry(c, eid)
+        if not e:
+            raise ApiError(404, "Plan entry not found")
+        n_plans.delete_entry(c, eid)
+        removed = _drop_entry_items(c, n_lists.single_list(c), e)
+    undo = {"date": e["date"], "recipe_id": e["recipe_id"], "entry_type": e["entry_type"]} if e["recipe_id"] else None
+    return {"ok": True, "removed": removed, "undo": undo}
+
+
+def plan_status():
+    s = get_settings()
+    t = today()
+    types = [m for m in s.get("meal_types") or [] if m in n_plans.ENTRY_TYPES] or ["dinner"]
+    end = t + timedelta(days=MAX_RANGE_DAYS)
+    if NATIVE:
+        with db() as c:
+            dates = n_plans.planned_dates(c, iso(t), iso(end), types)
+    else:
+        dates = sorted({e["date"] for e in get_plans(t, t + timedelta(days=120)) if e["entry_type"] in types})
+    through = parse_date(dates[-1]) if dates else None
+    return {"planned_through": iso(through), "days_left": (through - t).days + 1 if through else 0,
+            "planned_days": len(dates), "horizon_days": int(s.get("plan_horizon_days") or 14),
+            "reminder_days": int(s.get("plan_reminder_days") or 0)}
+
+
+_app_url = {"url": ""}   # how the household reaches TablePlan, captured from recent signed-in requests
+
+
+def unchecked_count():
+    try:
+        lists = get_lists()
+        if not lists:
+            return 0
+        return sum(1 for i in (get_list(lists[0]["id"]).get("listItems") or []) if not i.get("checked"))
+    except ApiError:
+        return 0
+
+
+def notify_plan_runout(now=None):
+    """Once per run-out: tell the household the plan is about to end."""
+    now = now or datetime.now()
+    s = get_settings()
+    remind = int(s.get("plan_reminder_days") or 0)
+    if remind <= 0 or not any(channels_ready().values()) or now.hour < int(s.get("expiry_alert_hour") or 8):
+        return None
+    st = plan_status()
+    through = st["planned_through"]
+    if not through or st["days_left"] > remind or get_internal("plan_runout_notified") == through:
+        return None
+    day = parse_date(through).strftime("%A")
+    n, items = st["planned_days"], unchecked_count()
+    url = _app_url["url"]
+    text = (f"{n} planned day{'s' if n != 1 else ''} left. {items} item{'s' if items != 1 else ''} on your shopping list."
+            + (f"\n\nPlan the next days: {url}" if url else ""))
+    msg = {"subject": f"🗓️ Your meal plan runs out {day}", "text": text,
+           "html": email_wrap(f"<p>{html.escape(text.split(chr(10))[0])}</p>"
+                              + (f'<p><a href="{html.escape(url)}">Open TablePlan</a></p>' if url else "")),
+           "files": []}
+    deliver(msg)
+    set_internal("plan_runout_notified", through)
+    return msg
+
+
+# ============================================================ the ongoing shopping list and stores
+
+def _qty_text(i):
+    return " ".join(x for x in (nice_qty(i.get("quantity")) if (i.get("food") or i.get("unit")) else "",
+                                ((i.get("unit") or {}).get("name") or "")) if x)
+
+
+def list_item_json(i, names):
+    food = (i.get("food") or {}).get("name") or ""
+    return {"id": i["id"], "text": item_text(i), "name": item_name(i), "food": food, "qty": _qty_text(i),
+            "emoji": food_emoji(food or i.get("note") or i.get("display")), "checked": bool(i.get("checked")),
+            "store_id": i.get("storeId"), "aisle": ((i.get("label") or {}).get("name") or "Other"),
+            "recipes": [names[r] for r in i.get("recipeIds") or [] if r in names]}
+
+
+def _recipe_names(c):
+    return {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM recipes")}
+
+
+def ongoing_list():
+    require_native()
+    with db() as c:
+        lid = n_lists.single_list(c)
+        sl = n_lists.get_list(c, lid)
+        recent = n_lists.recently_checked(c, lid, 20)
+        stores = n_lists.list_stores(c)
+        names = _recipe_names(c)
+    order = {s["id"]: i for i, s in enumerate(stores)}
+    items = [list_item_json(i, names) for i in sl["listItems"] if not i["checked"]]
+    items.sort(key=lambda x: (order.get(x["store_id"], len(order)), x["aisle"] == "Other", x["aisle"].lower()))
+    return {"id": lid, "name": sl["name"], "items": items,
+            "recently_checked": [list_item_json(i, names) for i in recent],
+            "stores": [{"id": s["id"], "name": s["name"]} for s in stores]}
+
+
+def _store_arg(v):
+    if v in (None, ""):
+        return None
+    return _s(v, 64).strip() or None
+
+
+def _item_key(it):
+    return food_key((it.get("food") or {}).get("name") or it.get("note") or it.get("display") or "")
+
+
+def list_add(b):
+    require_native()
+    raw = b.get("items")
+    if not isinstance(raw, list):
+        raise ApiError(400, "Send items as a list.")
+    items = [_s(t, 200).strip() for t in raw[:100] if isinstance(t, str)]
+    items = [t for t in items if t]
+    if not items:
+        raise ApiError(400, "Type at least one item.")
+    sid = _store_arg(b.get("store_id"))
+    with db() as c:
+        lid = n_lists.single_list(c)
+        try:
+            ids = n_lists.add_items(c, lid, items, parse_ing_text, aisle_for, food_key, sid)
+        except KeyError:
+            raise ApiError(404, "Store not found")
+        names = _recipe_names(c)
+        out = [list_item_json(n_lists.get_item(c, i), names) for i in dict.fromkeys(ids)]
+    return {"ok": True, "added": len(out), "items": out}
+
+
+def stores_replace(b):
+    require_native()
+    stores = b.get("stores") if isinstance(b, dict) else b
+    try:
+        with db() as c:
+            return n_lists.replace_stores(c, stores)
+    except ValueError as e:
+        raise ApiError(400, str(e))
+
+
+# ============================================================ cook readiness
+
+def recipe_missing(recipe_id):
+    if not NATIVE or not recipe_id:
+        return []
+    with db() as c:
+        return n_lists.unchecked_for_recipe(c, n_lists.single_list(c), recipe_id)
+
+
+def recipe_have_all(slug):
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        lid = n_lists.single_list(c)
+        n = n_lists.mark_have(c, [x["id"] for x in n_lists.unchecked_for_recipe(c, lid, rec["id"])])
+    return {"ok": True, "count": n}
+
+
+# ============================================================ recipe export, print and share
+
+PRINT_SIZES = {   # page size, sheet inches, margin, base font pt, minimum font pt, two columns, title pt
+    "card35": {"page": "5in 3in", "w": 5.0, "h": 3.0, "m": 0.18, "font": 8.5, "min": 6.5, "cols": True, "title": 12},
+    "card46": {"page": "6in 4in", "w": 6.0, "h": 4.0, "m": 0.22, "font": 9.5, "min": 6.5, "cols": True, "title": 14},
+    "card57": {"page": "7in 5in", "w": 7.0, "h": 5.0, "m": 0.28, "font": 10.5, "min": 6.5, "cols": True, "title": 16},
+    "half": {"page": "5.5in 8.5in", "w": 5.5, "h": 8.5, "m": 0.4, "font": 10.5, "min": 7.5, "cols": False, "title": 18},
+    "letter": {"page": "letter", "w": 8.5, "h": 11.0, "m": 0.6, "font": 11.5, "min": 9, "cols": True, "title": 24},
+    "a4": {"page": "A4", "w": 8.27, "h": 11.69, "m": 0.6, "font": 11.5, "min": 9, "cols": True, "title": 24},
+}
+
+
+def _servings_arg(v):
+    if v in (None, ""):
+        return None
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        raise ApiError(400, "Servings must be a number.")
+    if not 0 < n <= 500:
+        raise ApiError(400, "Servings must be between 0 and 500.")
+    return n
+
+
+def _slug_arg(v):
+    v = _s(v, 200)
+    if not SLUG_RE.fullmatch(v or ""):
+        raise ApiError(400, "Bad recipe.")
+    return urllib.parse.unquote(v)
+
+
+def _scaled_line(g, f):
+    if f != 1 and g.get("parsed") and g.get("quantity"):
+        q = g["quantity"] * f
+        unit = (g.get("unit_plural") if q > 1 and g.get("unit_plural") else g.get("unit")) or ""
+        size = f"({g['size']}) " if g.get("size") else ""
+        food = (g.get("food_plural") if q > 1 and g.get("food_plural") else "") or g.get("food") or ""
+        out = " ".join(x for x in (nice_qty(q), (size + unit).strip(), food) if x)
+        return out + (f", {g['note']}" if g.get("note") else "")
+    return g.get("raw") or g.get("display") or g.get("food") or ""
+
+
+def recipe_export(slug, servings=None):
+    """Recipe detail plus ingredient lines scaled to `servings` (local parsed quantities, like the recipe page)."""
+    rec = recipe_detail(slug)
+    base = rec["servings"] or 0
+    f = (servings / base) if (servings and base) else 1.0
+    lines = [{"section": g["section"], "text": _scaled_line(g, f), "i": g["i"]} for g in rec["ingredients"]]
+    return rec, lines, f, (servings or base or None)
+
+
+def _meta_line(rec, servings):
+    bits = []
+    if servings:
+        bits.append(f"Serves {nice_qty(servings)}")
+    if rec.get("minutes"):
+        bits.append(f"{rec['minutes']} min")
+    return " · ".join(bits)
+
+
+def render_recipe_text(slug, servings=None):
+    rec, lines, _, sv = recipe_export(slug, servings)
+    out = [rec["name"] or "Recipe"]
+    meta = _meta_line(rec, sv)
+    if meta:
+        out.append(meta)
+    if rec.get("description"):
+        out += ["", rec["description"]]
+    out += ["", "INGREDIENTS"]
+    for ln in lines:
+        if ln["section"]:
+            out.append(f"{ln['section']}:")
+        out.append(f"- {ln['text']}")
+    out += ["", "STEPS"]
+    out += [f"{j}. " + (f"{st['title']}: " if st["title"] else "") + st["text"] for j, st in enumerate(rec["steps"], 1)]
+    if rec.get("source_url"):
+        out += ["", f"Source: {rec['source_url']}"]
+    out += ["", "Made with TablePlan"]
+    return "\n".join(out) + "\n"
+
+
+def render_recipe_md(slug, servings=None):
+    rec, lines, _, sv = recipe_export(slug, servings)
+    md = lambda t: re.sub(r"([\\`*_\[\]<>#|])", r"\\\1", str(t or ""))  # noqa: E731
+    out = [f"# {md(rec['name'] or 'Recipe')}", ""]
+    meta = _meta_line(rec, sv)
+    if meta:
+        out += [f"*{md(meta)}*", ""]
+    if rec.get("description"):
+        out += [md(rec["description"]), ""]
+    out += ["## Ingredients", ""]
+    for ln in lines:
+        if ln["section"]:
+            out += ([""] if out[-1] else []) + [f"### {md(ln['section'])}", ""]
+        out.append(f"- {md(ln['text'])}")
+    out += ["", "## Steps", ""]
+    out += [f"{j}. " + (f"**{md(st['title'])}** " if st["title"] else "") + md(st["text"]) for j, st in enumerate(rec["steps"], 1)]
+    if rec.get("source_url"):
+        out += ["", f"Source: <{rec['source_url']}>" if re.match(r"^https?://\S+$", rec["source_url"]) else f"Source: {md(rec['source_url'])}"]
+    out += ["", "*Made with TablePlan*"]
+    return "\n".join(out) + "\n"
+
+
+def render_recipe_json(slug, servings=None):
+    """The stored (Mealie-shaped) recipe; with servings, quantities and lines are scaled to match."""
+    raw = mealie("GET", f"/api/recipes/{_q(slug)}")
+    rec, lines, f, sv = recipe_export(slug, servings)
+    out = json.loads(json.dumps(raw))
+    if f != 1:
+        out["recipeServings"] = sv
+        by_i = {ln["i"]: ln["text"] for ln in lines}
+        for i, ing in enumerate(out.get("recipeIngredient") or []):
+            if _num(ing.get("quantity")):
+                ing["quantity"] = round(float(ing["quantity"]) * f, 4)
+            if i in by_i:
+                for k in ("display", "originalText", "note") if not (ing.get("food") or ing.get("unit")) else ("display",):
+                    ing[k] = by_i[i]
+    return json.dumps(out, indent=2, ensure_ascii=False) + "\n"
+
+
+def _print_steps(slug, rec, style):
+    """Classic steps, or the step-by-step version when one is cached (built-in arranger otherwise; never a new AI call)."""
+    if style == "steps":
+        try:
+            with db() as c:
+                row = c.execute("SELECT data, updated FROM guided_cache WHERE recipe_id=? AND profile=?",
+                                (rec["id"], _guided_profile() + "|ai2")).fetchone()
+            data = json.loads(row["data"]) if row and row["updated"] == rec["updated"] else guided(slug, False)
+            steps = [{"title": s.get("title") or "", "text": s.get("text") or "",
+                      "extra": " · ".join(x for x in (s.get("temperature"), s.get("timer_label")) if x)}
+                     for s in data.get("steps") or [] if s.get("text")]
+            if steps:
+                return steps
+        except Exception as e:   # any problem: print the classic steps
+            log("print: step-by-step unavailable:", str(e)[:200])
+    return [{"title": st["title"], "text": st["text"], "extra": ""} for st in rec["steps"]]
+
+
+def print_recipe(slug, size="letter", servings=None, style="classic", photo=True):
+    sz = PRINT_SIZES[size]
+    rec, lines, _, sv = recipe_export(slug, servings)
+    steps = _print_steps(slug, rec, style)
+    e = html.escape
+    nonce = getattr(_req, "nonce", "") or ""
+    inner_w, inner_h = sz["w"] - 2 * sz["m"], sz["h"] - 2 * sz["m"]
+    ing_html = ""
+    for ln in lines:
+        if ln["section"]:
+            ing_html += f'</ul><h3>{e(ln["section"])}</h3><ul>'
+        ing_html += f"<li>{e(ln['text'])}</li>"
+    ing_html = f"<ul>{ing_html}</ul>".replace("<ul></ul>", "")
+    steps_html = "".join(
+        "<li>" + (f"<b>{e(s['title'])}.</b> " if s["title"] else "") + e(s["text"])
+        + (f' <span class="x">{e(s["extra"])}</span>' if s["extra"] else "") + "</li>" for s in steps)
+    img = (f'<img class="photo" alt="" src="/img/{e(rec["id"])}?size=full">'
+           if photo and rec.get("has_image") and UUID_RE.fullmatch(str(rec.get("id") or "")) else "")
+    meta = _meta_line(rec, sv)
+    src = rec.get("source_url") or ""
+    cols = "grid-template-columns:minmax(0,2fr) minmax(0,3fr);" if sz["cols"] else "grid-template-columns:1fr;"
+    css = f"""@page{{size:{sz['page']};margin:{sz['m']}in}}
+*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#f2f2f7}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1c1c1e}}
+.sheet{{width:{inner_w:.2f}in;min-height:{inner_h:.2f}in;margin:56px auto 24px;background:#fff;font-size:{sz['font']}pt;line-height:1.3;
+box-shadow:0 0 0 {sz['m']}in #fff,0 2px 12px {sz['m']}in rgba(0,0,0,.08)}}
+h1{{font-size:{sz['title'] / sz['font']:.2f}em;margin:0 0 .15em;letter-spacing:-.01em;line-height:1.15}}
+.meta{{color:#6e6e73;font-size:.85em;margin-bottom:.5em}}.desc{{margin:0 0 .6em}}
+h2{{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;color:#6e6e73;margin:.4em 0 .3em;border-bottom:1px solid #e5e5ea}}
+h3{{font-size:.85em;margin:.5em 0 .15em}}
+.cols{{display:grid;{cols}gap:0 1.4em}}ul,ol{{margin:0;padding-left:1.2em}}li{{margin:0 0 .25em}}
+.x{{color:#6e6e73;font-size:.85em;white-space:nowrap}}
+.photo{{float:right;width:{'34%' if sz['h'] < 6 else '38%'};max-height:{min(3.2, inner_h * 0.42):.2f}in;object-fit:cover;border-radius:4px;margin:0 0 .5em .8em}}
+.foot{{clear:both;margin-top:.8em;padding-top:.3em;border-top:1px solid #e5e5ea;color:#8e8e93;font-size:.75em;display:flex;justify-content:space-between;gap:1em}}
+.foot span:first-child{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.bar{{position:fixed;top:10px;right:12px;display:flex;gap:8px;align-items:center}}
+.bar button{{font:inherit;font-size:14px;padding:8px 14px;border-radius:999px;border:0;background:#007aff;color:#fff}}
+.bar button.sec{{background:#e5e5ea;color:#1c1c1e}}.bar small{{color:#6e6e73;font-size:12px}}
+@media print{{html,body{{background:#fff}}.bar{{display:none}}.sheet{{margin:0;box-shadow:none;min-height:0}}}}"""
+    js = (f"(function(){{var s=document.getElementById('tp-sheet'),max={inner_h * 96:.1f},min={sz['min']},f={sz['font']};"
+          "function fit(){f=" + f"{sz['font']}" + ";s.style.fontSize=f+'pt';"
+          "while(s.scrollHeight>max&&f>min){f=Math.max(min,Math.round((f-0.25)*100)/100);s.style.fontSize=f+'pt';}}"
+          "document.getElementById('tp-done').onclick=function(){history.length>1?history.back():window.close();};"
+          "document.getElementById('tp-print').onclick=function(){window.print();};"
+          "window.addEventListener('load',function(){fit();"
+          "if(location.search.indexOf('auto=1')>=0)setTimeout(function(){window.print();},300);});"
+          "if(document.readyState==='complete')fit();})();")
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(rec['name'] or 'Recipe')}</title><style>{css}</style></head><body>
+<div class="bar"><small>Choose "Save as PDF" in the print dialog</small><button class="sec" id="tp-done">Done</button><button id="tp-print">Print</button></div>
+<div class="sheet" id="tp-sheet">{img}<h1>{e(rec['name'] or 'Recipe')}</h1>{f'<div class="meta">{e(meta)}</div>' if meta else ''}
+{f'<p class="desc">{e(rec["description"][:400])}</p>' if rec.get("description") and not sz['h'] < 6 else ''}
+<div class="cols"><section><h2>Ingredients</h2>{ing_html}</section><section><h2>Steps</h2><ol>{steps_html}</ol></section></div>
+<div class="foot"><span>{e(src)}</span><span>TablePlan</span></div></div>
+<script nonce="{e(nonce)}">{js}</script></body></html>"""
+
+
+def msg_recipe(slug, servings=None):
+    rec, lines, _, sv = recipe_export(slug, servings)
+    e = html.escape
+    meta = _meta_line(rec, sv)
+    body = (f"<h1>{e(rec['name'] or 'Recipe')}</h1>" + (f"<div class='sub'>{e(meta)}</div>" if meta else "")
+            + "<h2>Ingredients</h2><ul>" + "".join(f"<li>{e(ln['text'])}</li>" for ln in lines) + "</ul>"
+            + "<h2>Steps</h2><ol>" + "".join(f"<li>{e(st['text'])}</li>" for st in rec["steps"]) + "</ol>"
+            + (f"<p class='sub'>Source: {e(rec['source_url'])}</p>" if rec.get("source_url") else ""))
+    return {"subject": f"🍳 {rec['name'] or 'Recipe'}", "text": render_recipe_text(slug, servings),
+            "html": email_wrap(body), "files": []}
+
+
+# ============================================================ backups and storage safety
+
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+BACKUP_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.db")
+DAILY_BACKUP_RE = re.compile(r"tableplan-\d{4}-\d{2}-\d{2}\.db")
+PRE_BACKUP_RE = re.compile(r"pre-[A-Za-z0-9._-]+-to-[A-Za-z0-9._-]+\.db")
+KEEP_DAILY, KEEP_PRE = 14, 5
+ZIP_CAP = 1 << 30   # 1 GB
+_backup_lock = threading.Lock()
+_zip_lock = threading.Lock()
+_storage = {"integrity": None}
+
+
+def _snapshot(dest):
+    """Consistent copy of the live database via SQLite's online backup API; written 0600 and swapped in atomically."""
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    tmp = dest + ".tmp"
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    os.close(fd)
+    try:
+        src = sqlite3.connect(DB_PATH, timeout=30)
+        try:
+            dst = sqlite3.connect(tmp)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return dest
+
+
+def rotate_backups():
+    try:
+        names = os.listdir(BACKUP_DIR)
+    except FileNotFoundError:
+        return
+    daily = sorted(n for n in names if DAILY_BACKUP_RE.fullmatch(n))
+    pre = sorted((n for n in names if PRE_BACKUP_RE.fullmatch(n)),
+                 key=lambda n: os.path.getmtime(os.path.join(BACKUP_DIR, n)))
+    for n in daily[:-KEEP_DAILY] + pre[:-KEEP_PRE]:
+        try:
+            os.remove(os.path.join(BACKUP_DIR, n))
+        except OSError as e:
+            log("backup rotation:", e)
+
+
+def _backup_info(name):
+    st = os.stat(os.path.join(BACKUP_DIR, name))
+    return {"name": name, "size": st.st_size, "created": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")}
+
+
+def list_backups():
+    try:
+        names = os.listdir(BACKUP_DIR)
+    except FileNotFoundError:
+        return []
+    out = []
+    for n in names:
+        p = os.path.join(BACKUP_DIR, n)
+        if BACKUP_NAME_RE.fullmatch(n) and os.path.isfile(p) and not os.path.islink(p):
+            out.append(_backup_info(n))
+    return sorted(out, key=lambda b: b["created"], reverse=True)
+
+
+def make_backup():
+    with _backup_lock:
+        name = f"tableplan-{iso(today())}.db"
+        _snapshot(os.path.join(BACKUP_DIR, name))
+        rotate_backups()
+    set_internal("backup_last", iso(today()))
+    return _backup_info(name)
+
+
+def backup_path(name):
+    """Path of an existing backup, or 404. Only plain names inside the backups folder are accepted."""
+    if not isinstance(name, str) or not BACKUP_NAME_RE.fullmatch(name):
+        raise ApiError(404, "Not found")
+    base = os.path.realpath(BACKUP_DIR)
+    p = os.path.join(base, name)
+    if os.path.dirname(os.path.realpath(p)) != base or os.path.islink(p) or not os.path.isfile(p):
+        raise ApiError(404, "Not found")
+    return p
+
+
+def _stored_version():
+    """The version that last ran against this database (read before migrations touch it)."""
+    if not os.path.exists(DB_PATH):
+        return None, False
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=15)
+        try:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone():
+                return None, False
+            row = conn.execute("SELECT value FROM settings WHERE key='last_run_version'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        log("couldn't read the stored version:", e)
+        return None, False
+    try:
+        return (json.loads(row[0]) if row else None), True
+    except ValueError:
+        return None, True
+
+
+def pre_upgrade_snapshot():
+    """Snapshot the database before a different TablePlan version migrates it."""
+    old, existing = _stored_version()
+    if not existing or old == APP_VERSION:
+        return None
+    name = f"pre-{safe_filename(old or 'unknown', 'unknown')}-to-{safe_filename(APP_VERSION, 'new')}.db"
+    with _backup_lock:
+        _snapshot(os.path.join(BACKUP_DIR, name))
+        rotate_backups()
+    log(f"saved {name} before upgrading")
+    return name
+
+
+def integrity_check():
+    try:
+        with db() as c:
+            rows = [r[0] for r in c.execute("PRAGMA integrity_check").fetchall()]
+        res = "ok" if rows == ["ok"] else "; ".join(str(r) for r in rows)[:500]
+    except sqlite3.Error as e:
+        res = f"check failed: {e}"[:500]
+    _storage["integrity"] = res
+    (log("database integrity: ok") if res == "ok" else log("DATABASE INTEGRITY PROBLEM:", res))
+    return res
+
+
+def storage_persistent():
+    """In a container, DATA_DIR must be a mounted volume (its own device or a mount point) to survive a rebuild."""
+    if not (os.path.exists("/.dockerenv") or ON_RAILWAY):
+        return True
+    try:
+        if os.stat(DATA_DIR).st_dev != os.stat("/").st_dev:
+            return True
+    except OSError:
+        return False
+    real = os.path.realpath(DATA_DIR)
+    try:
+        with open("/proc/mounts", encoding="utf-8", errors="replace") as f:
+            mounts = {ln.split()[1].replace("\\040", " ") for ln in f if len(ln.split()) > 1}
+    except OSError:
+        return False
+    return real in mounts
+
+
+def storage_info():
+    b = list_backups()
+    return {"persistent": storage_persistent(), "last_backup": b[0]["created"] if b else None, "backups": len(b),
+            "integrity": _storage["integrity"] or "not checked", "data_dir": DATA_DIR}
+
+
+def startup_storage():
+    integrity_check()
+    set_internal("last_run_version", APP_VERSION)
+    try:
+        make_backup()
+    except Exception as e:
+        log("startup backup failed:", e)
+    if not storage_persistent():
+        log(f"WARNING: {DATA_DIR} isn't on a persistent volume; data will be lost when this container is rebuilt.")
+
+
+def build_backup_zip():
+    """A temp file holding a zip of a fresh DB snapshot plus the images folder (capped at 1 GB)."""
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    fd, snap = tempfile.mkstemp(prefix=".snap-", suffix=".tmp", dir=BACKUP_DIR)
+    os.close(fd)
+    out = tempfile.TemporaryFile(dir=BACKUP_DIR)
+    try:
+        _snapshot(snap)
+        total = os.path.getsize(snap)
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(snap, "tableplan.db")
+            for root, dirs, files in os.walk(IMG_DIR, followlinks=False):
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                for fn in files:
+                    p = os.path.join(root, fn)
+                    if os.path.islink(p) or not os.path.isfile(p) or fn.endswith(".tmp"):
+                        continue
+                    total += os.path.getsize(p)
+                    if total > ZIP_CAP:
+                        raise ApiError(413, "Your data is over 1 GB. Copy the data folder directly instead.")
+                    zf.write(p, "images/" + os.path.relpath(p, IMG_DIR).replace(os.sep, "/"), zipfile.ZIP_STORED)
+        out.seek(0, os.SEEK_END)
+        size = out.tell()
+        out.seek(0)
+        return out, size
+    except BaseException:
+        out.close()
+        raise
+    finally:
+        try:
+            os.remove(snap)
+        except OSError:
+            pass
+
+
 # ============================================================ update check
 
 _update_cache = {"at": 0, "data": None}
@@ -3996,6 +4785,18 @@ def scheduler():
                     if items:
                         deliver(msg_expiring(items))
                         log(f"use-soon alert sent ({len(items)} items)")
+            # Nightly database backup (~3:00; one is also taken at start-up)
+            if now.hour >= 3 and get_internal("backup_last") != iso(now.date()):
+                try:
+                    make_backup()
+                    log("nightly backup saved")
+                except Exception as e:
+                    log("nightly backup failed:", e)
+            # "Your meal plan runs out" reminder (once per run-out)
+            try:
+                notify_plan_runout(now)
+            except ApiError as e:
+                log("plan reminder not sent:", e.message)
             # Pantry check-in reminder (once per due period, at the alert hour)
             ck = pantry_checkin_status()
             if ck["due"] and any(channels_ready().values()) and now.hour >= int(s.get("expiry_alert_hour") or 8):
@@ -4039,6 +4840,7 @@ EXPENSIVE = [
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next)"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
     (re.compile(r"/api/(upc/\d+|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
+    (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
 ]
 PUBLIC_PATHS = ("/", "/manifest.webmanifest", "/sw.js", "/api/session", "/api/login")
 
@@ -4094,9 +4896,35 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, default=str)
         data = body.encode("utf-8") if isinstance(body, str) else body
+        if not self._start(code, ctype, len(data), headers):
+            return
+        try:
+            if self.command != "HEAD":
+                self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True   # the browser went away mid-response; nothing to do
+
+    def send_file(self, fileobj, length, ctype, fname):
+        """Stream an open binary file as a download (backups can be large)."""
+        if not self._start(200, ctype, length, {"Content-Disposition": f'attachment; filename="{safe_filename(fname)}"'}):
+            return
+        if self.command == "HEAD":
+            return
+        try:
+            remaining = length
+            while remaining > 0:
+                chunk = fileobj.read(min(1 << 20, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def _start(self, code, ctype, length, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(length))
         if getattr(self, "_body", None) is None and getattr(self, "_req_len", 0) > 0:
             # request body was never read (early 401/403/413/error): close so its bytes aren't parsed as the next request
             self.send_header("Connection", "close")
@@ -4124,10 +4952,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         try:
             self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(data)
+            return True
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True   # the browser went away mid-response; nothing to do
+            return False
 
     def download(self, text, fname, ctype):
         self.send(200, text, ctype, {"Content-Disposition": f'attachment; filename="{safe_filename(fname)}"'})
@@ -4141,6 +4969,18 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "Expected a JSON object.")
         if not isinstance(out, dict):
             raise ApiError(400, "Expected a JSON object.")
+        return out
+
+    def json_any(self):
+        """Request JSON that may be an object or a list."""
+        if getattr(self, "_body", None) is None:
+            self._read_body()
+        try:
+            out = json.loads(self._body) if self._body else {}
+        except (ValueError, RecursionError):
+            raise ApiError(400, "Expected JSON.")
+        if not isinstance(out, (dict, list)):
+            raise ApiError(400, "Expected JSON.")
         return out
 
     def _read_body(self):
@@ -4204,6 +5044,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
             self.end_headers()
             return
+        if not public and self.authorized():
+            _app_url["url"] = f"{_req.scheme}://{host}"
         self._max_body = body_limit(path)
         if self._req_len > self._max_body:
             return self._reject(413, "Request too large")
@@ -4294,6 +5136,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "auth_required": auth_required(), "version": APP_VERSION,
                                    "repo_url": "https://github.com/thomasjvalenzuela/tableplan",
                                    "ai_key": bool(cfg("openai_key")),
+                                   "storage": storage_info(),
                                    "import_url": f"{base}/g/{slug}/r/create/url",
                                    "import_image": f"{base}/g/{slug}/r/create",
                                    "planner_url": f"{base}/household/mealplan/planner/view"})
@@ -4400,9 +5243,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, recipe_update(urllib.parse.unquote(mm.group(1)), self.body()))
         if m == "DELETE" and mm:
             return self.send(200, recipe_delete(urllib.parse.unquote(mm.group(1))))
-        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list)", path)
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all)", path)
         if mm:
             slug, act = urllib.parse.unquote(mm.group(1)), mm.group(2)
+            if act == "have-all" and m == "POST":
+                return self.send(200, recipe_have_all(slug))
             if act == "favorite" and m == "POST":
                 return self.send(200, set_favorite(slug, bool(self.body().get("favorite", True))))
             if act == "guided" and m == "GET":
@@ -4482,8 +5327,14 @@ class Handler(BaseHTTPRequestHandler):
         # --- meal plan
         if m == "GET" and path == "/api/plan":
             start, end = date_range(q.get("start"), q.get("end"))
-            entries = get_plans(start, end)
+            entries = enrich_plan(get_plans(start, end))
             return self.send(200, {"start": iso(start), "end": iso(end), "entries": entries})
+        if m == "GET" and path == "/api/plan/status":
+            return self.send(200, plan_status())
+        if m == "POST" and path == "/api/plan/assign":
+            return self.send(200, plan_assign(self.body()))
+        if m == "POST" and path == "/api/plan/move":
+            return self.send(200, plan_move(self.body()))
         if m == "POST" and path == "/api/plan/generate":
             return self.send(200, generate_plan(self.body()))
         if m == "POST" and path == "/api/plan/reroll":
@@ -4500,10 +5351,56 @@ class Handler(BaseHTTPRequestHandler):
                             mealie("DELETE", f"/api/households/mealplans/{e['id']}")
             n = save_plan(entries)
             return self.send(200, {"created": n})
-        mm = re.fullmatch(r"/api/plan/(\d+)", path)
+        mm = re.fullmatch(r"/api/plan/(\d{1,15})", path)
         if m == "DELETE" and mm:
-            mealie("DELETE", f"/api/households/mealplans/{mm.group(1)}")
-            return self.send(200, {"ok": True})
+            return self.send(200, plan_delete(int(mm.group(1))))
+
+        # --- the ongoing list and stores
+        if m == "GET" and path == "/api/list":
+            return self.send(200, ongoing_list())
+        if m == "POST" and path == "/api/list/items":
+            return self.send(200, list_add(self.body()))
+        mm = re.fullmatch(r"/api/list/items/([A-Za-z0-9-]{1,64})(/have)?", path)
+        if mm and ((m == "PATCH" and not mm.group(2)) or (m == "POST" and mm.group(2))):
+            require_native()
+            item_id = mm.group(1)
+            with db() as c:
+                it = n_lists.get_item(c, item_id)
+            if not it:
+                raise ApiError(404, "Item not on the list")
+            if mm.group(2):
+                with db() as c:
+                    n_lists.mark_have(c, [item_id])
+                return self.send(200, {"ok": True})
+            return self.send(200, self.patch_item(it, self.body()))
+        if path == "/api/stores":
+            if m == "GET":
+                require_native()
+                with db() as c:
+                    return self.send(200, n_lists.list_stores(c))
+            if m == "PUT":
+                return self.send(200, stores_replace(self.json_any()))
+
+        # --- backups
+        if path == "/api/backups":
+            if m == "GET":
+                return self.send(200, list_backups())
+            if m == "POST":
+                return self.send(200, {"ok": True, "backup": make_backup(), "backups": list_backups()})
+        mm = re.fullmatch(r"/backups/([^/]{1,160})", path)
+        if m == "GET" and mm:
+            p = backup_path(mm.group(1))
+            with open(p, "rb") as f:
+                return self.send_file(f, os.fstat(f.fileno()).st_size, "application/octet-stream", mm.group(1))
+        if m == "GET" and path == "/export/backup.zip":
+            if not _zip_lock.acquire(blocking=False):
+                raise ApiError(503, "A backup download is already being prepared. Try again in a minute.")
+            try:
+                f, size = build_backup_zip()
+            finally:
+                _zip_lock.release()
+            with f:
+                return self.send_file(f, size, "application/zip", f"tableplan-backup-{iso(today())}.zip")
 
         # --- shopping lists
         if m == "GET" and path == "/api/lists":
@@ -4613,6 +5510,24 @@ class Handler(BaseHTTPRequestHandler):
             if ext == "txt":
                 return self.download(render_plan_text(entries, start, end), f"meal-plan-{iso(start)}.txt", "text/plain; charset=utf-8")
             return self.download(render_plan_csv(entries), f"meal-plan-{iso(start)}.csv", "text/csv; charset=utf-8")
+        mm = re.fullmatch(r"/export/recipe/([A-Za-z0-9_.~%-]{1,200})\.(txt|md|json)", path)
+        if m == "GET" and mm:
+            slug, ext = urllib.parse.unquote(mm.group(1)), mm.group(2)
+            sv = _servings_arg(q.get("servings"))
+            fname = f"{safe_filename(slug, 'recipe')}.{ext}"
+            if ext == "txt":
+                return self.download(render_recipe_text(slug, sv), fname, "text/plain; charset=utf-8")
+            if ext == "md":
+                return self.download(render_recipe_md(slug, sv), fname, "text/markdown; charset=utf-8")
+            return self.download(render_recipe_json(slug, sv), fname, "application/json; charset=utf-8")
+        mm = re.fullmatch(r"/print/recipe/([A-Za-z0-9_.~%-]{1,200})", path)
+        if m == "GET" and mm:
+            size = q.get("size") or "letter"
+            style = q.get("style") or "classic"
+            if size not in PRINT_SIZES or style not in ("classic", "steps") or q.get("photo", "1") not in ("0", "1"):
+                raise ApiError(400, "Bad print options.")
+            return self.send(200, print_recipe(urllib.parse.unquote(mm.group(1)), size, _servings_arg(q.get("servings")),
+                                               style, q.get("photo", "1") == "1"), "text/html; charset=utf-8")
         if m == "GET" and path == "/export/pantry.csv":
             with db() as c:
                 return self.download(render_pantry_csv(list_pantry(c)), "pantry.csv", "text/csv; charset=utf-8")
@@ -4649,6 +5564,33 @@ class Handler(BaseHTTPRequestHandler):
             out["recipe_count"] = len(recipe_pool())
         except ApiError as e:
             out.update(mealie_ok=False, error=e.message, week=[], lists=[], list_count=0, recipe_count=0)
+        return out
+
+    def patch_item(self, it, b):
+        """PATCH /api/list/items/{id}: store_id (remembered per food), text, checked (the bought / undo flow)."""
+        item_id = it["id"]
+        out = {"ok": True}
+        if "text" in b:
+            text = _s(b.get("text"), 200).strip()
+            if not text:
+                raise ApiError(400, "Type the item.")
+            with db() as c:
+                n_lists.set_item_text(c, item_id, text, parse_ing_text, aisle_for)
+        if "store_id" in b:
+            with db() as c:
+                try:
+                    n_lists.set_item_store(c, item_id, _store_arg(b.get("store_id")), _item_key(it))
+                except KeyError:
+                    raise ApiError(404, "Store not found")
+        if "checked" in b:
+            if not isinstance(b["checked"], bool):
+                raise ApiError(400, "checked must be true or false")
+            if b["checked"] and not it["checked"]:
+                out.update(self.bought(it["list_id"], item_id, "bought", b))
+            elif not b["checked"] and it["checked"]:
+                out.update(self.bought(it["list_id"], item_id, "undo", b))
+        with db() as c:
+            out["item"] = list_item_json(n_lists.get_item(c, item_id), _recipe_names(c))
         return out
 
     def bought(self, list_id, item_id, action, b):
@@ -4754,9 +5696,14 @@ def secure_data_dir():
 
 def main():
     secure_data_dir()
+    try:
+        pre_upgrade_snapshot()
+    except Exception as e:
+        log("pre-upgrade snapshot failed:", e)
     init_db()
     secure_data_dir()
     load_cfg()
+    startup_storage()
     if not get_internal("usda_synced_at"):
         def first_sync():
             try:

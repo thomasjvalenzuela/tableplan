@@ -65,7 +65,7 @@ class NativeListsTest(unittest.TestCase):
         self.assertEqual(len(items), 3)
         milk, onion, towels = items
         self.assertEqual(set(milk), {"id", "display", "note", "quantity", "unit", "food", "label", "checked",
-                                     "position", "recipeIds"})
+                                     "position", "recipeIds", "storeId", "checkedAt"})
         self.assertEqual((milk["quantity"], milk["unit"]["name"], milk["food"], milk["label"]),
                          (3.0, "cup", {"name": "milk"}, {"name": "Dairy"}))
         self.assertEqual(milk["display"], "3 cups milk")

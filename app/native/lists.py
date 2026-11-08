@@ -35,7 +35,19 @@ CREATE TABLE IF NOT EXISTS shopping_items (
 );
 CREATE INDEX IF NOT EXISTS idx_shopping_items_list ON shopping_items(list_id, checked, position);
 CREATE INDEX IF NOT EXISTS idx_shopping_items_merge ON shopping_items(list_id, food, unit) WHERE checked = 0;
+CREATE TABLE IF NOT EXISTS stores (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS food_store (
+    food_key TEXT PRIMARY KEY,
+    store_id TEXT NOT NULL REFERENCES stores(id) ON DELETE CASCADE
+);
 """
+
+MAX_STORES = 12
+MAX_STORE_NAME = 40
 
 _EDITABLE = {"text", "food", "quantity", "unit", "unit_plural", "note", "label", "position"}
 
@@ -77,6 +89,7 @@ def _item(r):
         "label": {"name": r["label"]} if r["label"] else None,
         "checked": bool(r["checked"]), "position": r["position"],
         "recipeIds": json.loads(r["recipe_ids"] or "[]"),
+        "storeId": r["store_id"], "checkedAt": r["checked_at"],
     }
 
 
@@ -89,6 +102,22 @@ def _require_list(c, list_id):
 
 def init(c):
     c.executescript(SCHEMA)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(shopping_items)")}
+    if "store_id" not in cols:
+        c.execute("ALTER TABLE shopping_items ADD COLUMN store_id TEXT")
+
+
+def single_list(c, name="Groceries"):
+    """The one ongoing list: created if missing; if several exist, every item moves into the oldest one."""
+    rows = c.execute("SELECT id FROM shopping_lists ORDER BY created_at, rowid").fetchall()
+    if not rows:
+        return create_list(c, name)
+    keep = rows[0]["id"]
+    for r in rows[1:]:
+        base = c.execute("SELECT coalesce(max(position), -1) + 1 FROM shopping_items WHERE list_id=?", (keep,)).fetchone()[0]
+        c.execute("UPDATE shopping_items SET list_id=?, position=position+? WHERE list_id=?", (keep, base, r["id"]))
+        c.execute("DELETE FROM shopping_lists WHERE id=?", (r["id"],))
+    return keep
 
 
 def list_lists(c):
@@ -124,8 +153,10 @@ def get_list(c, list_id):
 
 # ------------------------------------------------------------------ items
 
-def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None):
-    """Insert one line, merging into an unchecked item with the same food+unit. Returns the item id."""
+def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None, store_key=None, store_id=None):
+    """Insert one line, merging into an unchecked item with the same food+unit. Returns the item id.
+
+    New items get ``store_id`` if given, else the store remembered for ``store_key(food or text)``."""
     text = (text or "").strip()
     if not text:
         return None
@@ -153,29 +184,189 @@ def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None):
                   (new_qty, new_note, json.dumps(rids), dup["id"]))
         return dup["id"]
     pos = c.execute("SELECT coalesce(max(position), -1) + 1 FROM shopping_items WHERE list_id=?", (list_id,)).fetchone()[0]
+    if store_id is None and store_key:
+        store_id = store_for(c, store_key(food or text))
     iid = str(uuid.uuid4())
     c.execute("INSERT INTO shopping_items (id, list_id, text, food, quantity, unit, unit_plural, note, label, checked, "
-              "position, recipe_ids, created_at) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?)",
+              "position, recipe_ids, created_at, store_id) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?)",
               (iid, list_id, text, food, qty, unit or None, plural or None, note,
                (categorize(food or text) if categorize else None) or None, pos,
-               json.dumps([recipe_id] if recipe_id else []), _now()))
+               json.dumps([recipe_id] if recipe_id else []), _now(), store_id))
     return iid
 
 
-def add_items(c, list_id, texts, parse=None, categorize=None):
+def add_items(c, list_id, texts, parse=None, categorize=None, store_key=None, store_id=None):
     """Add free-text lines. parse(text) -> {quantity, unit, unit_plural, food, note} | None;
     categorize(food_or_text) -> aisle label | None. Returns the affected item ids (merged items included)."""
     _require_list(c, list_id)
-    ids = [_add_one(c, list_id, t, parse, categorize) for t in texts or []]
+    if store_id is not None and not get_store(c, store_id):
+        raise KeyError(f"store {store_id} not found")
+    ids = [_add_one(c, list_id, t, parse, categorize, store_key=store_key, store_id=store_id) for t in texts or []]
     return [i for i in ids if i]
 
 
-def add_recipe_ingredients(c, list_id, recipe_id, lines, scale, parse, categorize):
+def add_recipe_ingredients(c, list_id, recipe_id, lines, scale, parse, categorize, store_key=None):
     """Add a recipe's ingredient lines with parsed quantities multiplied by `scale`."""
     _require_list(c, list_id)
     scale = float(scale or 1)
-    ids = [_add_one(c, list_id, t, parse, categorize, scale, str(recipe_id) if recipe_id else None) for t in lines or []]
+    ids = [_add_one(c, list_id, t, parse, categorize, scale, str(recipe_id) if recipe_id else None, store_key)
+           for t in lines or []]
     return [i for i in ids if i]
+
+
+def get_item(c, item_id):
+    r = c.execute("SELECT * FROM shopping_items WHERE id=?", (item_id,)).fetchone()
+    return dict(_item(r), list_id=r["list_id"]) if r else None
+
+
+def _linked(c, list_id, recipe_id):
+    """Unchecked rows on the list linked to recipe_id (recipe_ids is a JSON array of ids)."""
+    return [r for r in c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0 AND recipe_ids LIKE ? "
+                                 "ORDER BY position, created_at", (list_id, f'%"{recipe_id}"%'))
+            if str(recipe_id) in json.loads(r["recipe_ids"] or "[]")]
+
+
+def unchecked_for_recipe(c, list_id, recipe_id):
+    """Unchecked items still needed for a recipe, as [{id, text}]."""
+    return [{"id": r["id"], "text": _display(r)} for r in _linked(c, list_id, str(recipe_id))]
+
+
+def missing_counts(c, list_id):
+    """{recipe_id: number of unchecked items linked to it}."""
+    out = {}
+    for r in c.execute("SELECT recipe_ids FROM shopping_items WHERE list_id=? AND checked=0 AND recipe_ids != '[]'",
+                       (list_id,)):
+        for rid in set(json.loads(r["recipe_ids"] or "[]")):
+            out[rid] = out.get(rid, 0) + 1
+    return out
+
+
+def remove_recipe_items(c, list_id, recipe_id):
+    """Drop a recipe's unchecked items: items linked only to it are deleted, shared ones are just unlinked.
+    Checked (bought) items are never touched. Returns the number of items deleted."""
+    removed = 0
+    rid = str(recipe_id)
+    for r in _linked(c, list_id, rid):
+        rids = [x for x in json.loads(r["recipe_ids"] or "[]") if x != rid]
+        if rids:
+            c.execute("UPDATE shopping_items SET recipe_ids=? WHERE id=?", (json.dumps(rids), r["id"]))
+        else:
+            c.execute("DELETE FROM shopping_items WHERE id=?", (r["id"],))
+            removed += 1
+    return removed
+
+
+def set_item_text(c, item_id, text, parse=None, categorize=None):
+    """Rewrite an item from new free text (re-parsed and re-categorized); keeps its store and recipe links."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Item text is required.")
+    p = parse(text) if parse else None
+    food = (p.get("food") or "").strip() if p else ""
+    if food:
+        vals = (text, food, float(p.get("quantity") or 0) or None, p.get("unit") or None, p.get("unit_plural") or None,
+                (p.get("note") or "").strip())
+    else:
+        vals = (text, None, 1.0, None, None, text)
+    label = (categorize(food or text) if categorize else None) or None
+    return c.execute("UPDATE shopping_items SET text=?, food=?, quantity=?, unit=?, unit_plural=?, note=?, label=? "
+                     "WHERE id=?", (*vals, label, item_id)).rowcount > 0
+
+
+def mark_have(c, item_ids):
+    """"I already have this": check items off without the bought flow. Returns how many changed."""
+    n = 0
+    for iid in item_ids:
+        n += c.execute("UPDATE shopping_items SET checked=1, checked_at=? WHERE id=? AND checked=0",
+                       (_now(), iid)).rowcount
+    return n
+
+
+def recently_checked(c, list_id, limit=20):
+    rows = c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=1 "
+                     "ORDER BY coalesce(checked_at, created_at) DESC LIMIT ?", (list_id, int(limit)))
+    return [_item(r) for r in rows]
+
+
+# ------------------------------------------------------------------ stores
+
+def _store_name(name):
+    if not isinstance(name, str):
+        raise ValueError("Store names must be text.")
+    name = " ".join(name.split())
+    if not 1 <= len(name) <= MAX_STORE_NAME:
+        raise ValueError(f"Store names are 1-{MAX_STORE_NAME} characters.")
+    return name
+
+
+def list_stores(c):
+    return [dict(r) for r in c.execute("SELECT id, name, position FROM stores ORDER BY position, name COLLATE NOCASE")]
+
+
+def get_store(c, store_id):
+    r = c.execute("SELECT id, name, position FROM stores WHERE id=?", (str(store_id),)).fetchone()
+    return dict(r) if r else None
+
+
+def seed_stores(c, names):
+    """Insert default stores only when there are none."""
+    if c.execute("SELECT 1 FROM stores").fetchone():
+        return False
+    for i, n in enumerate(names):
+        c.execute("INSERT INTO stores (id, name, position) VALUES (?,?,?)", (str(uuid.uuid4()), _store_name(n), i))
+    return True
+
+
+def replace_stores(c, stores):
+    """Replace the store list with [{id?, name}] in order. Known ids are kept; stores left out are removed
+    (their items go back to "any store" and their remembered foods are forgotten)."""
+    if not isinstance(stores, list) or len(stores) > MAX_STORES:
+        raise ValueError(f"Send a list of at most {MAX_STORES} stores.")
+    existing = {r["id"] for r in c.execute("SELECT id FROM stores")}
+    clean, seen_ids, seen_names = [], set(), set()
+    for s in stores:
+        if not isinstance(s, dict):
+            raise ValueError("Each store needs a name.")
+        name = _store_name(s.get("name"))
+        if name.lower() in seen_names:
+            raise ValueError(f"{name} is listed twice.")
+        seen_names.add(name.lower())
+        sid = s.get("id")
+        sid = str(sid) if sid is not None and str(sid) in existing and str(sid) not in seen_ids else None
+        sid = sid or str(uuid.uuid4())
+        seen_ids.add(sid)
+        clean.append((sid, name))
+    gone = existing - seen_ids
+    for sid in gone:
+        c.execute("UPDATE shopping_items SET store_id=NULL WHERE store_id=?", (sid,))
+        c.execute("DELETE FROM food_store WHERE store_id=?", (sid,))
+        c.execute("DELETE FROM stores WHERE id=?", (sid,))
+    for i, (sid, name) in enumerate(clean):
+        c.execute("INSERT INTO stores (id, name, position) VALUES (?,?,?) "
+                  "ON CONFLICT(id) DO UPDATE SET name=excluded.name, position=excluded.position", (sid, name, i))
+    return list_stores(c)
+
+
+def store_for(c, key):
+    if not key:
+        return None
+    r = c.execute("SELECT store_id FROM food_store WHERE food_key=?", (key,)).fetchone()
+    return r["store_id"] if r else None
+
+
+def set_item_store(c, item_id, store_id, key=None):
+    """Put an item in a store (None = any store) and remember the choice for that food."""
+    if store_id is not None and not get_store(c, store_id):
+        raise KeyError(f"store {store_id} not found")
+    if not c.execute("UPDATE shopping_items SET store_id=? WHERE id=?", (store_id, item_id)).rowcount:
+        return False
+    if key:
+        if store_id is None:
+            c.execute("DELETE FROM food_store WHERE food_key=?", (key,))
+        else:
+            c.execute("INSERT INTO food_store (food_key, store_id) VALUES (?,?) "
+                      "ON CONFLICT(food_key) DO UPDATE SET store_id=excluded.store_id", (key, store_id))
+    return True
 
 
 def set_checked(c, list_id, item_id, checked):
@@ -241,6 +432,8 @@ def migrate_from_mealie(c, mealie):
     return out
 
 
-__all__ = ["init", "list_lists", "create_list", "rename_list", "delete_list", "get_list", "add_items",
+__all__ = ["init", "single_list", "get_item", "unchecked_for_recipe", "missing_counts", "remove_recipe_items",
+           "mark_have", "recently_checked", "list_stores", "get_store", "seed_stores", "replace_stores", "store_for",
+           "set_item_store", "set_item_text", "list_lists", "create_list", "rename_list", "delete_list", "get_list", "add_items",
            "add_recipe_ingredients", "set_checked", "update_item", "delete_item", "clear_checked",
            "migrate_from_mealie"]

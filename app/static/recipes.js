@@ -81,7 +81,7 @@ async function renderRecipe(slug) {
   R.rec = rec; R.servings = rec.servings || state.cfg.household?.people || 4; R.guide = null;
   R.style = state.cfg.settings.recipe_style === "steps" ? "steps" : "classic";
   const img = recipeImg(rec, "full");
-  app.innerHTML = `<div class="rd fade-in">
+  app.innerHTML = `${storageBar()}<div class="rd fade-in">
     <div class="rd-hero" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}
       <button class="round-btn back" id="rd-back" aria-label="Back">${ic("chevL")}</button>
       <button class="round-btn imgbtn" id="rd-img" aria-label="Change photo">${ic("camera")}</button>
@@ -99,9 +99,11 @@ async function renderRecipe(slug) {
       <div class="toolbar" style="margin-top:18px">
         <button class="pill-btn" id="rd-plan">${ic("cal")} Plan it</button>
         <button class="pill-btn" id="rd-missing">${ic("cart")} Add missing to list</button>
+        <button class="pill-btn" id="rd-share">${ic("share")} Share & export</button>
         <button class="pill-btn" id="rd-edit">${ic("edit")} Edit</button>
         ${extLink(rec.source_url) ? `<a class="pill-btn" ${extLink(rec.source_url)}>${ic("link")} Original</a>` : ""}
       </div>
+      <div id="rd-miss"></div>
       <div class="cta-bar"><button class="btn" id="rd-cook">${ic("play")} Start cooking</button></div>
     </div></div>`;
   $("#rd-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
@@ -112,11 +114,13 @@ async function renderRecipe(slug) {
   $("#rd-img").onclick = () => openImagePicker({ kind: "recipe", slug, name: rec.name, after: () => renderRecipe(slug) });
   $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); }));
   $$("#rd-style button").forEach((b) => (b.onclick = () => { R.style = b.dataset.v; drawContent(); }));
-  $("#rd-cook").onclick = () => startCook();
+  $("#rd-cook").onclick = () => ((R.rec.missing || []).length ? showMissing() : startCook());
+  $("#rd-share").onclick = () => openRecipeExport();
   $("#rd-plan").onclick = () => planRecipe(rec);
   $("#rd-missing").onclick = () => addMissing();
   $("#rd-edit").onclick = () => { location.hash = "edit/" + encodeURIComponent(slug); };
   drawContent();
+  drawCookReady();
 }
 const factor = () => (R.rec.servings ? R.servings / R.rec.servings : 1);
 function pantryTag(x) {
@@ -183,12 +187,136 @@ async function addMissing() {
     }; },
   });
 }
-function planRecipe(rec) {
-  const d0 = isoDate(today());
-  openSheet("Plan this recipe", `<div class="group"><div class="field"><label>Day</label><input type="date" id="pr-d" value="${esc(d0)}"></div>
-    <div class="field"><label>Meal</label><select id="pr-t">${["dinner", "lunch", "breakfast", "side", "snack", "dessert"].map((t) => `<option value="${t}">${cap(t)}</option>`).join("")}</select></div></div>
-    <p class="hint">Scaled to ${esc(state.cfg.household?.people || 2)} people automatically.</p><div style="height:14px"></div><button class="btn" id="pr-go">${ic("cal")} Add to plan</button>`, {
-    onMount() { $("#pr-go").onclick = async () => { try { await api("POST", "/api/plan/save", { entries: [{ date: $("#pr-d").value, entry_type: $("#pr-t").value, recipe_id: rec.id }] }); closeSheet(); toast("Added to your meal plan"); } catch (e) { fail(e); } }; },
+async function planRecipe(rec) {
+  // one tap per day: shows the coming days with what's planned, assigning replaces that day's dinner
+  const H = horizon(), days = Array.from({ length: H }, (_, i) => isoDate(addDays(today(), i)));
+  openSheet("Plan this recipe", `<div id="pr-days">${loading()}</div>
+    <p class="hint">Scaled to ${esc(state.cfg.household?.people || 2)} people. Missing ingredients go straight onto your shopping list.</p>`);
+  let plan = [];
+  try { plan = (await api("GET", `/api/plan?start=${enc(days[0])}&end=${enc(days[days.length - 1])}`)).entries || []; } catch (_) {}
+  const box = $("#pr-days"); if (!box) return;
+  const type = PLAN_TYPES[0];
+  box.innerHTML = `<div class="group">${days.map((d) => {
+    const e = plan.find((x) => x.date === d && x.entry_type === type);
+    return `<button class="row flush" data-d="${esc(d)}"><div class="main"><div class="a">${esc(dayName(d))} <span class="muted">${esc(shortDate(d))}</span></div><div class="b">${e ? `Replaces ${esc(entryName(e))}` : "Free"}</div></div>${e ? "" : `<span class="pill ok">Free</span>`}</button>`;
+  }).join("")}</div>`;
+  $$("#pr-days [data-d]").forEach((b) => (b.onclick = async () => {
+    $$("#pr-days [data-d]").forEach((x) => (x.disabled = true));
+    try { await assignRecipe(b.dataset.d, rec.id, type); closeSheet(); } catch (e) { fail(e); $$("#pr-days [data-d]").forEach((x) => (x.disabled = false)); }
+  }));
+}
+
+// ---------- cook readiness: Start cooking waits until the list items for this recipe are bought or marked "have"
+function drawCookReady() {
+  const btn = $("#rd-cook"), box = $("#rd-miss");
+  if (!btn || !box) return;
+  const miss = R.rec.missing || [];
+  if (!miss.length) {
+    btn.className = "btn"; btn.innerHTML = `${ic("play")} Start cooking`;
+    box.innerHTML = "";
+    return;
+  }
+  btn.className = "btn sec miss-btn"; btn.innerHTML = `${ic("cart")} Missing ${miss.length} ingredient${miss.length === 1 ? "" : "s"}`;
+  box.innerHTML = `<div class="miss-card" id="miss-card">
+    <div class="miss-h"><b>Still on your shopping list</b><span>Tick anything you already have.</span></div>
+    <div class="group">${miss.map((m) => `<button class="row flush miss-row" data-mid="${esc(m.id)}"><span class="check sq">${ic("check")}</span><div class="main"><div class="a">${esc(m.text)}</div></div></button>`).join("")}</div>
+    <div class="miss-acts"><button class="btn small" id="miss-all">${ic("check")} I have them all</button><button class="link-btn" id="miss-anyway">Cook anyway</button></div></div>`;
+  $$("#rd-miss [data-mid]").forEach((b) => (b.onclick = async () => {
+    if (b.classList.contains("done")) return;
+    const id = b.dataset.mid, m = miss.find((x) => String(x.id) === id);
+    b.classList.add("done"); $(".check", b).classList.add("on");
+    try {
+      await api("POST", `/api/list/items/${enc(id)}/have`);
+      R.rec.missing = (R.rec.missing || []).filter((x) => String(x.id) !== id);
+      const left = R.rec.missing.length;
+      btn.innerHTML = left ? `${ic("cart")} Missing ${left} ingredient${left === 1 ? "" : "s"}` : btn.innerHTML;
+      setTimeout(() => { drawCookReady(); if (!left) toast("Everything's here. Ready to cook!"); }, left ? 250 : 350);
+      if (left) toast(`${m ? m.text : "Item"} · you have it`, "Undo", () => undoHave([m]));
+    } catch (e) { b.classList.remove("done"); $(".check", b).classList.remove("on"); fail(e); }
+  }));
+  $("#miss-all").onclick = async (e) => {
+    const all = (R.rec.missing || []).slice();
+    e.currentTarget.disabled = true;
+    try {
+      const r = await api("POST", `/api/recipe/${encodeURIComponent(R.rec.slug)}/have-all`);
+      R.rec.missing = [];
+      drawCookReady();
+      toast(`Marked ${plural((r && r.count) || all.length, "item")} as have`, "Undo", () => undoHave(all));
+    } catch (x) { fail(x); e.currentTarget.disabled = false; }
+  };
+  $("#miss-anyway").onclick = () => startCook();
+}
+async function undoHave(items) {
+  try {
+    for (const m of items.filter(Boolean)) await api("PATCH", `/api/list/items/${enc(m.id)}`, { checked: false });
+    if (!R.rec) return;
+    const ids = new Set((R.rec.missing || []).map((x) => String(x.id)));
+    R.rec.missing = [...(R.rec.missing || []), ...items.filter((m) => m && !ids.has(String(m.id)))];
+    drawCookReady();
+  } catch (e) { fail(e); }
+}
+function showMissing() {
+  const card = $("#miss-card");
+  if (!card) return startCook();
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.remove("flash"); void card.offsetWidth; card.classList.add("flash");
+}
+
+// ---------- Share & export: print/PDF in several sizes, send, copy, download
+const PRINT_SIZES = [["card35", "Index 3×5"], ["card46", "Index 4×6"], ["card57", "Card 5×7"], ["half", "Half letter"], ["letter", "Letter"], ["a4", "A4"]];
+function recipeExportUrls(slug, o) {
+  const s = enc(o.servings || "");
+  return {
+    print: `/print/recipe/${enc(slug)}?size=${enc(o.size)}&servings=${s}&style=${o.steps ? "steps" : "classic"}&photo=${o.photo ? 1 : 0}&auto=1`,
+    txt: `/export/recipe/${enc(slug)}.txt?servings=${s}`,
+    md: `/export/recipe/${enc(slug)}.md?servings=${s}`,
+    json: `/export/recipe/${enc(slug)}.json?servings=${s}`,
+  };
+}
+function openRecipeExport() {
+  const rec = R.rec, slug = rec.slug;
+  const saved = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } };
+  const o = { size: saved("tp.printSize", "card46"), photo: !!rec.has_image && saved("tp.printPhoto", "1") === "1", steps: R.style === "steps", servings: R.servings || rec.servings || "" };
+  if (!PRINT_SIZES.some(([k]) => k === o.size)) o.size = "card46";
+  const body = { kind: "recipe", slug, servings: o.servings };
+  const sends = sendItems(body);
+  const share = [...sends];
+  if (navigator.share) share.unshift(["share", "Send via…", () => shareText(recipeExportUrls(slug, o).txt, rec.name)]);
+  share.push(["copy", "Copy as text", async () => {
+    try { const t = await (await fetch(recipeExportUrls(slug, o).txt)).text(); await navigator.clipboard.writeText(t); toast("Recipe copied"); }
+    catch (e) { fail(e); }
+  }]);
+  const u = recipeExportUrls(slug, o);
+  openSheet("Share & export", `
+    <div class="group-label" style="margin-top:4px">Print / PDF</div>
+    <div class="chips wrap" id="ex-size">${PRINT_SIZES.map(([k, l]) => `<button class="filter ${o.size === k ? "on" : ""}" data-size="${k}">${esc(l)}</button>`).join("")}</div>
+    <div class="group" style="margin-top:10px">
+      <div class="field"><label>Photo${rec.has_image ? "" : '<small class="lh">This recipe has no photo yet.</small>'}</label><label class="toggle"><input type="checkbox" id="ex-photo" ${o.photo ? "checked" : ""} ${rec.has_image ? "" : "disabled"}><span></span></label></div>
+      <div class="field"><label>Step-by-step<small class="lh">Ingredients inside each step instead of one list.</small></label><label class="toggle"><input type="checkbox" id="ex-steps" ${o.steps ? "checked" : ""}><span></span></label></div>
+      <div class="field"><label>Servings<small class="lh">Change servings on the recipe page.</small></label><span class="muted">${esc(fmtQty(+o.servings) || o.servings || "—")}</span></div>
+    </div>
+    <div style="height:12px"></div>
+    <button class="btn" id="ex-print" data-url="${esc(u.print)}">${ic("print")} Open print view</button>
+    <p class="hint">Choose “Save as PDF” in the print dialog to keep a PDF copy.</p>
+    <div class="group-label">Share</div>
+    <div class="share-grid" id="ex-share">${share.map(([i, l], n) => `<button data-n="${n}">${ic(i)} ${esc(l)}</button>`).join("")}</div>
+    <div class="group-label">Download</div>
+    <div class="share-grid" id="ex-dl">
+      <a href="${esc(safeUrl(u.txt))}" download data-k="txt">${ic("file")} Text</a>
+      <a href="${esc(safeUrl(u.md))}" download data-k="md">${ic("file")} Markdown</a>
+      <a href="${esc(safeUrl(u.json))}" download data-k="json">${ic("down")} Recipe file (JSON)</a>
+    </div>`, {
+    onMount() {
+      const sync = () => { $("#ex-print").dataset.url = recipeExportUrls(slug, o).print; };
+      $$("#ex-size [data-size]").forEach((b) => (b.onclick = () => {
+        o.size = b.dataset.size; try { localStorage.setItem("tp.printSize", o.size); } catch (_) {}
+        $$("#ex-size .filter").forEach((x) => x.classList.toggle("on", x === b)); sync();
+      }));
+      $("#ex-photo").onchange = (e) => { o.photo = e.target.checked; try { localStorage.setItem("tp.printPhoto", o.photo ? "1" : "0"); } catch (_) {} sync(); };
+      $("#ex-steps").onchange = (e) => { o.steps = e.target.checked; sync(); };
+      $("#ex-print").onclick = () => window.open(recipeExportUrls(slug, o).print, "_blank");
+      $$("#ex-share [data-n]").forEach((b) => (b.onclick = () => share[+b.dataset.n][2]()));
+    },
   });
 }
 
@@ -455,6 +583,16 @@ async function openCheckin(after) {
 
 // ------------------------------------------------------------------ what's new (shown once per new version)
 const WHATS_NEW = {
+  "0.5": {
+    title: "Planning without the busywork",
+    items: [
+      ["cal", "bg-orange", "A two-week plan board", "See the next two weeks at a glance. Tap an empty day to pick a recipe, or drag meals between days."],
+      ["cart", "bg-blue", "One list that keeps going", "Planned meals add their ingredients automatically. Sort by store, and TablePlan remembers where you buy each thing."],
+      ["play", "bg-green", "Ready to cook?", "Recipes show what's still on your list before you start, with one tap for “I have them all”."],
+      ["print", "bg-purple", "Print & share recipes", "Index cards, half letter or full page, plus PDF, text and Markdown."],
+      ["shield", "bg-teal", "Nightly backups", "Your data is backed up every night. Download everything from Settings → Backups."],
+    ],
+  },
   "0.4": {
     title: "TablePlan stands on its own",
     items: [
@@ -509,7 +647,7 @@ async function renderRecipeEditor(slug) {
   let sec = null;
   const ingText = rec.ingredients.map((x) => { let t = ""; if (x.section && x.section !== sec) { sec = x.section; t = `# ${x.section}\n`; } return t + (x.raw || x.display || x.food); }).join("\n");
   const stepText = rec.steps.map((s) => s.text).join("\n\n");
-  app.innerHTML = `<div class="topbar"><button class="round-btn left" id="ed-x" aria-label="Cancel">${ic("x")}</button><button class="pill-btn dark" id="ed-save">${ic("check")} Save</button></div>
+  app.innerHTML = `${storageBar()}<div class="topbar"><button class="round-btn left" id="ed-x" aria-label="Cancel">${ic("x")}</button><button class="pill-btn dark" id="ed-save">${ic("check")} Save</button></div>
     <h1 class="title">Edit recipe</h1>
     <div class="group"><div class="field"><input class="full" id="ed-name" value="${esc(rec.name)}" placeholder="Recipe name"></div>
       <div class="field"><textarea class="full-area" id="ed-desc" rows="2" placeholder="Short description (optional)">${esc(rec.description)}</textarea></div></div>
