@@ -1367,7 +1367,8 @@ def email_pantry():
 # ============================================================ setup: Mealie account, AI, email
 
 def mealie_status():
-    out = {"url": cfg("mealie_url"), "reachable": False, "connected": False, "first_login": False,
+    out = {"url": cfg("mealie_url"), "public_url": mealie_public(), "public_url_set": bool(cfg("mealie_public_url")),
+           "reachable": False, "connected": False, "first_login": False,
            "version": None, "user": None, "group_slug": cfg("group_slug"), "error": None}
     try:
         about = mealie_raw("GET", "/api/app/about", timeout=8)
@@ -1848,6 +1849,12 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/setup/mealie/sign-in":
             b = self.body()
             return self.send(200, mealie_sign_in(b.get("email", ""), b.get("password", "")))
+        if m == "POST" and path == "/api/setup/mealie/public":
+            u = (self.body().get("url") or "").strip().rstrip("/")
+            if u and not re.match(r"^https?://[^\s/]+", u):
+                raise ApiError(400, "Enter a full address like https://recipes.example.com")
+            set_cfg(mealie_public_url=u)
+            return self.send(200, {"public_url": mealie_public(), "public_url_set": bool(u)})
         if m == "POST" and path == "/api/setup/mealie/token":
             b = self.body()
             return self.send(200, mealie_use_token(b.get("token", ""), b.get("url")))

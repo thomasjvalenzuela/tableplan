@@ -103,7 +103,7 @@ h2.done .n{background:var(--tip)}
 <li><a href="#s3">Add it to your phone</a></li>
 <li><a href="#updates">Updating</a></li>
 <li><a href="#backup">Backup &amp; uninstall</a></li>
-<li><a href="#remote">Using it away from home</a></li>
+<li><a href="#remote">HTTPS &amp; away from home</a></li>
 <li><a href="#trouble">Troubleshooting</a></li>
 <li><a href="#faq">FAQ</a></li>
 </ol></div>
@@ -204,12 +204,29 @@ sudo tableplan uninstall   <span class="c"># removes containers, keeps your data
 docker compose down        <span class="c"># uninstall; delete the folder to remove data too</span></code></pre></div>
 <p>Mealie also has built-in backups under Settings → Backups.</p>
 
-<h2 id="remote">Using it away from home</h2>
-<ul>
-<li><b>Recommended:</b> a private network such as <a href="https://tailscale.com">Tailscale</a>, so your phone reaches the server as if you were at home. Nothing is exposed to the internet.</li>
-<li><b>Public domain:</b> put TablePlan and Mealie behind a reverse proxy with HTTPS, such as Caddy, Nginx Proxy Manager or Traefik. Set a <b>household password</b> in the wizard, and set <code>MEALIE_PUBLIC_URL</code> so recipe links use your domain.</li>
-<li><b>Don't</b> port-forward 9930 or 9925 directly on your router.</li>
-</ul>
+<h2 id="remote">HTTPS &amp; using it away from home</h2>
+<p>Chrome labels every <code>http://</code> address as <b>Not secure</b>, including apps on your own Wi-Fi. TablePlan works fine at home without HTTPS. Adding it gives you a padlock and encrypted traffic.</p>
+<h3>Option 1: Tailscale (easiest, works away from home too)</h3>
+<ol>
+<li>Install <b>Tailscale</b> on the server (it's in the ZimaOS App Store) and on your phones, and sign in to the same account.</li>
+<li>In the Tailscale admin console → <b>DNS</b>, turn on <b>MagicDNS</b> and <b>HTTPS Certificates</b>.</li>
+<li>On the server, run:</li>
+</ol>
+<div class="code"><span class="lbl">on the server (ZimaOS / CasaOS)</span><pre><code>sudo docker exec tailscale tailscale serve --bg 9930
+sudo docker exec tailscale tailscale serve --bg --https=8443 9925</code></pre></div>
+<ol start="4">
+<li>Open <code>https://&lt;server-name&gt;.&lt;your-tailnet&gt;.ts.net</code>, which now shows a padlock.</li>
+<li>In TablePlan, go to <b>Settings → Recipe library</b> and set the Mealie address to <code>https://&lt;server-name&gt;.&lt;your-tailnet&gt;.ts.net:8443</code>.</li>
+</ol>
+<h3>Option 2: your own domain + reverse proxy</h3>
+<p>Use Nginx Proxy Manager, Caddy or Traefik:</p>
+<ol>
+<li>Point <code>tableplan.example.com</code> and <code>recipes.example.com</code> at the server's <b>local</b> IP. On Cloudflare, use <i>DNS only</i>.</li>
+<li>Proxy them to ports 9930 and 9925.</li>
+<li>Get Let's Encrypt certificates with the <b>DNS challenge</b>, so no ports need to be opened on your router.</li>
+<li>Set the Mealie address in Settings → Recipe library.</li>
+</ol>
+<p>Never port-forward 9930 or 9925 straight to the internet. If TablePlan is reachable from outside your home, set a household password.</p>
 
 <h2 id="trouble">Troubleshooting</h2>
 <table>

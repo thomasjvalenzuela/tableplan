@@ -7,6 +7,7 @@ Runs on ZimaOS, CasaOS, Unraid, Portainer or any Linux server with Docker. Built
 <a href="#-install-in-3-steps">Install</a> ·
 <a href="#step-2-run-the-setup-wizard">Setup wizard</a> ·
 <a href="#updating">Updating</a> ·
+<a href="#https-remove-chromes-not-secure-warning">HTTPS</a> ·
 <a href="#troubleshooting">Troubleshooting</a> ·
 <a href="https://thomasjvalenzuela.github.io/tableplan/setup/">Full guide</a>
 </p>
@@ -187,11 +188,44 @@ sudo tableplan uninstall    # removes the app, keeps your data
 ```
 Compose users: `docker compose down` removes the app. Delete the folder too if you want to remove the data.
 
-## Using it away from home
+## HTTPS: remove Chrome's "Not secure" warning
 
-Use a private network app like **[Tailscale](https://tailscale.com)**, and your phone reaches TablePlan anywhere as if you were home.
+Chrome labels any `http://` address as *Not secure*, including apps on your own Wi-Fi. TablePlan works fine without HTTPS at home. Adding it encrypts traffic, removes the warning, and lets your phone paste links straight from the clipboard. Pick one way:
 
-If you'd rather use a domain, put TablePlan behind a reverse proxy with HTTPS (Nginx Proxy Manager, Caddy or Traefik), and **set a household password** in Settings. Don't port-forward 9930 or 9925 straight to the internet.
+<details open>
+<summary><b>Option 1: Tailscale (easiest, and also gives you access away from home)</b></summary>
+
+1. Install **Tailscale** on the server (it's in the ZimaOS App Store) and on your phones, then sign in to the same account on each.
+2. In the [Tailscale admin console → DNS](https://login.tailscale.com/admin/dns), turn on **MagicDNS** and **HTTPS Certificates**.
+3. On the server, run:
+   ```bash
+   # ZimaOS / CasaOS (Tailscale runs as a container). Find its name with: docker ps | grep -i tailscale
+   sudo docker exec tailscale tailscale serve --bg 9930
+   sudo docker exec tailscale tailscale serve --bg --https=8443 9925
+   # Tailscale installed directly on Linux: drop "docker exec tailscale" (e.g. sudo tailscale serve --bg 9930)
+   ```
+4. Open **`https://<server-name>.<your-tailnet>.ts.net`**, which now shows a padlock 🔒. The exact name is in the Tailscale admin console.
+5. In TablePlan, go to **Settings → Recipe library** and set the Mealie address to `https://<server-name>.<your-tailnet>.ts.net:8443`.
+
+Phones need the Tailscale app running to reach this address.
+</details>
+
+<details>
+<summary><b>Option 2: your own domain with a reverse proxy (no app needed on phones)</b></summary>
+
+This works with Nginx Proxy Manager, Caddy or Traefik, and a domain you own. Nothing gets opened to the internet.
+
+1. **DNS:** create `tableplan.example.com` and `recipes.example.com` A records pointing to your server's **local** IP. On Cloudflare, set them to *DNS only* (grey cloud).
+2. **Proxy hosts:** send `tableplan.example.com` to `http://SERVER-IP:9930`, and `recipes.example.com` to `http://SERVER-IP:9925`.
+3. **Certificates:** request a Let's Encrypt certificate using the **DNS challenge**. For Cloudflare, use an API token with *Zone → DNS → Edit* permission. The DNS challenge works for local-only addresses, so you don't need to open ports on your router. Turn on *Force SSL*.
+4. In TablePlan, go to **Settings → Recipe library** and set the Mealie address to `https://recipes.example.com`.
+
+Your proxy needs ports 80/443 on the server. On ZimaOS the dashboard uses port 80, so either move the dashboard to another port in ZimaOS settings, or run the proxy on another machine.
+</details>
+
+### Using it away from home
+
+**Tailscale** (Option 1 above) is the simplest and safest way. If you expose TablePlan through a public domain instead, set a **household password** in Settings. Never port-forward 9930 or 9925 straight to the internet.
 
 ## Troubleshooting
 
@@ -203,6 +237,8 @@ If you'd rather use a domain, put TablePlan behind a reverse proxy with HTTPS (N
 | OpenAI test failed | The key is wrong or has no credit. Check [billing](https://platform.openai.com/settings/organization/billing). |
 | Email test failed | Gmail, Yahoo and iCloud need an **app password**, not your normal password. |
 | Use-by dates off by a day | Set `TZ` to your time zone and restart TablePlan. |
+| Chrome says "Not secure" | Normal for `http://` on a home network. See [HTTPS](#https-remove-chromes-not-secure-warning) to add a padlock. |
+| "Open recipe" goes to the wrong address | **Settings → Recipe library** → set the Mealie address. |
 | Port already in use | Installer: add `TABLEPLAN_PORT=8930` (and `MEALIE_PORT=8925`) before `bash`. Compose: change the left-hand port number. |
 | Something else | Run `docker logs tableplan`, then [open an issue](https://github.com/thomasjvalenzuela/tableplan/issues) with what you see. |
 

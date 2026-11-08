@@ -63,9 +63,17 @@ const Setup = {
     if (m.connected) {
       el.innerHTML = `<div class="wstatus ok"><b>Connected to Mealie ${_esc(m.version || "")}</b><span>Signed in as ${_esc(m.user?.name || "")} · ${_esc(m.user?.email || "")}</span></div>
         <p class="whint">TablePlan stores your recipes, plans and lists in Mealie. You can still open Mealie directly for advanced recipe editing.</p>
+        <div class="wgroup" style="margin-top:12px"><div class="wfield"><label>Mealie address for "Open recipe" links</label>
+          <input id="ml-public" placeholder="${_esc(m.public_url || "")}" value="${m.public_url_set ? _esc(m.public_url) : ""}" autocomplete="off"></div></div>
+        <p class="whint">Leave blank to use this server's address with port 9925. If you use HTTPS or a domain (for example https://recipes.example.com), enter it here.</p>
+        <div style="height:10px"></div>
         <button class="btn sec" id="ml-switch">Use a different account</button>`;
       el.querySelector("#ml-switch").onclick = () => { st.mealie = { ...m, connected: false }; Setup.mealie(el, st, done); };
-      return async () => true;
+      return async () => {
+        const v = el.querySelector("#ml-public").value.trim();
+        if (v !== (m.public_url_set ? m.public_url : "")) await _api("POST", "/api/setup/mealie/public", { url: v });
+        return true;
+      };
     }
     const first = m.first_login;
     const draw = (mode) => {
