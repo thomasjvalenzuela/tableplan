@@ -2645,14 +2645,27 @@ def openai_chat(messages, schema_name, schema, feature, detail=""):
     key, model = cfg("openai_key"), cfg("openai_model") or "gpt-5-mini"
     if not key:
         raise ApiError(400, "Add your OpenAI key in Settings → AI recipe import to use AI step-by-step.")
-    res = _https_json("https://api.openai.com/v1/chat/completions", payload={
-        "model": model, "messages": messages,
-        "response_format": {"type": "json_schema", "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
-    }, headers={"Authorization": f"Bearer {key}"}, timeout=120)
-    u = res.get("usage") or {}
-    log_ai(feature, res.get("model") or model, u.get("prompt_tokens"), u.get("completion_tokens"), detail)
-    content = (((res.get("choices") or [{}])[0].get("message") or {}).get("content")) or "{}"
-    return json.loads(content)
+    payload = {"model": model, "messages": messages, "max_completion_tokens": 16000,
+               "response_format": {"type": "json_schema", "json_schema": {"name": schema_name, "strict": True, "schema": schema}}}
+    if re.match(r"^(gpt-5|o[134])", model):
+        payload["reasoning_effort"] = "low"   # leaves room for the answer and is much faster
+    for attempt in (1, 2):
+        res = _https_json("https://api.openai.com/v1/chat/completions", payload=payload,
+                          headers={"Authorization": f"Bearer {key}"}, timeout=180)
+        u = res.get("usage") or {}
+        log_ai(feature, res.get("model") or model, u.get("prompt_tokens"), u.get("completion_tokens"), detail)
+        choice = (res.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        if msg.get("refusal"):
+            raise ApiError(422, "The AI declined to read that. Try a different screenshot.")
+        try:
+            return json.loads(msg.get("content") or "{}")
+        except ValueError:
+            log(f"AI reply unreadable (finish_reason={choice.get('finish_reason')}, attempt {attempt})")
+            payload["max_completion_tokens"] = 32000
+            if "reasoning_effort" in payload:
+                payload["reasoning_effort"] = "minimal"
+    raise ApiError(502, "The AI's answer was cut off twice. Try fewer or smaller screenshots, or try again in a minute.")
 
 
 def guided_ai(rec):

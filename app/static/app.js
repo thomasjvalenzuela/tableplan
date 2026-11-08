@@ -676,6 +676,7 @@ function openAddPantry(after) {
 // ------------------------------------------------------------------ add recipe (imports run through Mealie in the background)
 function openAddRecipe() {
   const c = state.cfg;
+  api("GET", "/api/setup/ai").then((a) => { state.setup = { ...(state.setup || {}), ai: a }; const h = $("#ar-aihint"); if (h && a.enabled) h.textContent = "Usually takes 20–60 seconds. Check the ingredients afterwards."; }).catch(() => {});
   const imgs = [];
   openSheet("Add a Recipe", `
     <div class="seg" id="ar-mode"><button data-m="link" class="on">Link</button><button data-m="photo">Screenshot</button><button data-m="type">Type it</button></div>
@@ -697,7 +698,7 @@ function openAddRecipe() {
           <input type="file" id="ar-files" accept="image/*" multiple hidden></label>
           <div class="thumbs" id="ar-thumbs"></div>
           <div style="height:12px"></div><button class="btn" id="ar-go" ${imgs.length ? "" : "disabled"}>${ic("sparkle")} Read recipe with AI</button>
-          <p class="hint">${state.setup?.ai?.enabled === false ? "AI import isn't set up yet. Add your OpenAI key in Settings → AI recipe import." : "Usually takes 20–60 seconds. Check the ingredients afterwards."}</p>`;
+          <p class="hint" id="ar-aihint">${state.setup?.ai?.enabled === false ? "AI import isn't set up yet. Add your OpenAI key in Settings → AI recipe import." : "Usually takes 20–60 seconds. Check the ingredients afterwards."}</p>`;
         const thumbs = () => { $("#ar-thumbs").innerHTML = imgs.map((im) => `<img src="${im.data}" alt="">`).join(""); $("#ar-go").disabled = !imgs.length; };
         $("#ar-files").onchange = async (e) => {
           for (const f of [...e.target.files].slice(0, 8 - imgs.length)) imgs.push({ name: f.name, type: "image/jpeg", data: await shrink(f) });
