@@ -204,7 +204,7 @@ async function renderHome() {
   html += `<div class="section-h"><h2>Quick Actions</h2></div><div class="grid">
     <button class="tile" id="qa-import"><span class="ic bg-purple">${ic("camera")}</span><span><div class="t-title">Add Recipe</div><div class="t-sub">Screenshot or link</div></span></button>
     <button class="tile" id="qa-plan"><span class="ic bg-orange">${ic("sparkle")}</span><span><div class="t-title">Auto-Plan</div><div class="t-sub">Week or month</div></span></button>
-    <button class="tile" id="qa-list"><span class="ic bg-blue">${ic("mail")}</span><span><div class="t-title">Send List</div><div class="t-sub">Email or print</div></span></button>
+    <button class="tile" id="qa-list"><span class="ic bg-blue">${ic("mail")}</span><span><div class="t-title">Send List</div><div class="t-sub">Telegram, email or print</div></span></button>
     <button class="tile" id="qa-pantry"><span class="ic bg-green">${ic("plus")}</span><span><div class="t-title">Add to Pantry</div><div class="t-sub">Track a use-by date</div></span></button>
   </div>`;
 
@@ -439,7 +439,7 @@ async function renderList() {
   const count = sl.groups.reduce((n, g) => n + g.items.length, 0);
   let html = lists.length > 1 ? `<div class="seg">${lists.map((l) => `<button data-l="${l.id}" class="${l.id === state.listId ? "on" : ""}">${esc(l.name)}</button>`).join("")}</div>` : "";
   html += `<div class="subtitle">${count ? `${count} item${count === 1 ? "" : "s"} · tap to check off — food goes into your pantry` : "All done 🎉"}</div>
-    <div class="toolbar"><button class="pill-btn" id="l-email">${ic("mail")} Email</button><button class="pill-btn" id="l-print">${ic("print")} Print</button>
+    <div class="toolbar"><button class="pill-btn" id="l-email">${ic("share")} Send</button><button class="pill-btn" id="l-print">${ic("print")} Print</button>
     <a class="pill-btn" href="${esc(sl.mealie_link)}" target="_blank" rel="noopener" style="text-decoration:none">${ic("plus")} Add items</a></div>`;
   sl.groups.forEach((g) => {
     html += `<div class="group-label">${esc(g.label)}</div><div class="group">${g.items.map((it) =>
@@ -448,7 +448,7 @@ async function renderList() {
   if (!count) html += `<div class="empty">Nothing left to buy.</div>`;
   $("#lists").innerHTML = html;
   $$("[data-l]").forEach((b) => (b.onclick = () => { state.listId = b.dataset.l; renderList(); }));
-  $("#l-email").onclick = () => emailIt({ kind: "list", id: sl.id });
+  $("#l-email").onclick = () => sendIt({ kind: "list", id: sl.id });
   $("#l-print").onclick = () => printIt(`/print/list/${sl.id}`);
   $$("#lists .row[data-id]").forEach((row) => (row.onclick = () => buyItem(sl.id, row)));
 }
@@ -716,10 +716,23 @@ async function openPlanToList(start, end, label) {
 
 // ------------------------------------------------------------------ share / export / print
 function printIt(url) { window.open(url + (url.includes("?") ? "&" : "?") + "auto=1", "_blank"); }
-async function emailIt(body) {
-  if (!state.cfg.email_ready) return toast("Email isn't set up yet", "Set up", () => openSetupSection("email", "Email", reloadCfg));
+const CH_LABEL = { telegram: "Telegram", ntfy: "ntfy", email: "email" };
+const anyChannel = () => Object.values(state.cfg.channels || {}).some(Boolean);
+async function sendIt(body, channel = "all") {
+  if (!anyChannel()) return toast("Notifications aren't set up yet", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg));
   toast("Sending…");
-  try { const r = await api("POST", "/api/email", body); toast(`Sent to ${r.to.join(", ")}`); } catch (e) { fail(e); }
+  try { const r = await api("POST", "/api/send", { ...body, channel }); toast(`Sent to ${r.sent.map((c) => CH_LABEL[c]).join(" & ")}${r.errors.length ? ` · ${r.errors.length} failed` : ""}`); }
+  catch (e) { fail(e); }
+}
+const emailIt = (body) => sendIt(body, "email");
+function sendItems(body) {
+  const ch = state.cfg.channels || {};
+  const out = [];
+  if (ch.telegram) out.push(["share", "Send to Telegram", () => sendIt(body, "telegram")]);
+  if (ch.ntfy) out.push(["share", "Send to ntfy", () => sendIt(body, "ntfy")]);
+  if (ch.email) out.push(["mail", "Email it", () => sendIt(body, "email")]);
+  if (!out.length) out.push(["share", "Send to my phone…", () => openSetupSection("notify", "Notifications", reloadCfg)]);
+  return out;
 }
 async function shareText(url, title) {
   try { const txt = await (await fetch(url)).text(); await navigator.share({ title, text: txt }); }
@@ -729,22 +742,22 @@ function openShare(kind, o) {
   let items = [], title = "Share";
   if (kind === "list") {
     title = o.name || "Shopping list";
-    items = [["mail", "Email it", () => emailIt({ kind: "list", id: o.id })], ["print", "Print", () => printIt(`/print/list/${o.id}`)],
+    items = [...sendItems({ kind: "list", id: o.id }), ["print", "Print", () => printIt(`/print/list/${o.id}`)],
       ["file", "Text file", `/export/list/${o.id}.txt`], ["file", "Spreadsheet (CSV)", `/export/list/${o.id}.csv`]];
     if (navigator.share) items.unshift(["share", "Send via…", () => shareText(`/export/list/${o.id}.txt`, title)]);
   } else if (kind === "plan") {
     title = `Meal plan · ${o.label}`;
     const q = `start=${o.start}&end=${o.end}`;
-    items = [["mail", "Email it", () => emailIt({ kind: "plan", start: o.start, end: o.end })], ["print", "Print", () => printIt(`/print/plan?${q}`)],
+    items = [...sendItems({ kind: "plan", start: o.start, end: o.end }), ["print", "Print", () => printIt(`/print/plan?${q}`)],
       ["cal", "Add to calendar (.ics)", `/export/plan.ics?${q}`], ["file", "Spreadsheet (CSV)", `/export/plan.csv?${q}`]];
     if (navigator.share) items.unshift(["share", "Send via…", () => shareText(`/export/plan.txt?${q}`, "Meal plan")]);
   } else if (kind === "pantry") {
     title = "Pantry";
-    items = [["mail", "Email it", () => emailIt({ kind: "pantry" })], ["print", "Print", () => printIt("/print/pantry")], ["file", "Spreadsheet (CSV)", "/export/pantry.csv"]];
+    items = [...sendItems({ kind: "pantry" }), ["print", "Print", () => printIt("/print/pantry")], ["file", "Spreadsheet (CSV)", "/export/pantry.csv"]];
   }
   openSheet(title, `<div class="share-grid">${items.map(([i, l, a], n) =>
     typeof a === "string" ? `<a href="${a}" download>${ic(i)} ${esc(l)}</a>` : `<button data-n="${n}">${ic(i)} ${esc(l)}</button>`).join("")}</div>
-    ${state.cfg.email_ready ? `<p class="hint">Email goes to ${esc(state.cfg.mail_to.join(", "))}.</p>` : ""}`, {
+    ${state.cfg.channels?.telegram ? `<p class="hint">Telegram messages go to ${esc(state.cfg.telegram_chat || "your chat")}.</p>` : ""}${state.cfg.email_ready ? `<p class="hint">Email goes to ${esc(state.cfg.mail_to.join(", "))}.</p>` : ""}`, {
     onMount() { $$("[data-n]").forEach((b) => (b.onclick = () => { closeSheet(); items[+b.dataset.n][2](); })); },
   });
 }
@@ -766,7 +779,7 @@ async function openSettings() {
         <button class="row" data-sec="household"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("home")}</span><div class="main"><div class="a">Household</div><div class="b">${esc(hh.name || "Household")} · cooking for ${hh.people || 2}${hh.scale === false ? " · scaling off" : ""}</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="mealie"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Recipe library (Mealie)</div><div class="b">${c.connected ? "Connected" : "Not connected"}</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="ai"><span class="ic bg-indigo" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("sparkle")}</span><div class="main"><div class="a">AI recipe import</div><div class="b">OpenAI key for screenshots, photos & videos</div></div><span class="chev">${ic("chevR")}</span></button>
-        <button class="row" data-sec="email"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Email</div><div class="b">${c.email_ready ? esc(c.mail_to.join(", ")) : "Not set up"}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" data-sec="notify"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Notifications</div><div class="b">${Object.entries(c.channels || {}).filter(([, v]) => v).map(([k]) => CH_LABEL[k][0].toUpperCase() + CH_LABEL[k].slice(1)).join(", ") || "Not set up · Telegram, ntfy or email"}</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="password"><span class="ic bg-gray" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("open")}</span><div class="main"><div class="a">Password</div><div class="b">${c.auth_required ? "On" : "Off (anyone on your Wi-Fi)"}</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <div class="group-label">Meal planning</div>
@@ -776,9 +789,11 @@ async function openSettings() {
         <div class="field"><label>Use up expiring food first</label><label class="toggle"><input type="checkbox" id="st-exp" ${s.prefer_expiring ? "checked" : ""}><span></span></label></div>
         <div class="field"><label>"Use soon" window (days)</label><input type="number" id="st-win" value="${s.expiring_window_days}" min="1" max="14"></div>
         <div class="field"><label>Auto-plan next week every</label><select id="st-auto">${[["", "Off"], ["sun", "Sunday"], ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"], ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"]].map(([v, l]) => `<option value="${v}" ${s.auto_plan_day === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-        <div class="field"><label>Email the plan when it's made</label><label class="toggle"><input type="checkbox" id="st-aemail" ${s.auto_plan_email ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Send the plan when it's made</label><label class="toggle"><input type="checkbox" id="st-aemail" ${s.auto_plan_email ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Daily "use soon" alert</label><label class="toggle"><input type="checkbox" id="st-xa" ${s.expiry_alert ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Alert time</label><select id="st-xh">${[6,7,8,9,10,12,15,17,18,19].map((h) => `<option value="${h}" ${+s.expiry_alert_hour === h ? "selected" : ""}>${((h + 11) % 12) + 1}:00 ${h < 12 ? "AM" : "PM"}</option>`).join("")}</select></div>
       </div>
-      <p class="hint">Auto-plan runs at 8 AM on that day, fills empty days for the following week, and keeps anything you've already planned.</p>
+      <p class="hint">Auto-plan runs at 8 AM on that day, fills empty days for the following week, and keeps anything you've already planned. Plans and alerts go to every notification channel you've set up.</p>
 
 
       <div class="group-label">Shelf life data</div>
@@ -801,7 +816,9 @@ async function openSettings() {
     $("#st-win").onchange = (e) => save({ expiring_window_days: Math.max(1, +e.target.value || 3) });
     $("#st-auto").onchange = (e) => save({ auto_plan_day: e.target.value });
     $("#st-aemail").onchange = (e) => save({ auto_plan_email: e.target.checked });
-    const titles = { household: "Household", mealie: "Recipe library", ai: "AI recipe import", email: "Email", password: "Password" };
+    $("#st-xa").onchange = (e) => { save({ expiry_alert: e.target.checked }); if (e.target.checked && !anyChannel()) toast("Set up Notifications so alerts can reach you", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg)); };
+    $("#st-xh").onchange = (e) => save({ expiry_alert_hour: +e.target.value });
+    const titles = { household: "Household", mealie: "Recipe library", ai: "AI recipe import", notify: "Notifications", password: "Password" };
     $$("[data-sec]").forEach((b) => (b.onclick = () => openSetupSection(b.dataset.sec, titles[b.dataset.sec], reloadCfg)));
     $("#st-wizard").onclick = () => { closeSheet(true); runWizard(() => location.reload()); };
     $("#st-logout") && ($("#st-logout").onclick = async () => { await api("POST", "/api/logout"); location.reload(); });

@@ -73,7 +73,9 @@ DEFAULT_SETTINGS = {
     "exclude_tags": [],
     "fill_empty_only": True,
     "auto_plan_day": "",          # "" (off) or mon..sun
-    "auto_plan_email": False,
+    "auto_plan_email": False,         # "send the plan when it's made" (all notification channels)
+    "expiry_alert": False,            # daily "use soon" alert
+    "expiry_alert_hour": 8,
     "expiring_window_days": 3,
 }
 
@@ -233,11 +235,21 @@ CFG_DEFAULTS = {
     "smtp_password": env("SMTP_PASSWORD"),
     "smtp_from": env("SMTP_FROM") or env("SMTP_USER"),
     "mail_to": _env_list("MAIL_TO"),
+    "telegram_token": env("TELEGRAM_BOT_TOKEN"),
+    "telegram_chat_id": env("TELEGRAM_CHAT_ID"),
+    "telegram_chat_name": "",
+    "telegram_bot": "",
+    "telegram_link_code": "",
+    "telegram_link_expires": 0,
+    "ntfy_server": env("NTFY_SERVER", "https://ntfy.sh"),
+    "ntfy_topic": env("NTFY_TOPIC"),
+    "ntfy_token": env("NTFY_TOKEN"),
     "app_password_hash": "",
     "session_secret": "",
     "setup_complete": False,
 }
-SECRET_KEYS = {"mealie_token", "smtp_password", "app_password_hash", "session_secret"}
+SECRET_KEYS = {"mealie_token", "smtp_password", "app_password_hash", "session_secret", "telegram_token", "ntfy_token",
+               "telegram_link_code"}
 _cfg = {}
 _cfg_lock = threading.Lock()
 
@@ -1334,34 +1346,257 @@ def email_wrap(inner):
     return f'<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1c1c1e;max-width:620px">{inner}</div>'
 
 
-def email_list(list_id):
+# ---- messages: one builder per kind, delivered to any channel (email, Telegram, ntfy)
+
+def _print_body(page):
+    return page.split("</div>", 1)[1].split("<script>")[0]  # drop the button bar + script
+
+
+def msg_list(list_id):
     sl = get_list(list_id)
-    page = print_list(sl)
-    body = page.split("</div>", 1)[1].split("<script>")[0]  # drop the button bar + script
     safe = re.sub(r"[^A-Za-z0-9_-]+", "-", sl.get("name") or "list")
-    send_email(f"🛒 {sl.get('name') or 'Shopping list'} — {datetime.now().strftime('%b %d')}",
-               render_list_text(sl), email_wrap(f"<style>{PRINT_CSS}</style>{body}"),
-               [(f"{safe}.csv", render_list_csv(sl).encode(), "text/csv")])
+    return {"subject": f"🛒 {sl.get('name') or 'Shopping list'} — {datetime.now().strftime('%b %d')}",
+            "text": render_list_text(sl).replace("[ ]", "☐"),
+            "html": email_wrap(f"<style>{PRINT_CSS}</style>{_print_body(print_list(sl))}"),
+            "files": [(f"{safe}.csv", render_list_csv(sl).encode(), "text/csv")]}
 
 
-def email_plan(start, end):
+def msg_plan(start, end):
     entries = get_plans(start, end)
-    send_email(f"🍽️ Meal plan {fmt_day(start)} – {fmt_day(end)}", render_plan_text(entries, start, end),
-               email_wrap(f"<style>{PRINT_CSS}</style><h1>Meal plan</h1><div class='sub'>{html.escape(fmt_day(start))} – {html.escape(fmt_day(end))}</div>"
-                          + plan_table_html(entries, start, end)),
-               [("meal-plan.csv", render_plan_csv(entries).encode(), "text/csv"),
-                ("meal-plan.ics", render_plan_ics(entries).encode(), "text/calendar")])
+    return {"subject": f"🍽️ Meal plan {fmt_day(start)} – {fmt_day(end)}",
+            "text": render_plan_text(entries, start, end),
+            "html": email_wrap(f"<style>{PRINT_CSS}</style><h1>Meal plan</h1><div class='sub'>{html.escape(fmt_day(start))} – "
+                               f"{html.escape(fmt_day(end))}</div>" + plan_table_html(entries, start, end)),
+            "files": [("meal-plan.csv", render_plan_csv(entries).encode(), "text/csv"),
+                      ("meal-plan.ics", render_plan_ics(entries).encode(), "text/calendar")]}
 
 
-def email_pantry():
+def msg_pantry():
     with db() as c:
         items = list_pantry(c)
-    page = print_pantry(items)
-    body = page.split("</div>", 1)[1].split("<script>")[0]
-    lines = [f"{i['name']} — {i['location']} — use by {i['expires_on'] or '?'}" for i in items]
-    send_email(f"🥫 Pantry — {datetime.now().strftime('%b %d')}", "\n".join(lines) or "Pantry is empty.",
-               email_wrap(f"<style>{PRINT_CSS}</style>{body}"),
-               [("pantry.csv", render_pantry_csv(items).encode(), "text/csv")])
+    lines = [f"• {i['name']} ({i['location']}) — use by {i['expires_on'] or '?'}" for i in items]
+    return {"subject": f"🥫 Pantry — {datetime.now().strftime('%b %d')}",
+            "text": "\n".join(lines) or "Pantry is empty.",
+            "html": email_wrap(f"<style>{PRINT_CSS}</style>{_print_body(print_pantry(items))}"),
+            "files": [("pantry.csv", render_pantry_csv(items).encode(), "text/csv")]}
+
+
+def msg_expiring(items):
+    def when(i):
+        d = i["days_left"]
+        return "expired" if d < 0 else "today" if d == 0 else "tomorrow" if d == 1 else f"in {d} days"
+    lines = [f"• {i['name']} — {when(i)}" for i in items]
+    return {"subject": f"🥛 Use soon: {len(items)} item{'s' if len(items) != 1 else ''}",
+            "text": "\n".join(lines) + "\n\nOpen TablePlan → Pantry to log what you used.",
+            "html": email_wrap("<h2>Use soon</h2><ul>" + "".join(f"<li>{html.escape(l[2:])}</li>" for l in lines) + "</ul>"),
+            "files": []}
+
+
+def msg_test(channel):
+    return {"subject": "✅ TablePlan notifications are working",
+            "text": f"This {channel} channel will receive shopping lists, meal plans and use-soon alerts.",
+            "html": email_wrap("<h2>TablePlan email is working ✓</h2><p>Shopping lists, meal plans and use-soon alerts will arrive here.</p>"),
+            "files": []}
+
+
+def channels_ready():
+    return {"email": email_ready(),
+            "telegram": bool(cfg("telegram_token") and cfg("telegram_chat_id")),
+            "ntfy": bool(cfg("ntfy_topic"))}
+
+
+def deliver(msg, channel="all"):
+    """Send a message to one channel or every configured one. Returns the channels that got it."""
+    ready = channels_ready()
+    targets = [c for c, ok in ready.items() if ok] if channel == "all" else [channel]
+    if not targets:
+        raise ApiError(400, "No notifications set up yet. Open Settings → Notifications.")
+    sent, errors = [], []
+    for ch in targets:
+        if not ready.get(ch):
+            raise ApiError(400, f"{ch.title()} isn't set up yet. Open Settings → Notifications.")
+        try:
+            {"email": _send_email_msg, "telegram": telegram_send, "ntfy": ntfy_send}[ch](msg)
+            sent.append(ch)
+        except ApiError as e:
+            errors.append(f"{ch}: {e.message}")
+    if errors and not sent:
+        raise ApiError(502, "; ".join(errors))
+    return {"sent": sent, "errors": errors}
+
+
+def _send_email_msg(msg):
+    send_email(msg["subject"], msg["text"], msg["html"], msg["files"])
+
+
+def build_msg(b):
+    kind = b.get("kind")
+    if kind == "list":
+        return msg_list(b["id"])
+    if kind == "plan":
+        s0 = parse_date(b.get("start")) or today()
+        return msg_plan(s0, parse_date(b.get("end")) or s0 + timedelta(days=6))
+    if kind == "pantry":
+        return msg_pantry()
+    if kind == "test":
+        return msg_test(b.get("channel") or "notification")
+    raise ApiError(400, "Unknown message kind")
+
+
+# ---- shared HTTP helpers for notification APIs
+
+def _multipart(fields, files):
+    boundary = "----tableplan" + base64.b16encode(os.urandom(8)).decode()
+    parts = []
+    for k, v in fields.items():
+        if v is None:
+            continue
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
+    for k, fname, ctype, blob in files:
+        safe = re.sub(r'[^A-Za-z0-9._-]', '_', fname or "file")
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; filename="{safe}"\r\n'
+                     f'Content-Type: {ctype}\r\n\r\n'.encode() + blob + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def _https_json(url, payload=None, headers=None, data=None, ctype=None, timeout=20, method=None):
+    h = {"User-Agent": f"TablePlan/{APP_VERSION}", "Accept": "application/json", **(headers or {})}
+    if payload is not None:
+        data, ctype = json.dumps(payload).encode(), "application/json"
+    if ctype:
+        h["Content-Type"] = ctype
+    req = urllib.request.Request(url, data=data, headers=h, method=method or ("POST" if data is not None else "GET"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:   # TLS certificates are verified by default
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode("utf-8", "replace"))
+        except ValueError:
+            body = {}
+        raise ApiError(502, body.get("description") or body.get("error") or f"HTTP {e.code}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise ApiError(502, f"Couldn't connect ({getattr(e, 'reason', e)})")
+
+
+# ---- Telegram (bot API, outbound only: no webhook, nothing exposed to the internet)
+
+TELEGRAM_API = env("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/")   # override only for a self-hosted Bot API server
+TELEGRAM_TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,64}$")
+
+
+def _tg(method, token=None, **kw):
+    token = token or cfg("telegram_token")
+    if not token:
+        raise ApiError(400, "Telegram isn't set up.")
+    res = _https_json(f"{TELEGRAM_API}/bot{token}/{method}", **kw)
+    if not res.get("ok", False):
+        raise ApiError(502, res.get("description") or "Telegram error")
+    return res.get("result")
+
+
+def telegram_set_token(token):
+    token = (token or "").strip()
+    if not TELEGRAM_TOKEN_RE.match(token):
+        raise ApiError(400, "That doesn't look like a bot token. It's the long code BotFather sends, like 123456789:AAH…")
+    try:
+        me = _tg("getMe", token=token)
+    except ApiError:
+        raise ApiError(400, "Telegram didn't accept that token. Copy it again from BotFather.")
+    code = "".join(random.SystemRandom().choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(8))
+    set_cfg(telegram_token=token, telegram_bot=me.get("username", ""), telegram_chat_id="", telegram_chat_name="",
+            telegram_link_code=code, telegram_link_expires=int(time.time()) + 900)
+    return telegram_public(with_code=True)
+
+
+def telegram_verify():
+    code, exp = cfg("telegram_link_code"), int(cfg("telegram_link_expires") or 0)
+    if not code or time.time() > exp:
+        raise ApiError(400, "The link code expired. Tap “Start over” to get a new one.")
+    updates = _tg("getUpdates", payload={"timeout": 0, "allowed_updates": ["message"]}) or []
+    match, last = None, 0
+    for u in updates:
+        last = max(last, u.get("update_id", 0))
+        m = u.get("message") or {}
+        if code in (m.get("text") or "").upper():
+            match = m.get("chat") or {}
+    if last:
+        _tg("getUpdates", payload={"offset": last + 1, "timeout": 0})   # acknowledge so old messages aren't re-read
+    if not match:
+        raise ApiError(404, "Haven't seen the code yet. Send it to your bot in Telegram, then tap Check again.")
+    name = match.get("title") or " ".join(x for x in (match.get("first_name"), match.get("last_name")) if x) or "your chat"
+    set_cfg(telegram_chat_id=str(match["id"]), telegram_chat_name=name, telegram_link_code="", telegram_link_expires=0)
+    telegram_send(msg_test("Telegram"))
+    return telegram_public()
+
+
+def telegram_send(msg):
+    chat = cfg("telegram_chat_id")
+    text = f"<b>{html.escape(msg['subject'])}</b>\n\n{html.escape(msg['text'])}"
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 3900:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    chunks.append(cur)
+    for ch in chunks:
+        if ch.strip():
+            _tg("sendMessage", payload={"chat_id": chat, "text": ch.rstrip("\n"), "parse_mode": "HTML",
+                                        "disable_web_page_preview": True})
+    for fname, blob, ctype in msg.get("files") or []:
+        if fname.endswith(".ics"):   # calendar file is the useful one on a phone; CSVs stay for email
+            data, ct = _multipart({"chat_id": chat}, [("document", fname, ctype, blob)])
+            _tg("sendDocument", data=data, ctype=ct)
+
+
+def telegram_public(with_code=False):
+    out = {"configured": channels_ready()["telegram"], "has_token": bool(cfg("telegram_token")),
+           "bot": cfg("telegram_bot"), "chat": cfg("telegram_chat_name")}
+    if with_code or (cfg("telegram_link_code") and time.time() < int(cfg("telegram_link_expires") or 0)):
+        out["code"] = cfg("telegram_link_code")
+        out["link"] = f"https://t.me/{cfg('telegram_bot')}?start={cfg('telegram_link_code')}"
+    return out
+
+
+# ---- ntfy (push notifications; self-hosted or ntfy.sh)
+
+def ntfy_send(msg, conf=None):
+    c = conf or {"ntfy_server": cfg("ntfy_server"), "ntfy_topic": cfg("ntfy_topic"), "ntfy_token": cfg("ntfy_token")}
+    server = (c["ntfy_server"] or "https://ntfy.sh").rstrip("/")
+    body = msg["text"]
+    if len(body.encode()) > 3800:
+        body = body.encode()[:3700].decode("utf-8", "ignore") + "\n… (open TablePlan for the rest)"
+    headers = {"Authorization": f"Bearer {c['ntfy_token']}"} if c.get("ntfy_token") else {}
+    _https_json(server + "/", payload={"topic": c["ntfy_topic"], "title": msg["subject"], "message": body,
+                                        "tags": ["fork_and_knife"]}, headers=headers)
+
+
+def ntfy_setup(b):
+    server = (b.get("server") or "https://ntfy.sh").strip().rstrip("/")
+    if not re.match(r"^https://[^\s/]+", server) and not re.match(r"^http://(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[^./]+(:\d+)?$)", server):
+        raise ApiError(400, "Use an https:// ntfy server (plain http is only allowed for servers on your home network).")
+    topic = (b.get("topic") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", topic):
+        raise ApiError(400, "Topic must be 8–64 letters, numbers, - or _. Use the random one suggested.")
+    if "ntfy.sh" in server and len(topic) < 20 and not b.get("token"):
+        raise ApiError(400, "On the public ntfy.sh server anyone who guesses the topic can read it. Use the long random topic, or add an access token.")
+    conf = {"ntfy_server": server, "ntfy_topic": topic, "ntfy_token": (b.get("token") or "").strip() or cfg("ntfy_token") or ""}
+    ntfy_send(msg_test("ntfy"), conf)
+    set_cfg(**conf)
+    return ntfy_public()
+
+
+def ntfy_public():
+    return {"configured": channels_ready()["ntfy"], "server": cfg("ntfy_server"), "topic": cfg("ntfy_topic"),
+            "has_token": bool(cfg("ntfy_token")),
+            "suggested_topic": "tableplan-" + base64.b32encode(os.urandom(10)).decode().lower().rstrip("=")}
+
+
+def notify_status():
+    return {"channels": channels_ready(), "email": email_public(), "telegram": telegram_public(), "ntfy": ntfy_public()}
 
 
 # ============================================================ setup: Mealie account, AI, email
@@ -1549,7 +1784,7 @@ def email_public():
 def setup_status():
     return {"setup_complete": bool(cfg("setup_complete")),
             "household": {"name": cfg("household_name"), "people": cfg("people"), "scale": bool(cfg("scale_to_household"))},
-            "mealie": mealie_status(), "ai": ai_status(), "email": email_public(),
+            "mealie": mealie_status(), "ai": ai_status(), "email": email_public(), "notify": notify_status(),
             "password": {"set": auth_required()}, "version": APP_VERSION}
 
 
@@ -1696,11 +1931,20 @@ def scheduler():
                                    for p in res["proposals"]])
                     set_internal("auto_plan_last", iso(now.date()))
                     log(f"auto-plan: added {n} meals for week of {start}")
-                    if s.get("auto_plan_email") and email_ready():
-                        email_plan(start, start + timedelta(days=6))
+                    if s.get("auto_plan_email") and any(channels_ready().values()):
+                        deliver(msg_plan(start, start + timedelta(days=6)))
+            # Daily "use soon" alert
+            if s.get("expiry_alert") and any(channels_ready().values()) and now.hour >= int(s.get("expiry_alert_hour") or 8):
+                if get_internal("expiry_alert_last") != iso(now.date()):
+                    set_internal("expiry_alert_last", iso(now.date()))
+                    with db() as c:
+                        items = expiring_items(c, 1)
+                    if items:
+                        deliver(msg_expiring(items))
+                        log(f"use-soon alert sent ({len(items)} items)")
         except Exception as e:  # never let the scheduler die
             log("scheduler error:", e)
-        time.sleep(600)
+        time.sleep(300)
 
 
 # ============================================================ HTTP
@@ -1823,6 +2067,7 @@ class Handler(BaseHTTPRequestHandler):
             base, slug = mealie_public(), cfg("group_slug")
             return self.send(200, {"mealie_url": base, "group_slug": slug,
                                    "email_ready": email_ready(), "mail_to": cfg("mail_to") or [], "settings": s,
+                                   "channels": channels_ready(), "telegram_chat": cfg("telegram_chat_name"),
                                    "usda_synced_at": get_internal("usda_synced_at"),
                                    "setup_complete": bool(cfg("setup_complete")), "connected": bool(cfg("mealie_token")),
                                    "household": {"name": cfg("household_name"), "people": cfg("people"),
@@ -1867,6 +2112,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, email_public())
         if m == "POST" and path == "/api/setup/email":
             return self.send(200, email_setup(self.body()))
+        if m == "GET" and path == "/api/setup/notify":
+            return self.send(200, notify_status())
+        if m == "POST" and path == "/api/setup/telegram":
+            return self.send(200, telegram_set_token(self.body().get("token")))
+        if m == "POST" and path == "/api/setup/telegram/verify":
+            return self.send(200, telegram_verify())
+        if m == "POST" and path == "/api/setup/ntfy":
+            return self.send(200, ntfy_setup(self.body()))
+        if m == "DELETE" and path in ("/api/setup/telegram", "/api/setup/ntfy", "/api/setup/email"):
+            which = path.rsplit("/", 1)[1]
+            set_cfg(**{"telegram": dict(telegram_token="", telegram_chat_id="", telegram_chat_name="", telegram_bot="",
+                                        telegram_link_code=""),
+                       "ntfy": dict(ntfy_topic="", ntfy_token=""),
+                       "email": dict(smtp_host="", smtp_user="", smtp_password="", smtp_from="", mail_to=[])}[which])
+            return self.send(200, notify_status())
         if m == "POST" and path == "/api/setup/password":
             pw = self.body().get("password") or ""
             if pw and len(pw) < 4:
@@ -1995,22 +2255,12 @@ class Handler(BaseHTTPRequestHandler):
                                     f"and drop it in the TablePlan data folder, then sync again.")
             return self.send(200, {"products": n, "synced_at": get_internal("usda_synced_at")})
 
-        # --- email
-        if m == "POST" and path == "/api/email":
+        # --- send (email / Telegram / ntfy)
+        if m == "POST" and path in ("/api/send", "/api/email"):
             b = self.body()
-            kind = b.get("kind")
-            if kind == "list":
-                email_list(b["id"])
-            elif kind == "plan":
-                s = parse_date(b.get("start")) or today()
-                email_plan(s, parse_date(b.get("end")) or s + timedelta(days=6))
-            elif kind == "pantry":
-                email_pantry()
-            elif kind == "test":
-                send_email("TablePlan test email", "Email is working.", email_wrap("<p>Email is working ✓</p>"))
-            else:
-                raise ApiError(400, "Unknown email kind")
-            return self.send(200, {"ok": True, "to": cfg("mail_to")})
+            channel = b.get("channel") or ("email" if path == "/api/email" else "all")
+            res = deliver(build_msg(b), channel)
+            return self.send(200, {"ok": True, **res, "to": cfg("mail_to")})
 
         # --- exports & print
         mm = re.fullmatch(r"/export/list/([A-Za-z0-9-]{1,64})\.(txt|csv)", path)

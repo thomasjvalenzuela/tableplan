@@ -129,11 +129,11 @@ const Setup = {
     const presets = [["gmail", "Gmail / Google Workspace"], ["outlook", "Outlook / Microsoft 365"], ["icloud", "iCloud Mail"], ["yahoo", "Yahoo"], ["custom", "Other (SMTP)"]];
     const guess = e.host ? (presets.find(([k]) => ({ gmail: "smtp.gmail.com", outlook: "smtp.office365.com", icloud: "smtp.mail.me.com", yahoo: "smtp.mail.yahoo.com" })[k] === e.host) || ["custom"])[0] : "gmail";
     const help = {
-      gmail: "Use an <b>App Password</b>: Google Account → Security → 2-Step Verification → App passwords. Your normal password won't work.",
+      gmail: "Use an <b>App Password</b>. Turn on 2-Step Verification first, then go to myaccount.google.com/apppasswords. New accounts sometimes can't create one yet; use Telegram or ntfy instead.",
       outlook: "Use your Microsoft password, or an app password if 2-step sign-in is on. SMTP has to be allowed for your mailbox.",
       icloud: "Create an app-specific password at appleid.apple.com → Sign-In and Security.",
       yahoo: "Generate an app password in Yahoo Account Security.",
-      custom: "Enter your mail provider's SMTP server details.",
+      custom: "Enter your mail provider's SMTP details. Free sending services such as Brevo or SMTP2GO work too; they give you an SMTP login.",
     };
     const draw = (p) => {
       el.innerHTML = `
@@ -155,13 +155,104 @@ const Setup = {
     draw(guess);
     return async () => {
       const p = el.dataset.p, user = el.querySelector("#em-user").value.trim(), pw = el.querySelector("#em-pw").value;
-      if (!user && !e.configured) throw new Error("Enter your email address, or tap Skip to set this up later.");
+      if (!user && !e.configured) return true;
       if (!user && e.configured) return true;
       const body = { preset: p === "custom" ? "" : p, smtp_user: user, smtp_from: user, smtp_password: pw, mail_to: el.querySelector("#em-to").value || user, test: true };
       if (p === "custom") Object.assign(body, { smtp_host: el.querySelector("#em-host").value, smtp_port: +el.querySelector("#em-port").value, smtp_security: el.querySelector("#em-sec").value });
       const r = await _api("POST", "/api/setup/email", body);
       st.email = r; done && done(r); return true;
     };
+  },
+
+  notify(el, st, done) {
+    const n = st.notify || {};
+    const ch = n.channels || {};
+    const tabs = [["telegram", "Telegram"], ["ntfy", "ntfy"], ["email", "Email"]];
+    const first = ch.telegram ? "telegram" : ch.ntfy ? "ntfy" : ch.email ? "email" : "telegram";
+    el.innerHTML = `<p class="wlead">Send shopping lists, meal plans and use-soon alerts to your phone. Set up one or more. You can change this later in Settings.</p>
+      <div class="seg wseg" id="nt-tabs">${tabs.map(([k, l]) => `<button data-t="${k}" class="${k === first ? "on" : ""}">${l}${ch[k] ? " ✓" : ""}</button>`).join("")}</div>
+      <div id="nt-body"></div>`;
+    let sub = null;
+    const show = (k) => {
+      el.querySelectorAll("#nt-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.t === k));
+      const body = el.querySelector("#nt-body");
+      Setup[k](body, st, () => {});
+      sub = () => (body._submit ? body._submit() : true);
+    };
+    el.querySelectorAll("#nt-tabs button").forEach((b) => (b.onclick = () => show(b.dataset.t)));
+    show(first);
+    return async () => (sub ? sub() : true);
+  },
+
+  telegram(el, st, done) {
+    const t = (st.notify || {}).telegram || {};
+    const remove = async () => { st.notify = await _api("DELETE", "/api/setup/telegram"); Setup.telegram(el, st, done); };
+    if (t.configured) {
+      el.innerHTML = `<div class="wstatus ok"><b>Telegram is connected</b><span>Messages go to ${_esc(t.chat || "your chat")} via @${_esc(t.bot || "bot")}</span></div>
+        <div class="btn-row"><button class="btn sec" type="button" id="tg-test">Send test</button><button class="btn red" type="button" id="tg-rm">Disconnect</button></div>`;
+      el.querySelector("#tg-test").onclick = async (e) => { e.target.disabled = true; try { await _api("POST", "/api/send", { kind: "test", channel: "telegram" }); e.target.textContent = "Sent ✓"; } catch (x) { e.target.textContent = x.message; } };
+      el.querySelector("#tg-rm").onclick = remove;
+      return async () => true;
+    }
+    if (t.code) {
+      el.innerHTML = `<div class="wstatus"><b>Last step: link your chat</b><span>Bot @${_esc(t.bot)} is ready</span></div>
+        <a class="btn" href="${_esc(t.link)}" target="_blank" rel="noopener" style="text-decoration:none">Open @${_esc(t.bot)} in Telegram → Start</a>
+        <p class="whint">Telegram opens a chat with your bot. Tap <b>Start</b>. Want lists in a family group instead? Add the bot to the group and send this code there:</p>
+        <div class="wgroup"><div class="wfield"><label>Link code (valid 15 minutes)</label><input readonly value="${_esc(t.code)}" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:.15em;font-size:20px"></div></div>
+        <div class="wiz-err" id="tg-err"></div>
+        <div class="btn-row" style="margin-top:12px"><button class="btn sec" type="button" id="tg-restart">Start over</button><button class="btn" type="button" id="tg-check">I tapped Start, check</button></div>`;
+      const check = async () => {
+        const b = el.querySelector("#tg-check"); b.disabled = true; b.textContent = "Checking…";
+        try { const r = await _api("POST", "/api/setup/telegram/verify"); st.notify = { ...(st.notify || {}), telegram: r, channels: { ...((st.notify || {}).channels || {}), telegram: true } }; Setup.telegram(el, st, done); done && done(r); }
+        catch (e) { el.querySelector("#tg-err").textContent = e.message; b.disabled = false; b.textContent = "I tapped Start, check"; }
+      };
+      el.querySelector("#tg-check").onclick = check;
+      el.querySelector("#tg-restart").onclick = remove;
+      return async () => { await check(); if (!(st.notify?.telegram?.configured)) throw new Error("Tap Start in Telegram first, or choose Skip."); return true; };
+    }
+    el.innerHTML = `<p class="wlead">Telegram is free and works when email won't. You create a private bot just for your household, and only chats you link can receive messages.</p>
+      <ol class="whint" style="margin:0 0 12px 18px;padding:0;line-height:1.6">
+        <li>In Telegram, open <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a> and send <code>/newbot</code>.</li>
+        <li>Pick any name, then a username ending in <code>bot</code> (e.g. <code>smith_kitchen_bot</code>).</li>
+        <li>Copy the <b>token</b> BotFather replies with and paste it here.</li></ol>
+      <div class="wgroup"><div class="wfield"><label>Bot token</label><input id="tg-token" type="password" placeholder="123456789:AAH…" autocomplete="off"></div></div>
+      <p class="whint">The token stays on your server. TablePlan only sends messages out, and nothing is opened to the internet.</p>`;
+    return async () => {
+      const tok = el.querySelector("#tg-token").value.trim();
+      if (!tok) return true;
+      const r = await _api("POST", "/api/setup/telegram", { token: tok });
+      st.notify = { ...(st.notify || {}), telegram: r };
+      Setup.telegram(el, st, done);
+      throw Object.assign(new Error(""), { silent: true });   // stay on this screen for the linking step
+    };
+  },
+
+  ntfy(el, st, done) {
+    const n = (st.notify || {}).ntfy || {};
+    if (n.configured) {
+      el.innerHTML = `<div class="wstatus ok"><b>ntfy is connected</b><span>${_esc(n.server)} · topic ${_esc(n.topic)}${n.has_token ? " · access token ✓" : ""}</span></div>
+        <div class="btn-row"><button class="btn sec" type="button" id="nf-test">Send test</button><button class="btn red" type="button" id="nf-rm">Disconnect</button></div>`;
+      el.querySelector("#nf-test").onclick = async (e) => { e.target.disabled = true; try { await _api("POST", "/api/send", { kind: "test", channel: "ntfy" }); e.target.textContent = "Sent ✓"; } catch (x) { e.target.textContent = x.message; } };
+      el.querySelector("#nf-rm").onclick = async () => { st.notify = await _api("DELETE", "/api/setup/ntfy"); Setup.ntfy(el, st, done); };
+      return async () => true;
+    }
+    el.innerHTML = `<p class="wlead">ntfy sends push notifications to the free ntfy app (iPhone and Android). No account needed. It's also easy to self-host.</p>
+      <div class="wgroup">
+        <div class="wfield"><label>Server</label><input id="nf-server" value="${_esc(n.server || "https://ntfy.sh")}"></div>
+        <div class="wfield"><label>Topic (keep it secret, like a password)</label><input id="nf-topic" value="${_esc(n.suggested_topic || "")}" style="font-family:ui-monospace,Menlo,monospace"></div>
+        <div class="wfield"><label>Access token (optional)</label><input id="nf-token" type="password" placeholder="tk_… (for protected topics)" autocomplete="off"></div>
+      </div>
+      <p class="whint">In the ntfy app, tap <b>+</b> and subscribe to the topic above, then tap Connect and a test arrives. On the public ntfy.sh server, anyone who knows the topic can read it, so keep the long random name or use your own server with an access token.</p>
+      <div class="wiz-err" id="nf-err"></div>
+      <button class="btn" type="button" id="nf-go" style="margin-top:12px">Connect ntfy</button>`;
+    el.querySelector("#nf-go").onclick = async (e) => {
+      const b = e.currentTarget; b.disabled = true; b.textContent = "Connecting…"; el.querySelector("#nf-err").textContent = "";
+      try {
+        const r = await _api("POST", "/api/setup/ntfy", { server: el.querySelector("#nf-server").value, topic: el.querySelector("#nf-topic").value.trim(), token: el.querySelector("#nf-token").value });
+        st.notify = { ...(st.notify || {}), ntfy: r, channels: { ...((st.notify || {}).channels || {}), ntfy: true } }; Setup.ntfy(el, st, done); done && done(r);
+      } catch (x) { el.querySelector("#nf-err").textContent = x.message; b.disabled = false; b.textContent = "Connect ntfy"; }
+    };
+    return async () => true;
   },
 
   password(el, st, done) {
@@ -180,13 +271,20 @@ const Setup = {
   },
 };
 
+// Every section records its current submit handler on its container, so screens that redraw themselves
+// (Telegram linking, Mealie retry) always submit the right form.
+for (const k of Object.keys(Setup)) {
+  const f = Setup[k];
+  Setup[k] = (el, st, done) => { const r = f(el, st, done); el._submit = r; return r; };
+}
+
 // ------------------------------------------------------------------ first-run wizard
 const WIZ_STEPS = [
   { key: "welcome", title: "Welcome to TablePlan", sub: "Recipes, meal plans, a smart pantry and grocery lists for your household. This takes about 3 minutes, and you can skip anything and finish it later in Settings." },
   { key: "household", title: "Your household", sub: "This sets how much every recipe makes." , section: "household" },
   { key: "mealie", title: "Recipe library", sub: "TablePlan keeps recipes in Mealie, which is included and runs on your server.", section: "mealie", skippable: true },
   { key: "ai", title: "Import from screenshots", sub: "Let AI read recipe photos, screenshots and videos.", section: "ai", skippable: true },
-  { key: "email", title: "Email", sub: "Get grocery lists and meal plans in your inbox.", section: "email", skippable: true },
+  { key: "notify", title: "Notifications", sub: "Get grocery lists, meal plans and use-soon alerts on your phone.", section: "notify", skippable: true },
   { key: "password", title: "Lock it (optional)", sub: "Protect TablePlan with a household password.", section: "password", skippable: true },
   { key: "done", title: "You're all set", sub: "" },
 ];
@@ -213,7 +311,7 @@ async function runWizard(onFinish) {
       </div></div></div>`;
     const body = document.getElementById("wiz-body");
     submit = null;
-    if (step.section) submit = Setup[step.section](body, st);
+    if (step.section) { Setup[step.section](body, st); submit = () => (body._submit ? body._submit() : true); }
     if (step.key === "welcome") body.innerHTML = `<ul class="wiz-feats">
         <li><b>🍳 Recipes from anywhere</b><span>Links, screenshots and cookbook photos</span></li>
         <li><b>🗓️ Auto meal plans</b><span>A week or a month in one tap</span></li>
@@ -224,7 +322,7 @@ async function runWizard(onFinish) {
       body.innerHTML = `<ul class="wiz-feats">
         ${row(st.mealie?.connected, "Recipe library connected", "Settings → Mealie")}
         ${row(st.ai?.enabled, "Screenshot import", "Settings → AI recipe import")}
-        ${row(st.email?.configured, "Email", "Settings → Email")}
+        ${row(st.notify?.channels && Object.values(st.notify.channels).some(Boolean), "Notifications", "Settings → Notifications")}
         ${row(true, `Cooking for ${st.household?.people || 2}`, "")}</ul>
         <p class="whint" style="text-align:center">Tip: in Safari, tap Share → <b>Add to Home Screen</b> to open TablePlan like an app.</p>`;
     }
@@ -235,14 +333,14 @@ async function runWizard(onFinish) {
       if (!skip && submit) {
         btn.disabled = true; const label = btn.textContent; btn.textContent = "Working…";
         try { await submit(); }
-        catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = label; return; }
+        catch (e) { if (!e.silent) err.textContent = e.message; btn.disabled = false; btn.textContent = label; return; }
       }
       if (step.key === "done") {
         await _api("POST", "/api/setup/complete").catch(() => {});
         document.querySelector(".tabbar").style.display = "";
         return onFinish();
       }
-      if (step.key === "mealie" || step.key === "ai") st = await _api("GET", "/api/setup/status").catch(() => st);
+      if (step.key === "mealie" || step.key === "ai" || step.key === "notify") st = await _api("GET", "/api/setup/status").catch(() => st);
       i++; draw();
     };
     document.getElementById("wz-next").onclick = () => go(false);
@@ -260,10 +358,12 @@ async function openSetupSection(section, title, after) {
   const body = sheetBody();
   body.innerHTML = `<div class="wiz-in-sheet"><div id="ss-body"></div><div class="wiz-err" id="ss-err"></div>
     <div style="height:12px"></div><button class="btn" id="ss-save">Save</button></div>`;
-  const submit = Setup[section](document.getElementById("ss-body"), st);
+  const ssBody = document.getElementById("ss-body");
+  Setup[section](ssBody, st);
+  const submit = () => (ssBody._submit ? ssBody._submit() : true);
   document.getElementById("ss-save").onclick = async (ev) => {
     const b = ev.currentTarget; b.disabled = true; b.textContent = "Saving…";
     try { await submit(); toast("Saved"); closeSheet(); after && after(); }
-    catch (e) { document.getElementById("ss-err").textContent = e.message; b.disabled = false; b.textContent = "Save"; }
+    catch (e) { if (!e.silent) document.getElementById("ss-err").textContent = e.message; b.disabled = false; b.textContent = "Save"; }
   };
 }
