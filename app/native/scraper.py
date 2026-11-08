@@ -528,6 +528,11 @@ def _og_image(root, base_url):
     return None
 
 
+def page_image(page_html, page_url=""):
+    """Best share image (og:image / twitter:image) for any page, or None."""
+    return _og_image(_build_tree(page_html or ""), page_url)
+
+
 # --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
@@ -546,7 +551,9 @@ def parse_html(page_html, page_url=""):
                     title = next((n for n in root.iter() if n.tag == "title"), None)
                     recipe["name"] = clean_text(title.raw_text()) if title else ""
                 return recipe
-    raise NoRecipe(_page_text(root))
+    err = NoRecipe(_page_text(root))
+    err.image_url = _og_image(root, page_url)
+    raise err
 
 
 def scrape(url, fetch):

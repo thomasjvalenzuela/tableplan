@@ -913,9 +913,9 @@ def _fetch_page(url):
 
 AI_RECIPE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["found", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags"],
+    "required": ["found", "source_url", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags"],
     "properties": {
-        "found": {"type": "boolean"}, "name": {"type": "string"}, "description": {"type": "string"},
+        "found": {"type": "boolean"}, "source_url": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"},
         "servings": {"type": "number"}, "prep_minutes": {"type": "integer"}, "cook_minutes": {"type": "integer"},
         "total_minutes": {"type": "integer"},
         "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["section", "line"],
@@ -933,7 +933,7 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
     content = [{"type": "text", "text": (
         "Extract the single recipe from the material below. Copy ingredient lines exactly with amounts, amount first "
         "(e.g. '1 1/2 cups heavy cream'); put section headings in 'section' (empty if none). Steps are the instructions "
-        "in order, one per item. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content.")
+        "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content.")
         + (f"\n\n{text[:30000]}" if text else "")}]
     for im in images or []:
         data = im.get("data") or ""
@@ -945,7 +945,7 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
     except AIUnreadable:
         content[0] = {"type": "text", "text": (
             "Extract the single recipe from the material below and reply in EXACTLY this plain-text format, nothing else:\n"
-            "TITLE: <name>\nDESCRIPTION: <one sentence or blank>\nSERVINGS: <number or 0>\nPREP: <minutes or 0>\n"
+            "SOURCE: <web address shown in the material, or blank>\nTITLE: <name>\nDESCRIPTION: <one sentence or blank>\nSERVINGS: <number or 0>\nPREP: <minutes or 0>\n"
             "COOK: <minutes or 0>\nTOTAL: <minutes or 0>\nTAGS: <comma separated>\nINGREDIENTS:\n<one ingredient per line, amount first; "
             "a line starting with # is a section heading>\nSTEPS:\n<one step per line>\n"
             "Copy amounts exactly and never invent content. If there is no recipe, reply only: NO RECIPE")
@@ -959,7 +959,9 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
     for g in ings:   # only the first line of a section carries its title
         g["title"], last = (g["title"] if g["title"] != last else None), g["title"] or last
     mins = lambda v: int(v) * 60 if v else None  # noqa: E731
+    src = (out.get("source_url") or "").strip()
     return {"name": out["name"] or "Untitled recipe", "description": out.get("description") or "",
+            "orgURL": src if re.match(r"^https?://", src) else "",
             "recipeServings": float(out.get("servings") or 0), "prepTimeSeconds": mins(out.get("prep_minutes")),
             "performTimeSeconds": mins(out.get("cook_minutes")),
             "totalTimeSeconds": mins(out.get("total_minutes")) or ((mins(out.get("prep_minutes")) or 0) + (mins(out.get("cook_minutes")) or 0)) or None,
@@ -1098,11 +1100,12 @@ def native_api(method, path, body=None, multipart=None):
         try:
             data = n_scraper.scrape(url, _fetch_page)
         except n_scraper.NoRecipe as e:
+            page_img = getattr(e, "image_url", None)
             if not cfg("openai_key") or len(e.page_text or "") < 300:
                 raise ApiError(422, "Couldn't find a recipe on that page (it may be behind a login or paywall). "
                                     "Take screenshots of the recipe and use the Screenshot tab instead.")
             data = ai_recipe(f"Web page: {url}\n\n{e.page_text}", feature="link import", detail=url[:80])
-            data["orgURL"] = url
+            data["orgURL"], data["image_url"] = url, page_img
         return _save_new_recipe(data, data.pop("image_url", None))
     if p == "/api/recipes/create/ai":
         text, files = _multipart_text(multipart, "content")
@@ -2159,7 +2162,11 @@ def import_images(images, text=None):
             raise ApiError(413, "Those images are too large together (25 MB max).")
         files.append(("images", im.get("name") or f"image{i}.jpg", im.get("type") or "image/jpeg", blob))
     if NATIVE:
-        return _imported(_save_new_recipe(ai_recipe(text or "", images[:8], "screenshot import", f"{len(images[:8])} image(s)")))
+        data = ai_recipe(text or "", images[:8], "screenshot import", f"{len(images[:8])} image(s)")
+        slug = _save_new_recipe(data)
+        if data.get("orgURL"):   # the screenshot showed the web address: fetch that page's photo in the background
+            threading.Thread(target=lambda: _safe(recipe_image_next, slug), daemon=True).start()
+        return _imported(slug)
     if cfg("openai_key"):
         transcript = transcribe_images(images, text)
         slug = mealie("POST", "/api/recipes/create/ai", multipart=({"content": transcript}, []), timeout=300)
@@ -2717,7 +2724,7 @@ def parse_recipe_text(t):
         line = raw.strip().strip("*").strip()
         if not line:
             continue
-        m = re.match(r"^(TITLE|DESCRIPTION|SERVINGS|PREP|COOK|TOTAL|TAGS|INGREDIENTS|STEPS|NO RECIPE)\s*:?\s*(.*)$", line, re.I)
+        m = re.match(r"^(SOURCE|TITLE|DESCRIPTION|SERVINGS|PREP|COOK|TOTAL|TAGS|INGREDIENTS|STEPS|NO RECIPE)\s*:?\s*(.*)$", line, re.I)
         if m:
             k, v = m.group(1).upper(), m.group(2).strip()
             if k == "NO RECIPE":
@@ -2726,6 +2733,8 @@ def parse_recipe_text(t):
                 mode = k
             elif k == "TITLE":
                 out["name"] = v
+            elif k == "SOURCE":
+                out["source_url"] = v
             elif k == "DESCRIPTION":
                 out["description"] = v
             elif k == "TAGS":
@@ -2928,14 +2937,21 @@ def _public_host(url):
 
 
 def _fetch_image(url):
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
     if not url.startswith("https://") or not _public_host(url):
         raise ValueError("refusing non-public or non-https image URL")
     req = urllib.request.Request(url, headers={"User-Agent": f"TablePlan/{APP_VERSION} (+https://github.com/thomasjvalenzuela/tableplan)"})
     with urllib.request.urlopen(req, timeout=20) as r:
         ctype = (r.headers.get("Content-Type") or "").split(";")[0].lower()
-        if not ctype.startswith("image/"):
-            raise ValueError("not an image")
         data = r.read(MAX_IMG + 1)
+        if not ctype.startswith("image/"):
+            kind = n_recipes.sniff_image(data[:64])
+            if not kind:
+                raise ValueError("not an image")
+            ctype = "image/" + ("jpeg" if kind == "jpg" else kind)
     if len(data) > MAX_IMG:
         raise ValueError("image too large")
     return data, ctype
@@ -3024,6 +3040,21 @@ def ingredient_image(name, advance=False):
 def recipe_image_next(slug):
     rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
     row = _pick_row("recipe", rec["id"])
+    if not row and rec.get("orgURL"):   # first try: the photo from the recipe's own web page
+        try:
+            final, page = _fetch_page(rec["orgURL"])
+            img = n_scraper.page_image(page, final)
+            try:
+                img = n_scraper.parse_html(page, final).get("image_url") or img
+            except n_scraper.NoRecipe:
+                pass
+            if img:
+                blob, ctype = _fetch_image(img)
+                _upload_recipe_image(slug, blob, ctype)
+                _save_pick("recipe", rec["id"], -1, None, ctype, urllib.parse.urlparse(rec["orgURL"]).hostname)
+                return {"ok": True, "credit": urllib.parse.urlparse(rec["orgURL"]).hostname}
+        except Exception as e:
+            log("original page photo unavailable:", e)
     idx = (row["idx"] + 1) if row else 0
     cands = openverse_candidates(f"{rec.get('name')} dish", 20)
     for i in range(idx, len(cands)):
@@ -3184,7 +3215,7 @@ _update_cache = {"at": 0, "data": None}
 
 
 def update_info(force=False):
-    ttl = 3600 if _update_cache["data"] else 600   # hourly; retry sooner after a failed check
+    ttl = 600   # every 10 minutes (a tiny file on GitHub Pages)   # hourly; retry sooner after a failed check
     if force or time.time() - _update_cache["at"] > ttl:
         data = None
         try:
