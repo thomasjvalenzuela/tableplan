@@ -1,0 +1,23 @@
+# Railway deployment config (https://docs.railway.com/reference/config-as-code)
+#
+# Before the first deploy:
+#   * Attach a Volume to this service mounted at /data. TablePlan keeps its SQLite
+#     database, settings and recipe photos there; without a volume every redeploy
+#     starts from scratch. The container fixes the volume's ownership on start-up.
+#   * Generate a public domain (Settings -> Networking). Railway sets PORT and the
+#     server listens on it.
+#   * TABLEPLAN_PUBLIC is enabled automatically on Railway (internet-facing mode):
+#     sign-in is always required, and until you set a household password the only
+#     way in is the one-time setup code printed in the Deploy Logs.
+#   * Keep one replica: SQLite on a single volume does not support multiple instances.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+numReplicas = 1

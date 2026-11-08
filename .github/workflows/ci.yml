@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
+      - name: Compile Python
+        run: python -m py_compile app/server.py app/native/*.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s app/tests -t .
+
+      - name: Check JavaScript syntax
+        run: |
+          for f in app/static/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+      - name: Check installer script syntax
+        run: |
+          bash -n install/install.sh
+          sh -n docker/entrypoint.sh
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: false
+          load: true
+          tags: tableplan:ci
+          build-args: VERSION=ci
+
+      - name: Smoke test (runs as uid 1000, /health answers)
+        run: |
+          docker run -d --name tp -p 8080:8080 tableplan:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs tp
+          [ "${ok:-0}" = 1 ] || { echo "::error::/health did not answer"; exit 1; }
+          uid="$(docker exec tp sh -c 'cat /proc/1/status' | awk '/^Uid:/ {print $2}')"
+          echo "server uid: $uid"
+          [ "$uid" = 1000 ] || { echo "::error::server is not running as uid 1000"; exit 1; }
+          docker rm -f tp

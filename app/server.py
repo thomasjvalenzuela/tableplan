@@ -17,7 +17,9 @@ Pure Python standard library + SQLite. No pip installs.
 import base64
 import csv
 import hashlib
+import http.client
 import ipaddress
+import secrets
 import socket
 import hmac
 import html
@@ -38,6 +40,7 @@ import urllib.error
 import urllib.parse
 import uuid
 import urllib.request
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
@@ -61,7 +64,7 @@ def log(*a):
 
 DATA_DIR = env("DATA_DIR", "/data")
 DB_PATH = os.path.join(DATA_DIR, "tableplan.db")
-LISTEN_PORT = int(env("LISTEN_PORT", "8080"))
+LISTEN_PORT = int(env("PORT") or env("LISTEN_PORT", "8080"))   # PORT is what Railway/Heroku-style hosts set
 APP_VERSION = (open(os.path.join(HERE, "VERSION")).read().strip()
                if os.path.exists(os.path.join(HERE, "VERSION")) else "dev")
 UPDATE_FEED = env("TABLEPLAN_UPDATE_FEED", "https://thomasjvalenzuela.github.io/tableplan/version.json")
@@ -70,8 +73,23 @@ NATIVE = env("TABLEPLAN_BACKEND", "native").lower() != "mealie"   # native = Tab
 # Set TABLEPLAN_PUBLIC=1 when TablePlan is reachable from the internet (custom domain, Railway, …):
 # sign-in is then always required, and until a household password exists the one-time setup code
 # printed in the server log is the only way in.
-PUBLIC_MODE = env("TABLEPLAN_PUBLIC", "").lower() in ("1", "true", "yes")
-SETUP_CODE = base64.b32encode(os.urandom(5)).decode()
+ON_RAILWAY = bool(env("RAILWAY_ENVIRONMENT") or env("RAILWAY_ENVIRONMENT_NAME"))
+
+
+def _env_flag(name, default):
+    v = env(name).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+PUBLIC_MODE = _env_flag("TABLEPLAN_PUBLIC", ON_RAILWAY)
+# Only trust X-Forwarded-For / X-Forwarded-Host when a reverse proxy we control sits in front (Railway does).
+TRUST_PROXY = _env_flag("TABLEPLAN_TRUST_PROXY", ON_RAILWAY)
+SETUP_CODE = base64.b32encode(os.urandom(10)).decode()   # 16 chars, 80 bits
+SESSION_DAYS = 180
 
 FOODKEEPER_URL = env("FOODKEEPER_URL", "https://www.fsis.usda.gov/shared/data/EN/foodkeeper.json")
 
@@ -223,13 +241,95 @@ def get_settings():
     return s
 
 
+_MEAL_TYPES = ("breakfast", "lunch", "dinner", "side", "snack", "dessert", "drink")
+
+
+def _v_int(lo, hi):
+    def f(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+            raise ValueError("must be a number")
+        n = int(float(v))
+        if not lo <= n <= hi:
+            raise ValueError(f"must be between {lo} and {hi}")
+        return n
+    return f
+
+
+def _v_num(lo, hi):
+    def f(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+            raise ValueError("must be a number")
+        n = float(v)
+        if not lo <= n <= hi:   # also rejects NaN
+            raise ValueError(f"must be between {lo} and {hi}")
+        return n
+    return f
+
+
+def _v_bool(v):
+    if not isinstance(v, bool):
+        raise ValueError("must be true or false")
+    return v
+
+
+def _v_enum(*choices):
+    def f(v):
+        if v not in choices:
+            raise ValueError("must be one of " + ", ".join(repr(c) for c in choices))
+        return v
+    return f
+
+
+def _v_strlist(max_items, max_len, choices=None):
+    def f(v):
+        if not isinstance(v, list) or len(v) > max_items:
+            raise ValueError(f"must be a list of at most {max_items} items")
+        out = []
+        for x in v:
+            if not isinstance(x, str) or len(x) > max_len:
+                raise ValueError("list items must be short text")
+            if choices and x not in choices:
+                raise ValueError("must only contain " + ", ".join(choices))
+            if x not in out:
+                out.append(x)
+        return out
+    return f
+
+
+SETTINGS_VALIDATORS = {
+    "meal_types": _v_strlist(len(_MEAL_TYPES), 20, _MEAL_TYPES),
+    "no_repeat_days": _v_int(0, 365),
+    "prefer_expiring": _v_bool,
+    "include_tags": _v_strlist(200, 80),
+    "exclude_tags": _v_strlist(200, 80),
+    "fill_empty_only": _v_bool,
+    "auto_plan_day": _v_enum("", "mon", "tue", "wed", "thu", "fri", "sat", "sun"),
+    "auto_plan_email": _v_bool,
+    "expiry_alert": _v_bool,
+    "expiry_alert_hour": _v_int(0, 23),
+    "recipe_style": _v_enum("classic", "steps"),
+    "stove": _v_enum("gas", "electric", "induction"),
+    "oven": _v_enum("conventional", "convection"),
+    "temp_unit": _v_enum("F", "C"),
+    "ai_budget": _v_num(0, 100_000),
+    "pantry_check_days": _v_int(0, 365),
+    "expiring_window_days": _v_int(0, 60),
+}
+
+
+def validate_setting(k, v):
+    try:
+        return SETTINGS_VALIDATORS[k](v)
+    except (ValueError, TypeError, OverflowError) as e:
+        raise ApiError(400, f"Setting {k} {e}.")
+
+
 def save_settings(patch):
-    allowed = set(DEFAULT_SETTINGS)
+    clean = {k: validate_setting(k, v) for k, v in patch.items() if k in DEFAULT_SETTINGS}
     with db() as c:
-        for k, v in patch.items():
-            if k in allowed:
-                c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                          (k, json.dumps(v)))
+        for k, v in clean.items():
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (k, json.dumps(v)))
     return get_settings()
 
 
@@ -358,10 +458,18 @@ def make_session():
 def valid_session(tok):
     try:
         ts, sig = tok.split(".", 1)
+        if not ts.isdigit() or len(ts) > 12:
+            return False
         good = hmac.new(cfg("session_secret").encode(), ts.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(sig, good) and time.time() - int(ts) < 180 * 86400
-    except (ValueError, AttributeError):
+        age = time.time() - int(ts)
+        return hmac.compare_digest(sig.encode(), good.encode()) and -300 < age < SESSION_DAYS * 86400
+    except (ValueError, AttributeError, TypeError):
         return False
+
+
+def rotate_sessions():
+    """Invalidate every existing sign-in (sessions are HMAC-signed with this secret)."""
+    set_cfg(session_secret=base64.urlsafe_b64encode(os.urandom(32)).decode())
 
 
 def auth_required():
@@ -369,19 +477,84 @@ def auth_required():
 
 
 def password_ok(pw):
+    if not isinstance(pw, str) or len(pw) > 1024:
+        return False
     if cfg("app_password_hash"):
         return check_password(pw, cfg("app_password_hash"))
-    return PUBLIC_MODE and hmac.compare_digest(pw.strip().upper(), SETUP_CODE)
+    code = re.sub(r"[\s-]+", "", pw).upper()
+    return PUBLIC_MODE and hmac.compare_digest(code.encode(), SETUP_CODE.encode())
 
 
 _login_fails = {}
+_login_lock = threading.Lock()
+LOGIN_FAILS_PER_IP = 8          # per 10 minutes
+LOGIN_FAILS_GLOBAL = 60         # per 10 minutes, across all addresses (slows distributed guessing)
+
+
+def _recent_fails(now):
+    for ip in list(_login_fails):
+        fails = [t for t in _login_fails[ip] if now - t < 600]
+        if fails:
+            _login_fails[ip] = fails
+        else:
+            del _login_fails[ip]
 
 
 def login_throttled(ip):
     now = time.time()
-    fails = [t for t in _login_fails.get(ip, []) if now - t < 600]
-    _login_fails[ip] = fails
-    return len(fails) >= 8
+    with _login_lock:
+        _recent_fails(now)
+        total = sum(len(v) for v in _login_fails.values())
+        return len(_login_fails.get(ip, [])) >= LOGIN_FAILS_PER_IP or total >= LOGIN_FAILS_GLOBAL
+
+
+def login_failed(ip):
+    with _login_lock:
+        _login_fails.setdefault(ip, []).append(time.time())
+
+
+def login_succeeded(ip):
+    with _login_lock:
+        _login_fails.pop(ip, None)
+
+
+# ---- per-client rate limits for expensive work (imports, AI, outbound fetches) in public mode
+
+_rate = {}
+_rate_lock = threading.Lock()
+RATE_LIMITS = {   # bucket: (requests, per seconds)
+    "import": (20, 3600),
+    "ai": (60, 3600),
+    "fetch": (300, 3600),
+}
+
+
+def rate_ok(bucket, ip):
+    if not PUBLIC_MODE:
+        return True
+    limit, window = RATE_LIMITS[bucket]
+    now = time.time()
+    with _rate_lock:
+        if len(_rate) > 5000:   # bound memory
+            for k in [k for k, v in _rate.items() if not v or now - v[-1] > window]:
+                del _rate[k]
+        hits = [t for t in _rate.get((bucket, ip), []) if now - t < window]
+        if len(hits) >= limit:
+            _rate[(bucket, ip)] = hits
+            return False
+        hits.append(now)
+        _rate[(bucket, ip)] = hits
+        return True
+
+
+# Heavy imports (page scraping, video download + transcription, AI) run a few at a time.
+_heavy = threading.BoundedSemaphore(int(env("TABLEPLAN_MAX_IMPORTS", "3") or 3))
+# Background follow-up work (AI step-by-step prep, photo lookups) runs on a small fixed pool.
+_bg_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp-bg")
+
+
+def background(fn, *a):
+    _bg_pool.submit(_safe, fn, *a)
 
 
 # ============================================================ USDA FoodKeeper
@@ -458,11 +631,9 @@ def sync_usda(raw_bytes=None):
         if os.path.exists(local):
             raw_bytes = open(local, "rb").read()
         else:
-            req = urllib.request.Request(FOODKEEPER_URL, headers={
-                "User-Agent": "Mozilla/5.0 (TablePlan self-hosted; FoodKeeper sync)",
-                "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                raw_bytes = r.read()
+            with _open(FOODKEEPER_URL, headers={"User-Agent": "Mozilla/5.0 (TablePlan self-hosted; FoodKeeper sync)",
+                                                "Accept": "application/json"}, timeout=60, allow_private=True) as r:
+                raw_bytes = _read_capped(r, 50_000_000, 300)
     rules = parse_foodkeeper(json.loads(raw_bytes.decode("utf-8-sig")))
     if len(rules) < 50:
         raise ValueError(f"FoodKeeper data looked incomplete ({len(rules)} products)")
@@ -558,6 +729,20 @@ def parse_date(s):
         return date.fromisoformat(str(s)[:10])
     except ValueError:
         return None
+
+
+MAX_RANGE_DAYS = 400
+
+
+def date_range(start_raw, end_raw):
+    """Start/end dates from a request, defaulting to a week, capped so one request can't loop over centuries."""
+    start = parse_date(start_raw) or today()
+    end = parse_date(end_raw) or start + timedelta(days=6)
+    if end < start:
+        end = start
+    if (end - start).days > MAX_RANGE_DAYS:
+        raise ApiError(400, f"Pick a range of at most {MAX_RANGE_DAYS} days.")
+    return start, end
 
 
 def sealed_days(rule, loc):
@@ -766,6 +951,25 @@ class ApiError(Exception):
         self.status, self.message = status, message
 
 
+def _s(v, max_len=None):
+    """A request field as text: None -> "", anything that isn't a string -> 400."""
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        raise ApiError(400, "Expected text.")
+    if max_len is not None and len(v) > max_len:
+        raise ApiError(400, f"That's too long ({max_len} characters max).")
+    return v
+
+
+def _q(s):
+    """Quote one URL path segment (a slash or '..' in a slug can't reach another API path)."""
+    return urllib.parse.quote(str(s or ""), safe="")
+
+
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
 def mealie_raw(method, path, body=None, token=None, form=None, multipart=None, timeout=25, base=None):
     """Low-level Mealie call. body=JSON, form=urlencoded dict, multipart=(fields, files)."""
     base = (base or cfg("mealie_url")).rstrip("/")
@@ -794,10 +998,10 @@ def mealie_raw(method, path, body=None, token=None, form=None, multipart=None, t
         parts.append(f"--{boundary}--\r\n".encode())
         data = b"".join(parts)
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-    req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read()
+        # Mealie is an admin-configured service, usually on the home network, so private addresses are allowed.
+        with _open(base + path, data=data, method=method, headers=headers, timeout=timeout, allow_private=True) as r:
+            raw = _read_capped(r, 200_000_000, max(timeout, 300))
             try:
                 return json.loads(raw) if raw else None
             except ValueError:
@@ -815,6 +1019,8 @@ def mealie_raw(method, path, body=None, token=None, form=None, multipart=None, t
         except ValueError:
             pass
         raise MealieHTTPError(e.code, detail)
+    except BlockedURL as e:
+        raise ApiError(400, f"That Mealie address can't be used ({e}).")
     except urllib.error.URLError as e:
         raise ApiError(502, f"Can't reach Mealie at {base} ({e.reason}). Is the Mealie container running?")
     except (TimeoutError, OSError) as e:
@@ -888,27 +1094,57 @@ def _ing_line(ing):
     return (ing.get("originalText") or ing.get("display") or ing.get("note") or "").strip()
 
 
+def decode_content(raw, encoding, cap):
+    """Undo gzip/deflate Content-Encoding, never inflating past `cap` bytes (decompression-bomb safe)."""
+    if encoding in ("", "identity"):
+        return raw
+    if encoding in ("gzip", "x-gzip"):
+        wbits_options = (16 + zlib.MAX_WBITS,)
+    elif encoding == "deflate":
+        wbits_options = (zlib.MAX_WBITS, -zlib.MAX_WBITS)   # zlib-wrapped, or raw deflate from some servers
+    else:
+        raise ApiError(502, f"That page uses an unsupported compression ({encoding[:20]}).")
+    for wbits in wbits_options:
+        try:
+            d = zlib.decompressobj(wbits)
+            out = d.decompress(raw, cap)   # truncated at cap, like an uncompressed page
+            return out
+        except zlib.error:
+            continue
+    raise ApiError(502, "That page's compressed content couldn't be read. Try a screenshot instead.")
+
+
 def _fetch_page(url):
     if not re.match(r"^https?://", url or "") or not _public_host(url):
         raise ApiError(400, "That link can't be opened. Use a public https:// recipe page.")
-    req = urllib.request.Request(url, headers={
+    headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"})
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate"}
     try:
-        with urllib.request.urlopen(req, timeout=25) as r:
+        with _open(url, headers=headers, timeout=25) as r:
             final = r.geturl()
-            if not _public_host(final):
-                raise ApiError(400, "That link redirects somewhere TablePlan can't open.")
-            raw = r.read(6_000_000)
+            encoding = (r.headers.get("Content-Encoding") or "").strip().lower()
+            raw = _read_capped(r, 6_000_000, 60, truncate=not encoding)
             charset = r.headers.get_content_charset() or "utf-8"
+        raw = decode_content(raw, encoding, 6_000_000)
+    except BlockedURL:
+        raise ApiError(400, "That link redirects somewhere TablePlan can't open.")
     except urllib.error.HTTPError as e:
         if e.code in (401, 402, 403, 429):
-            raise ApiError(502, "That site blocks apps from reading its recipes (it may need a subscription). "
+            raise ApiError(502, "That site blocked TablePlan from reading it. "
                                 "Take screenshots of the recipe and use the Screenshot tab instead.")
         raise ApiError(502, f"The site returned an error ({e.code}). Try a screenshot instead.")
     except urllib.error.URLError as e:
         raise ApiError(502, f"Couldn't open that page ({e.reason}).")
-    return final, raw.decode(charset, errors="replace")
+    except (TimeoutError, OSError, http.client.HTTPException):
+        raise ApiError(504, "That page took too long to load. Try again, or use a screenshot instead.")
+    except ValueError:
+        raise ApiError(502, "That page is too large to read. Try a screenshot instead.")
+    try:
+        return final, raw.decode(charset, errors="replace")
+    except LookupError:   # unknown charset name from the server
+        return final, raw.decode("utf-8", errors="replace")
 
 
 AI_RECIPE_SCHEMA = {
@@ -1169,7 +1405,7 @@ def recipe_foods(recipes):
 
     def fetch(r):
         try:
-            d = mealie("GET", f"/api/recipes/{urllib.parse.quote(r['slug'] or r['id'])}")
+            d = mealie("GET", f"/api/recipes/{_q(r['slug'] or r['id'])}")
             toks = set()
             for ing in d.get("recipeIngredient") or []:
                 food = (ing.get("food") or {}).get("name") or ing.get("note") or ing.get("display") or ""
@@ -1230,7 +1466,7 @@ def _filtered_pool(opts):
 
 def generate_plan(opts):
     settings = get_settings()
-    o = {**settings, **{k: v for k, v in opts.items() if v is not None}}
+    o = {**settings, **{k: (validate_setting(k, v) if k in SETTINGS_VALIDATORS else v) for k, v in opts.items() if v is not None}}
     start = parse_date(o.get("start")) or today()
     days = max(1, min(62, int(o.get("days") or 7)))
     end = start + timedelta(days=days - 1)
@@ -1332,7 +1568,7 @@ def reroll(opts):
         pd = parse_date(e.get("date"))
         if pd and e.get("recipe_id") and not (pd == d and e.get("entry_type") == opts.get("entry_type")):
             used.setdefault(e["recipe_id"], []).append(pd)
-    no_repeat = int(opts.get("no_repeat_days") or get_settings()["no_repeat_days"])
+    no_repeat = max(0, min(365, int(opts.get("no_repeat_days") or get_settings()["no_repeat_days"])))
     r = _pick(pool, d, 99, no_repeat, used, {}, {}, exclude)
     return _proposal(d, opts.get("entry_type") or "dinner", r, {})
 
@@ -1452,7 +1688,7 @@ def set_checked(sl, item_id, checked):
         raise ApiError(404, "Item not on this list")
     payload = {k: v for k, v in item.items() if k not in ("createdAt", "updatedAt", "update_at", "created_at")}
     payload["checked"] = checked
-    mealie("PUT", f"/api/households/shopping/items/{urllib.parse.quote(item_id)}", payload)
+    mealie("PUT", f"/api/households/shopping/items/{_q(item_id)}", payload)
     return item
 
 
@@ -1590,11 +1826,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#8e8e93}
 
 def print_page(title, sub, body):
     e = html.escape
+    nonce = getattr(_req, "nonce", "") or ""
+    # No inline event handlers: the page's only script carries the per-response CSP nonce.
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{e(title)}</title><style>{PRINT_CSS}</style></head><body>
-<div class="bar"><button class="sec" onclick="history.length>1?history.back():window.close()">Done</button><button onclick="window.print()">Print</button></div>
+<div class="bar"><button class="sec" id="tp-done">Done</button><button id="tp-print">Print</button></div>
 <h1>{e(title)}</h1><div class="sub">{e(sub)}</div>{body}
-<script>if(location.search.includes('auto=1'))setTimeout(()=>window.print(),300)</script></body></html>"""
+<script nonce="{e(nonce)}">document.getElementById('tp-done').onclick=()=>history.length>1?history.back():window.close();
+document.getElementById('tp-print').onclick=()=>window.print();
+if(location.search.includes('auto=1'))setTimeout(()=>window.print(),300)</script></body></html>"""
 
 
 def print_list(sl):
@@ -1675,7 +1915,7 @@ def send_email(subject, text, html_body, attachments=(), to=None, conf=None):
     c = conf or {}
     msg = EmailMessage()
     sender = (c.get("smtp_from") if conf else cfg("smtp_from")) or (c.get("smtp_user") if conf else cfg("smtp_user"))
-    msg["Subject"], msg["From"] = subject, sender
+    msg["Subject"], msg["From"] = re.sub(r"[\r\n]+", " ", subject)[:250], sender
     msg["To"] = ", ".join(to or (c.get("mail_to") if conf else cfg("mail_to")))
     msg.set_content(text)
     msg.add_alternative(html_body, subtype="html")
@@ -1692,7 +1932,7 @@ def email_wrap(inner):
 # ---- messages: one builder per kind, delivered to any channel (email, Telegram, ntfy)
 
 def _print_body(page):
-    return page.split("</div>", 1)[1].split("<script>")[0]  # drop the button bar + script
+    return page.split("</div>", 1)[1].split("<script")[0]  # drop the button bar + script
 
 
 def msg_list(list_id):
@@ -1777,8 +2017,7 @@ def build_msg(b):
     if kind == "list":
         return msg_list(b["id"])
     if kind == "plan":
-        s0 = parse_date(b.get("start")) or today()
-        return msg_plan(s0, parse_date(b.get("end")) or s0 + timedelta(days=6))
+        return msg_plan(*date_range(b.get("start"), b.get("end")))
     if kind == "pantry":
         return msg_pantry()
     if kind == "test":
@@ -1803,25 +2042,39 @@ def _multipart(fields, files):
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-def _https_json(url, payload=None, headers=None, data=None, ctype=None, timeout=20, method=None):
+def _https_json(url, payload=None, headers=None, data=None, ctype=None, timeout=20, method=None, allow_private=False,
+                max_bytes=10_000_000):
     h = {"User-Agent": f"TablePlan/{APP_VERSION}", "Accept": "application/json", **(headers or {})}
     if payload is not None:
         data, ctype = json.dumps(payload).encode(), "application/json"
     if ctype:
         h["Content-Type"] = ctype
-    req = urllib.request.Request(url, data=data, headers=h, method=method or ("POST" if data is not None else "GET"))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:   # TLS certificates are verified by default
-            raw = r.read()
-            return json.loads(raw) if raw else {}
+        with _open(url, data=data, headers=h, method=method or ("POST" if data is not None else "GET"),
+                   timeout=timeout, allow_private=allow_private) as r:   # TLS certificates are verified by default
+            raw = _read_capped(r, max_bytes, max(timeout, 60))
+        try:
+            out = json.loads(raw) if raw else {}
+        except ValueError:
+            raise ApiError(502, "The service sent an unreadable reply.")
+        return out if isinstance(out, dict) else {"data": out}
     except urllib.error.HTTPError as e:
         try:
-            body = json.loads(e.read().decode("utf-8", "replace"))
+            body = json.loads(e.read(65536).decode("utf-8", "replace"))
         except ValueError:
             body = {}
-        raise ApiError(502, body.get("description") or body.get("error") or f"HTTP {e.code}")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        if not isinstance(body, dict):
+            body = {}
+        err = body.get("description") or body.get("error") or body.get("message")
+        if isinstance(err, dict):
+            err = err.get("message")
+        raise ApiError(502, str(err)[:300] if err else f"HTTP {e.code}")
+    except BlockedURL as e:
+        raise ApiError(400, f"That server address isn't allowed ({e}).")
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
         raise ApiError(502, f"Couldn't connect ({getattr(e, 'reason', e)})")
+    except ValueError as e:   # response too large
+        raise ApiError(502, f"Couldn't read the reply ({e})")
 
 
 # ---- Telegram (bot API, outbound only: no webhook, nothing exposed to the internet)
@@ -1834,7 +2087,8 @@ def _tg(method, token=None, **kw):
     token = token or cfg("telegram_token")
     if not token:
         raise ApiError(400, "Telegram isn't set up.")
-    res = _https_json(f"{TELEGRAM_API}/bot{token}/{method}", **kw)
+    # A self-hosted Bot API server (TELEGRAM_API_URL, set by the operator) may live on the home network.
+    res = _https_json(f"{TELEGRAM_API}/bot{token}/{method}", allow_private=TELEGRAM_API != "https://api.telegram.org", **kw)
     if not res.get("ok", False):
         raise ApiError(502, res.get("description") or "Telegram error")
     return res.get("result")
@@ -1913,20 +2167,29 @@ def ntfy_send(msg, conf=None):
     if len(body.encode()) > 3800:
         body = body.encode()[:3700].decode("utf-8", "ignore") + "\n… (open TablePlan for the rest)"
     headers = {"Authorization": f"Bearer {c['ntfy_token']}"} if c.get("ntfy_token") else {}
+    # On the home network a self-hosted ntfy may be on a LAN address; on the internet only public servers are allowed.
     _https_json(server + "/", payload={"topic": c["ntfy_topic"], "title": msg["subject"], "message": body,
-                                        "tags": ["fork_and_knife"]}, headers=headers)
+                                        "tags": ["fork_and_knife"]}, headers=headers, allow_private=not PUBLIC_MODE)
 
 
 def ntfy_setup(b):
-    server = (b.get("server") or "https://ntfy.sh").strip().rstrip("/")
-    if not re.match(r"^https://[^\s/]+", server) and not re.match(r"^http://(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[^./]+(:\d+)?$)", server):
+    server = _s(b.get("server")) or "https://ntfy.sh"
+    server = server.strip().rstrip("/")
+    if PUBLIC_MODE and not (re.match(r"^https://[^\s/@]+", server) and _public_host(server)):
+        raise ApiError(400, "Use a public https:// ntfy server (like https://ntfy.sh).")
+    if not re.match(r"^https://[^\s/@]+", server) and not re.match(r"^http://(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[^./@]+(:\d+)?$)", server):
         raise ApiError(400, "Use an https:// ntfy server (plain http is only allowed for servers on your home network).")
-    topic = (b.get("topic") or "").strip()
+    topic = _s(b.get("topic")).strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", topic):
         raise ApiError(400, "Topic must be 8–64 letters, numbers, - or _. Use the random one suggested.")
-    if "ntfy.sh" in server and len(topic) < 20 and not b.get("token"):
+    token = _s(b.get("token")).strip()
+    if token and not re.fullmatch(r"[\x21-\x7e]{1,200}", token):
+        raise ApiError(400, "That access token doesn't look right.")
+    if "ntfy.sh" in server and len(topic) < 20 and not token:
         raise ApiError(400, "On the public ntfy.sh server anyone who guesses the topic can read it. Use the long random topic, or add an access token.")
-    conf = {"ntfy_server": server, "ntfy_topic": topic, "ntfy_token": (b.get("token") or "").strip() or cfg("ntfy_token") or ""}
+    # Keep the saved token only for the same server, so it's never sent to a different one.
+    keep = cfg("ntfy_token") if (cfg("ntfy_server") or "https://ntfy.sh").rstrip("/") == server else ""
+    conf = {"ntfy_server": server, "ntfy_topic": topic, "ntfy_token": token or keep or ""}
     ntfy_send(msg_test("ntfy"), conf)
     set_cfg(**conf)
     return ntfy_public()
@@ -2058,13 +2321,19 @@ def ai_status():
 
 
 def ai_setup(api_key, model, audio, base_url=None):
-    api_key = (api_key or "").strip()
-    model = (model or "gpt-5-mini").strip()
+    api_key = _s(api_key, 400).strip()
+    model = _s(model, 64).strip() or "gpt-5-mini"
     if not api_key:
         raise ApiError(400, "Paste your OpenAI API key.")
+    if not re.fullmatch(r"[\x21-\x7e]+", api_key):
+        raise ApiError(400, "That doesn't look like an OpenAI API key.")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", model):
+        raise ApiError(400, "That model name doesn't look right (for example gpt-5-mini).")
+    if base_url is not None and not isinstance(base_url, str):
+        raise ApiError(400, "Expected text.")
     if NATIVE:
         try:
-            _https_json(f"https://api.openai.com/v1/models/{urllib.parse.quote(model)}", headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
+            _https_json(f"https://api.openai.com/v1/models/{_q(model)}", headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
         except ApiError as e:
             raise ApiError(400, f"OpenAI didn't accept that key or model ({e.message}).")
         set_cfg(openai_key=api_key, openai_model=model)
@@ -2104,24 +2373,44 @@ SMTP_PRESETS = {
 }
 
 
+EMAIL_RE = re.compile(r"[^@\s<>,;\"']{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}")
+
+
 def email_setup(b):
-    conf = {**SMTP_PRESETS.get(b.get("preset") or "", {})}
+    conf = {**SMTP_PRESETS.get(_s(b.get("preset")), {})}
     for k in ("smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from"):
         if b.get(k) not in (None, ""):
-            conf[k] = b[k]
+            conf[k] = b[k] if k == "smtp_port" else _s(b[k], 254).strip()
     conf.setdefault("smtp_port", 587)
     conf.setdefault("smtp_security", "starttls")
-    conf["smtp_port"] = int(conf["smtp_port"])
+    try:
+        conf["smtp_port"] = _v_int(1, 65535)(conf["smtp_port"])
+    except (ValueError, TypeError):
+        raise ApiError(400, "The SMTP port must be a number between 1 and 65535.")
     if conf["smtp_security"] not in ("starttls", "ssl", "none"):
         raise ApiError(400, "Security must be starttls, ssl or none.")
-    conf["smtp_password"] = b.get("smtp_password") or cfg("smtp_password")
+    if not conf.get("smtp_host"):
+        raise ApiError(400, "Pick your email provider or enter the SMTP server.")
+    if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]+\]", conf["smtp_host"]):
+        raise ApiError(400, "Enter the SMTP server name, like smtp.gmail.com.")
+    if PUBLIC_MODE and not _public_host(f"https://{conf['smtp_host']}"):
+        raise ApiError(400, "That email server isn't on the public internet.")
+    if re.search(r"[\r\n]", conf.get("smtp_user") or ""):
+        raise ApiError(400, "That username doesn't look right.")
+    # A saved password is only reused for the same server and user, so it's never sent anywhere new.
+    same = conf["smtp_host"] == cfg("smtp_host") and (conf.get("smtp_user") or "") == (cfg("smtp_user") or "")
+    conf["smtp_password"] = _s(b.get("smtp_password"), 1024) or (cfg("smtp_password") if same else "")
     conf["smtp_from"] = conf.get("smtp_from") or conf.get("smtp_user")
+    if conf["smtp_from"] and not EMAIL_RE.fullmatch(conf["smtp_from"]):
+        raise ApiError(400, "The From address doesn't look like an email address.")
     to = b.get("mail_to")
     if isinstance(to, str):
         to = [a.strip() for a in re.split(r"[,;\s]+", to) if a.strip()]
+    if to is not None and not (isinstance(to, list) and all(isinstance(a, str) for a in to)):
+        raise ApiError(400, "Add the addresses to send to, separated by commas.")
     conf["mail_to"] = to or ([conf["smtp_from"]] if conf.get("smtp_from") else [])
-    if not conf.get("smtp_host"):
-        raise ApiError(400, "Pick your email provider or enter the SMTP server.")
+    if len(conf["mail_to"]) > 20 or not all(EMAIL_RE.fullmatch(a) for a in conf["mail_to"]):
+        raise ApiError(400, "One of those addresses doesn't look like an email address (20 max).")
     if not conf["mail_to"]:
         raise ApiError(400, "Add at least one address to send lists to.")
     if b.get("test", True):
@@ -2166,19 +2455,32 @@ def import_images(images, text=None):
         raise ApiError(400, "Add at least one photo or screenshot.")
     if not ai_status().get("enabled"):
         raise ApiError(400, "Screenshot import needs AI — add your OpenAI key in Settings → AI recipe import.")
+    if not isinstance(images, list) or not all(isinstance(im, dict) and isinstance(im.get("data"), str) for im in images):
+        raise ApiError(400, "Expected a list of images.")
+    text = _s(text, 40000) or None
+    for im in images:   # only images and PDFs go to the AI
+        head = im["data"][:40]
+        if head.startswith("data:") and not re.match(r"data:(image/(jpeg|jpg|png|webp|gif|heic|heif)|application/pdf);base64,", head):
+            raise ApiError(400, "Upload photos, screenshots or PDFs.")
+        if not isinstance(im.get("name"), (str, type(None))) or not isinstance(im.get("type"), (str, type(None))):
+            raise ApiError(400, "Expected a list of images.")
     files = []
     total = 0
     for i, im in enumerate(images[:8]):
-        blob = base64.b64decode(im["data"].split(",", 1)[-1])
+        try:
+            blob = base64.b64decode(im["data"].split(",", 1)[-1])
+        except ValueError:
+            raise ApiError(400, "One of those files couldn't be read.")
         total += len(blob)
         if total > 25_000_000:
             raise ApiError(413, "Those images are too large together (25 MB max).")
-        files.append(("images", im.get("name") or f"image{i}.jpg", im.get("type") or "image/jpeg", blob))
+        ctype = im.get("type") if re.fullmatch(r"image/[a-z0-9.+-]{1,40}", im.get("type") or "") else "image/jpeg"
+        files.append(("images", im.get("name") or f"image{i}.jpg", ctype, blob))
     if NATIVE:
         data = ai_recipe(text or "", images[:8], "screenshot import", f"{len(images[:8])} image(s)")
         slug = _save_new_recipe(data)
         if data.get("orgURL"):   # the screenshot showed the web address: fetch that page's photo in the background
-            threading.Thread(target=lambda: _safe(recipe_image_next, slug), daemon=True).start()
+            background(recipe_image_next, slug)
         return _imported(slug)
     if cfg("openai_key"):
         transcript = transcribe_images(images, text)
@@ -2269,7 +2571,7 @@ def clean_food(name):
 # ============================================================ in-app recipe editing (saves to Mealie)
 
 def recipe_update(slug, b):
-    r = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+    r = mealie("GET", f"/api/recipes/{_q(slug)}")
     if "name" in b:
         name = (b.get("name") or "").strip()
         if not name:
@@ -2314,7 +2616,7 @@ def recipe_update(slug, b):
             st["text"] = text
             steps.append(st)
         r["recipeInstructions"] = steps
-    out = mealie("PUT", f"/api/recipes/{urllib.parse.quote(slug)}", r)
+    out = mealie("PUT", f"/api/recipes/{_q(slug)}", r)
     _recipe_cache["at"] = 0
     with db() as c:
         c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (r.get("id"),))
@@ -2322,7 +2624,7 @@ def recipe_update(slug, b):
 
 
 def recipe_delete(slug):
-    mealie("DELETE", f"/api/recipes/{urllib.parse.quote(slug)}")
+    mealie("DELETE", f"/api/recipes/{_q(slug)}")
     _recipe_cache["at"] = 0
     return {"ok": True}
 
@@ -2389,9 +2691,8 @@ def import_from_mealie(b):
 
     def mb(path):
         try:
-            req = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return r.read(MAX_IMG + 1)
+            with _open(base + path, headers={"Authorization": f"Bearer {token}"}, timeout=30, allow_private=True) as r:
+                return _read_capped(r, MAX_IMG, 120)
         except Exception:
             return None
     m("GET", "/api/users/self")
@@ -2408,7 +2709,7 @@ def import_from_mealie(b):
 
 # ============================================================ more import sources: videos, Google Docs, pasted text
 
-VIDEO_HOSTS = re.compile(r"(^|\.)(instagram\.com|tiktok\.com|youtube\.com|youtu\.be|facebook\.com|fb\.watch|pinterest\.com|pin\.it|threads\.net)$", re.I)
+VIDEO_HOSTS = re.compile(r"(^|\.)(instagram\.com|tiktok\.com|youtube\.com|youtu\.be|facebook\.com|fb\.watch|pinterest\.com|pin\.it|threads\.net|threads\.com)$", re.I)
 GDOC_RE = re.compile(r"^https://docs\.google\.com/document/d/([A-Za-z0-9_-]{20,})")
 
 
@@ -2481,13 +2782,15 @@ def import_text(text, title=""):
 
 def import_gdoc(url):
     doc = GDOC_RE.match(url).group(1)
-    req = urllib.request.Request(f"https://docs.google.com/document/d/{doc}/export?format=txt", headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=25) as r:
+        with _open(f"https://docs.google.com/document/d/{doc}/export?format=txt", headers={"User-Agent": "Mozilla/5.0"},
+                   timeout=25) as r:
             final = r.geturl()
-            body = r.read(3_000_000).decode("utf-8-sig", errors="replace")
-    except urllib.error.HTTPError:
+            body = _read_capped(r, 3_000_000, 60, truncate=True).decode("utf-8-sig", errors="replace")
+    except (urllib.error.HTTPError, BlockedURL):
         body, final = "", ""
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
+        raise ApiError(502, f"Couldn't open that Google Doc ({getattr(e, 'reason', e)}).")
     if "accounts.google.com" in final or "<html" in body[:500].lower() or not body.strip():
         raise ApiError(403, "That Google Doc is private. In Google Docs tap Share → General access → 'Anyone with the link', "
                             "then try again. (Or copy the text and use the Paste tab.)")
@@ -2517,12 +2820,71 @@ class _YtdlpQuiet:
     def error(self, msg): log("yt-dlp:", msg[:200])
 
 
+# yt-dlp will fetch anything it is handed, so it only ever gets URLs on these hosts, and only the dedicated
+# extractors for them are loaded (never the "generic" extractor, which follows arbitrary links and redirects).
+VIDEO_EXTRACTORS = [r"(?:youtube|instagram|tiktok|vm\.tiktok|facebook|pinterest)(?::.*)?"]
+SHORT_LINK_HOSTS = re.compile(r"(^|\.)(pin\.it|fb\.watch)$", re.I)
+CAPTION_ONLY_HOSTS = re.compile(r"(^|\.)(threads\.net|threads\.com)$", re.I)
+VIDEO_MAX_BYTES = 24_000_000
+VIDEO_MAX_SECONDS = 240
+
+
+def _video_url_ok(url):
+    try:
+        p = urllib.parse.urlparse(url)
+        host = p.hostname or ""
+    except ValueError:
+        return False
+    return p.scheme in ("http", "https") and not p.username and not p.password and bool(VIDEO_HOSTS.search(host))
+
+
+def _resolve_short_link(url):
+    """Follow a pin.it / fb.watch short link with the guarded opener and return where it lands."""
+    try:
+        with _open(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15) as r:
+            return r.geturl()
+    except urllib.error.HTTPError as e:
+        return e.geturl() or url
+    except (BlockedURL, urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
+        raise ApiError(400, "That short link couldn't be opened. Paste the full link to the post instead.")
+
+
+def _meta_content(page, *names):
+    for name in names:
+        for m in re.finditer(r"<meta\b[^>]*>", page[:400_000], re.I):
+            tag = m.group(0)
+            if re.search(r"""(?:property|name)\s*=\s*["']""" + re.escape(name) + r"""["']""", tag, re.I):
+                c = re.search(r"""content\s*=\s*("([^"]*)"|'([^']*)')""", tag, re.I | re.S)
+                if c:
+                    return html.unescape(c.group(2) if c.group(2) is not None else c.group(3) or "").strip()
+    return ""
+
+
 def import_video(url):
+    if not _video_url_ok(url):
+        raise ApiError(400, "Video import works with Instagram, TikTok, YouTube, Facebook, Pinterest and Threads links.")
+    if SHORT_LINK_HOSTS.search(urllib.parse.urlparse(url).hostname or ""):
+        url = _resolve_short_link(url)
+        if not _video_url_ok(url) or SHORT_LINK_HOSTS.search(urllib.parse.urlparse(url).hostname or ""):
+            raise ApiError(400, "That short link doesn't lead to a video post TablePlan can read.")
+    if CAPTION_ONLY_HOSTS.search(urllib.parse.urlparse(url).hostname or ""):
+        # No dedicated extractor: read the post's caption from the page itself (guarded fetch).
+        final, page = _fetch_page(url)
+        title = _meta_content(page, "og:title", "twitter:title")
+        caption = _meta_content(page, "og:description", "description", "twitter:description")
+        if not caption.strip():
+            raise ApiError(422, "Couldn't read that post's caption. Take screenshots of the post and use the Screenshot tab.")
+        data = recipe_from_text(caption, title, url, "video import")
+        if not data.get("name") or data["name"] == "Untitled recipe":
+            data["name"] = title or "Video recipe"
+        return _imported(_save_new_recipe(data, _meta_content(page, "og:image") or None))
     try:
         import yt_dlp
     except ImportError:
         raise ApiError(501, "Video import isn't available in this install. Update TablePlan, or use screenshots of the post.")
-    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "logger": _YtdlpQuiet(), "noplaylist": True, "skip_download": True, "socket_timeout": 20}
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "logger": _YtdlpQuiet(), "noplaylist": True,
+            "skip_download": True, "socket_timeout": 20, "allowed_extractors": VIDEO_EXTRACTORS,
+            "extract_flat": "in_playlist", "cachedir": False, "playlist_items": "1"}
     try:
         with yt_dlp.YoutubeDL(opts) as y:
             info = y.extract_info(url, download=False)
@@ -2531,8 +2893,10 @@ def import_video(url):
         if re.search(r"login|log in|private|rate|cookies", msg, re.I):
             raise ApiError(502, "That post can't be opened without logging in (private account or the site is blocking). "
                                 "Take screenshots of the caption and use the Screenshot tab.")
-        reason = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?[^:]*:\s*", "", msg.splitlines()[0]).split(";")[0][:90]
+        reason = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?[^:]*:\s*", "", msg.splitlines()[0] if msg else "").split(";")[0][:90]
         raise ApiError(502, f"Couldn't open that video ({reason}). Try again in a minute, or use screenshots of the post.")
+    if not isinstance(info, dict) or info.get("_type") in ("playlist", "multi_video", "url", "url_transparent"):
+        raise ApiError(400, "Paste a link to a single video or post, not a channel or playlist.")
     title = (info.get("title") or "").strip()
     caption = (info.get("description") or "").strip()
     thumb = info.get("thumbnail")
@@ -2543,35 +2907,43 @@ def import_video(url):
                 raise ApiError(400, "This video's recipe is spoken, not written. Add your OpenAI key in Settings → AI recipe import so TablePlan can listen to it.")
         else:   # recipe is spoken: grab the smallest version and transcribe it
             import tempfile
-            with tempfile.TemporaryDirectory() as tmp:
-                dl = {**opts, "skip_download": False, "outtmpl": os.path.join(tmp, "clip.%(ext)s"),
-                      "format": "worstaudio[filesize<24M]/worst[filesize<24M]/worstaudio/worst", "max_filesize": 24_000_000}
+            started = time.monotonic()
+
+            def guard(d):   # abort oversized or slow downloads even when the size isn't known up front
+                if (d.get("downloaded_bytes") or 0) > VIDEO_MAX_BYTES or time.monotonic() - started > VIDEO_MAX_SECONDS:
+                    raise yt_dlp.utils.DownloadError("download too large or too slow")
+
+            with tempfile.TemporaryDirectory(prefix="tableplan-video-") as tmp:
+                dl = {**opts, "skip_download": False, "outtmpl": os.path.join(tmp, "clip.%(ext)s"), "paths": {"home": tmp},
+                      "format": "worstaudio[filesize<24M]/worst[filesize<24M]/worstaudio/worst",
+                      "max_filesize": VIDEO_MAX_BYTES, "progress_hooks": [guard], "restrictfilenames": True}
                 try:
                     with yt_dlp.YoutubeDL(dl) as y:
                         y.download([url])
-                    files = [os.path.join(tmp, f) for f in os.listdir(tmp)]
+                    files = [os.path.join(tmp, f) for f in os.listdir(tmp) if not f.endswith((".part", ".ytdl"))]
+                    files = [f for f in files if os.path.isfile(f) and not os.path.islink(f)]
                     if files and os.path.getsize(files[0]) < 25_000_000:
                         spoken = _transcribe(files[0])
                         text = f"Caption:\n{caption}\n\nWhat the cook says in the video:\n{spoken}"
                 except ApiError:
                     raise
                 except Exception as e:
-                    log("video download/transcribe failed:", e)
+                    log("video download/transcribe failed:", str(e)[:200])
     if not text.strip():
         raise ApiError(422, "Couldn't find a recipe in that video's caption or audio. Try screenshots instead.")
     data = recipe_from_text(text, title, url, "video import")
     if not data.get("name") or data["name"] == "Untitled recipe":
         data["name"] = title or "Video recipe"
-    return _imported(_save_new_recipe(data, thumb))
+    return _imported(_save_new_recipe(data, thumb if isinstance(thumb, str) else None))
 
 
 def _imported(slug):
     slug = slug.strip('"') if isinstance(slug, str) else slug
     if cfg("openai_key"):   # prepare the AI step-by-step version in the background so it's instant later
-        threading.Thread(target=lambda: _safe(guided, slug, True), daemon=True).start()
+        background(guided, slug, True)
     _recipe_cache["at"] = 0
     try:
-        r = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+        r = mealie("GET", f"/api/recipes/{_q(slug)}")
         ings = r.get("recipeIngredient") or []
         unparsed = sum(1 for i in ings if not (i.get("food") or i.get("unit")) and (i.get("note") or i.get("display")))
         return {"slug": slug, "name": r.get("name"), "id": r.get("id"), "has_image": bool(r.get("image")),
@@ -2613,7 +2985,7 @@ def favorite_ids():
 
 
 def set_favorite(slug, on):
-    mealie("POST" if on else "DELETE", f"/api/users/{mealie_user_id()}/favorites/{urllib.parse.quote(slug)}")
+    mealie("POST" if on else "DELETE", f"/api/users/{mealie_user_id()}/favorites/{_q(slug)}")
     _recipe_cache["at"] = 0
     return {"favorite": bool(on)}
 
@@ -2668,7 +3040,7 @@ def _num(v):
 
 
 def recipe_detail(slug):
-    r = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+    r = mealie("GET", f"/api/recipes/{_q(slug)}")
     with db() as c:
         pantry = {}
         for it in list_pantry(c):
@@ -3099,17 +3471,170 @@ IMG_DIR = os.path.join(DATA_DIR, "images")
 MAX_IMG = 8_000_000
 
 
-def _public_host(url):
-    host = urllib.parse.urlparse(url).hostname or ""
+# ---- outbound HTTP with SSRF protection
+#
+# Anything fetched on behalf of a user (recipe pages, images, Google Docs, video short links, ntfy in public mode)
+# goes through _open(): only http(s), every redirect hop re-checked, and the address actually connected to is
+# checked too (so a DNS answer that changes between the check and the connect can't reach an internal host).
+
+class BlockedURL(ValueError):
+    pass
+
+
+def _ip_public(addr):
     try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
+        ip = ipaddress.ip_address(str(addr).split("%", 1)[0])
+    except ValueError:
         return False
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False
-    return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        for embedded in (ip.ipv4_mapped, ip.sixtofour, (ip.teredo or (None, None))[1]):
+            if embedded is not None and not _ip_public(embedded):
+                return False
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved
+
+
+def _public_host(url):
+    """True when the URL is http(s) and every address its host resolves to is a public internet address."""
+    try:
+        p = urllib.parse.urlparse(url)
+        host, port = p.hostname or "", p.port
+    except ValueError:
+        return False
+    if p.scheme not in ("http", "https") or not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, port or (443 if p.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return False
+    return bool(infos) and all(_ip_public(info[4][0]) for info in infos)
+
+
+def _proxy_hosts():
+    hosts = set()
+    for u in urllib.request.getproxies().values():
+        try:
+            h = urllib.parse.urlparse(u if "://" in u else "http://" + u).hostname
+        except ValueError:
+            h = None
+        if h:
+            hosts.add(h.lower())
+    return hosts
+
+
+def _guarded_connection(conn):
+    """Replace http.client's connect so only public addresses are dialled (pinned to the checked address)."""
+    def create(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, *a, **kw):
+        host, port = address
+        if conn._tunnel_host or str(host).lower() in _proxy_hosts():
+            # Talking to a configured outbound proxy; the target was checked by URL before the request.
+            return socket.create_connection(address, timeout, source_address)
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        if not infos or not all(_ip_public(i[4][0]) for i in infos):
+            raise BlockedURL(f"refusing to connect to a private address for {host}")
+        err = None
+        for family, stype, proto, _, sa in infos:
+            sock = socket.socket(family, stype, proto)
+            try:
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(sa)
+                return sock
+            except OSError as e:
+                err = e
+                sock.close()
+        raise err or OSError("connection failed")
+    conn._create_connection = create
+    return conn
+
+
+class _GuardedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        _guarded_connection(self)
+
+
+class _GuardedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        _guarded_connection(self)
+
+
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_GuardedHTTPConnection, req)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self):
+        super().__init__(context=ssl.create_default_context())
+
+    def https_open(self, req):
+        return self.do_open(_GuardedHTTPSConnection, req, context=self._context)
+
+
+class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
+    max_redirections = 5
+
+    def __init__(self, allow_private):
+        super().__init__()
+        self.allow_private = allow_private
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newurl = urllib.parse.urljoin(req.full_url, newurl)
+        scheme = urllib.parse.urlparse(newurl).scheme.lower()
+        if scheme not in ("http", "https") or (not self.allow_private and not _public_host(newurl)):
+            raise BlockedURL("redirect to a non-public address blocked")
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.remove_header("Authorization")   # never forward credentials to a redirect target
+        return new
+
+
+def _opener(allow_private=False):
+    """An opener that only speaks http/https (no file://, ftp:// or data:) and re-checks every redirect."""
+    op = urllib.request.OpenerDirector()
+    for h in (urllib.request.ProxyHandler(), urllib.request.UnknownHandler(), urllib.request.HTTPDefaultErrorHandler(),
+              urllib.request.HTTPErrorProcessor(), _CheckedRedirects(allow_private),
+              urllib.request.HTTPHandler() if allow_private else _GuardedHTTPHandler(),
+              urllib.request.HTTPSHandler(context=ssl.create_default_context()) if allow_private else _GuardedHTTPSHandler()):
+        op.add_handler(h)
+    return op
+
+
+def _open(url, data=None, headers=None, method=None, timeout=20, allow_private=False):
+    """urlopen() with scheme, redirect and private-address checks. Raises BlockedURL for refused targets."""
+    if urllib.parse.urlparse(url).scheme.lower() not in ("http", "https"):
+        raise BlockedURL("only http(s) links are supported")
+    if not allow_private and not _public_host(url):
+        raise BlockedURL("that address isn't on the public internet")
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        return _opener(allow_private).open(req, timeout=timeout)
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, BlockedURL):
+            raise e.reason
+        raise
+
+
+def _read_capped(resp, cap, total_timeout=120, truncate=False):
+    """Read at most `cap` bytes within `total_timeout` seconds (truncate=True keeps the first `cap` bytes)."""
+    deadline = time.monotonic() + total_timeout
+    chunks, n = [], 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("download took too long")
+        chunk = resp.read(min(65536, cap + 1 - n))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        n += len(chunk)
+        if n > cap:
+            if truncate:
+                return b"".join(chunks)[:cap]
+            raise ValueError("response too large")
+    return b"".join(chunks)
 
 
 def _fetch_image(url):
@@ -3119,17 +3644,14 @@ def _fetch_image(url):
         url = "https://" + url[7:]
     if not url.startswith("https://") or not _public_host(url):
         raise ValueError("refusing non-public or non-https image URL")
-    req = urllib.request.Request(url, headers={"User-Agent": f"TablePlan/{APP_VERSION} (+https://github.com/thomasjvalenzuela/tableplan)"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with _open(url, headers={"User-Agent": f"TablePlan/{APP_VERSION} (+https://github.com/thomasjvalenzuela/tableplan)"},
+               timeout=20) as r:
         ctype = (r.headers.get("Content-Type") or "").split(";")[0].lower()
-        data = r.read(MAX_IMG + 1)
-        if not ctype.startswith("image/"):
-            kind = n_recipes.sniff_image(data[:64])
-            if not kind:
-                raise ValueError("not an image")
-            ctype = "image/" + ("jpeg" if kind == "jpg" else kind)
-    if len(data) > MAX_IMG:
-        raise ValueError("image too large")
+        data = _read_capped(r, MAX_IMG, 60)
+    kind = n_recipes.sniff_image(data[:64])
+    if not kind:   # only real JPEG/PNG/WebP/GIF bytes are stored (no SVG or HTML posing as an image)
+        raise ValueError("not an image")
+    ctype = "image/" + ("jpeg" if kind == "jpg" else kind)
     return data, ctype
 
 
@@ -3156,7 +3678,7 @@ def ingredient_candidates(name):
         v = v.strip().title()
         if v and v not in variants:
             variants.append(v)
-    cands = [(f"https://www.themealdb.com/images/ingredients/{urllib.parse.quote(v)}-Small.png", "TheMealDB") for v in variants]
+    cands = [(f"https://www.themealdb.com/images/ingredients/{_q(v)}-Small.png", "TheMealDB") for v in variants]
     return cands
 
 
@@ -3214,7 +3736,7 @@ def ingredient_image(name, advance=False):
 
 
 def recipe_image_next(slug):
-    rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+    rec = mealie("GET", f"/api/recipes/{_q(slug)}")
     row = _pick_row("recipe", rec["id"])
     if not row and rec.get("orgURL"):   # first try: the photo from the recipe's own web page
         try:
@@ -3247,20 +3769,28 @@ def recipe_image_next(slug):
 
 
 def _upload_recipe_image(slug, blob, ctype):
-    mealie("PUT", f"/api/recipes/{urllib.parse.quote(slug)}/image",
+    mealie("PUT", f"/api/recipes/{_q(slug)}/image",
            multipart=({"extension": _ext(ctype)}, [("image", f"image.{_ext(ctype)}", ctype, blob)]), timeout=60)
     _recipe_cache["at"] = 0
 
 
 def decode_upload(data_url):
-    head, _, b64 = (data_url or "").partition(",")
-    m = re.match(r"data:(image/[a-z+.-]+);base64", head)
+    head, _, b64 = _s(data_url).partition(",")
+    m = re.match(r"data:(image/[a-z+.-]+);base64$", head)
     if not m:
         raise ApiError(400, "Upload a JPG, PNG or WebP image.")
-    blob = base64.b64decode(b64)
+    if len(b64) > MAX_IMG * 4 // 3 + 16:
+        raise ApiError(413, "That image is too large (8 MB max).")
+    try:
+        blob = base64.b64decode(b64, validate=False)
+    except ValueError:
+        raise ApiError(400, "That image couldn't be read.")
     if len(blob) > MAX_IMG:
         raise ApiError(413, "That image is too large (8 MB max).")
-    return blob, m.group(1)
+    kind = n_recipes.sniff_image(blob[:64])   # the bytes decide the type (no SVG/HTML stored as an "image")
+    if not kind:
+        raise ApiError(400, "Upload a JPG, PNG, WebP or GIF image.")
+    return blob, "image/" + ("jpeg" if kind == "jpg" else kind)
 
 
 # ============================================================ meal plan → shopping list
@@ -3305,7 +3835,7 @@ def plan_preview(start, end):
         if not slug:
             continue
         try:
-            rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
+            rec = mealie("GET", f"/api/recipes/{_q(slug)}")
         except ApiError:
             continue
         for ing in rec.get("recipeIngredient") or []:
@@ -3353,7 +3883,7 @@ def plan_to_list(start, end, list_id=None, skip_pantry=True, skip_keys=None):
         item = {"recipeId": rid, "recipeIncrementQuantity": round(t["scale"], 2)}
         if t["slug"]:
             try:
-                rec = mealie("GET", f"/api/recipes/{urllib.parse.quote(t['slug'])}")
+                rec = mealie("GET", f"/api/recipes/{_q(t['slug'])}")
                 ings = rec.get("recipeIngredient") or []
                 keep = []
                 for ing in ings:
@@ -3395,9 +3925,10 @@ def update_info(force=False):
     if force or time.time() - _update_cache["at"] > ttl:
         data = None
         try:
-            req = urllib.request.Request(UPDATE_FEED, headers={"User-Agent": f"TablePlan/{APP_VERSION}"})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                data = json.loads(r.read().decode())
+            with _open(UPDATE_FEED, headers={"User-Agent": f"TablePlan/{APP_VERSION}"}, timeout=8, allow_private=True) as r:
+                data = json.loads(_read_capped(r, 1_000_000, 30).decode())
+            if not isinstance(data, dict):
+                data = None
         except Exception:
             data = None
         _update_cache.update(at=time.time(), data=data)
@@ -3494,13 +4025,46 @@ def scheduler():
 
 # ============================================================ HTTP
 
+# Request body limits: screenshots/PDFs and photo uploads are big, everything else is small JSON.
+BODY_LIMITS = [
+    (re.compile(r"/api/import/images"), 36_000_000),            # ~25 MB of files once base64-encoded
+    (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload"), 12_000_000),   # 8 MB image
+]
+BODY_LIMIT_DEFAULT = 1_000_000
+
+# Expensive endpoints: rate-limited per client in public mode, and imports run a few at a time.
+EXPENSIVE = [
+    (re.compile(r"/api/import/(url|text|images)"), "import"),
+    (re.compile(r"/api/setup/import-mealie"), "import"),
+    (re.compile(r"/api/recipe/[^/]+/(guided|image/next)"), "ai"),
+    (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
+    (re.compile(r"/api/(upc/\d+|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
+]
+PUBLIC_PATHS = ("/", "/manifest.webmanifest", "/sw.js", "/api/session", "/api/login")
+
+
+def body_limit(path):
+    for rx, n in BODY_LIMITS:
+        if rx.fullmatch(path):
+            return n
+    return BODY_LIMIT_DEFAULT
+
+
+def safe_filename(name, default="download"):
+    """A Content-Disposition-safe file name (no quotes, CR/LF, slashes or non-ASCII)."""
+    out = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "")).strip(".-")[:100]
+    return out or default
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TablePlan/1.0"
+    sys_version = ""
     protocol_version = "HTTP/1.1"
+    timeout = 60   # seconds a client may stall while sending a request (slow-loris protection)
 
     def log_message(self, fmt, *args):
         if "/health" not in str(args[0] if args else ""):
-            sys.stdout.write("[tableplan] %s %s\n" % (self.address_string(), fmt % args))
+            sys.stdout.write("[tableplan] %s %s\n" % (self.client_ip(), (fmt % args).replace("\n", " ")[:500]))
 
     # ---- helpers
     def authorized(self):
@@ -3513,9 +4077,16 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def client_ip(self):
-        return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+        peer = self.client_address[0] if self.client_address else ""
+        headers = getattr(self, "headers", None)
+        if TRUST_PROXY and headers is not None:
+            # The trusted proxy appends the address it saw, so the right-most entry is the one we can believe.
+            hops = [h.strip() for h in (headers.get("X-Forwarded-For") or "").split(",") if h.strip()]
+            if hops:
+                return hops[-1][:64]
+        return peer
 
-    def cookie(self, value, max_age=180 * 86400):
+    def cookie(self, value, max_age=SESSION_DAYS * 86400):
         secure = "; Secure" if getattr(_req, "scheme", "http") == "https" else ""
         return f"tp_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
 
@@ -3526,77 +4097,143 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        if getattr(self, "_body", None) is None and int(self.headers.get("Content-Length") or 0) > 0:
+        if getattr(self, "_body", None) is None and getattr(self, "_req_len", 0) > 0:
             # request body was never read (early 401/403/413/error): close so its bytes aren't parsed as the next request
             self.send_header("Connection", "close")
             self.close_connection = True
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
         if ctype.startswith("text/html"):
-            inline = "'unsafe-inline' " if self.path.startswith("/print/") else ""
+            nonce = getattr(_req, "nonce", "")
+            extra = f"'nonce-{nonce}' " if nonce and self.path.startswith("/print/") else ""
             self.send_header("Content-Security-Policy",
-                             f"default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {inline}; style-src 'self' 'unsafe-inline'; "
-                             "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+                             f"default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {extra}; style-src 'self' 'unsafe-inline'; "
+                             "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; "
+                             "base-uri 'self'; form-action 'self'")
+        else:
+            self.send_header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; sandbox")
         if getattr(_req, "scheme", "http") == "https":
             self.send_header("Strict-Transport-Security", "max-age=31536000")
         if not (headers or {}).get("Cache-Control"):
             self.send_header("Cache-Control", "no-store")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(data)
+        try:
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True   # the browser went away mid-response; nothing to do
 
     def download(self, text, fname, ctype):
-        self.send(200, text, ctype, {"Content-Disposition": f'attachment; filename="{fname}"'})
+        self.send(200, text, ctype, {"Content-Disposition": f'attachment; filename="{safe_filename(fname)}"'})
 
     def body(self):
         if getattr(self, "_body", None) is None:
             self._read_body()
-        out = json.loads(self._body) if self._body else {}
+        try:
+            out = json.loads(self._body) if self._body else {}
+        except (ValueError, RecursionError):
+            raise ApiError(400, "Expected a JSON object.")
         if not isinstance(out, dict):
             raise ApiError(400, "Expected a JSON object.")
         return out
 
     def _read_body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 40_000_000:
+        n = self._req_len
+        if n > self._max_body:
             raise ApiError(413, "Request too large")
         self._body = self.rfile.read(n) if n else b""
+        if len(self._body) < n:
+            self.close_connection = True
+            raise ApiError(400, "Incomplete request body")
+
+    def _reject(self, code, msg):
+        self.close_connection = True
+        return self.send(code, {"error": msg})
 
     def handle_any(self, method):
         self._body = None
-        url = urllib.parse.urlparse(self.path)
+        self._req_len = 0
+        self._max_body = BODY_LIMIT_DEFAULT
+        _req.nonce = ""
+        if self.headers.get("Transfer-Encoding"):
+            # Chunked bodies aren't supported; refusing them avoids request-smuggling ambiguity.
+            return self._reject(411, "Send a Content-Length")
+        cl = (self.headers.get("Content-Length") or "0").strip()
+        if not cl.isdigit() or len(self.headers.get_all("Content-Length") or []) > 1:
+            return self._reject(400, "Bad Content-Length")
+        self._req_len = int(cl)
+        try:
+            url = urllib.parse.urlparse(self.path)
+        except ValueError:
+            return self._reject(400, "Bad request")
         path, q = url.path, {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         if path == "/health":
             return self.send(200, "ok", "text/plain")
-        host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost").split(",")[0].strip()
+        host = ((self.headers.get("X-Forwarded-Host") if TRUST_PROXY else None) or self.headers.get("Host") or "localhost")
+        host = host.split(",")[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}(:\d{1,5})?|\[[0-9A-Fa-f:.]+\](:\d{1,5})?", host):
+            host = "localhost"
         _req.host = host.rsplit(":", 1)[0] if not host.endswith("]") else host
-        _req.scheme = (self.headers.get("X-Forwarded-Proto") or "http").split(",")[0].strip()
-        public = (path == "/" or path.startswith("/static/") or path in ("/manifest.webmanifest", "/api/session", "/api/login"))
+        # X-Forwarded-Proto can only make the response stricter (Secure cookie, HSTS), so it's honoured even
+        # without TABLEPLAN_TRUST_PROXY: a home reverse proxy that terminates HTTPS keeps working.
+        _req.scheme = "https" if (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower() == "https" else "http"
+        _req.nonce = secrets.token_urlsafe(16) if path.startswith("/print/") else ""
+        public = path in PUBLIC_PATHS or path.startswith("/static/")
+        state_changing = method in ("POST", "PUT", "PATCH", "DELETE")
         # CSRF: state-changing requests must carry a custom header, which other sites can't send without CORS (we allow none).
-        if method in ("POST", "PUT", "PATCH", "DELETE") and self.headers.get("X-TablePlan") != "1":
+        if state_changing and self.headers.get("X-TablePlan") != "1":
             return self.send(403, {"error": "Missing X-TablePlan header"})
+        # Browsers label cross-site requests; the API is only ever called by TablePlan's own pages.
+        if (path.startswith("/api/") or state_changing) and self.headers.get("Sec-Fetch-Site") == "cross-site":
+            return self.send(403, {"error": "Cross-site request refused"})
         if not public and not self.authorized():
             if path.startswith("/api/"):
                 return self.send(401, {"error": "Sign in required", "auth": True})
             self.send_response(302)
             self.send_header("Location", "/")
             self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            if self._req_len:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             return
+        self._max_body = body_limit(path)
+        if self._req_len > self._max_body:
+            return self._reject(413, "Request too large")
+        heavy = None
+        for rx, bucket in EXPENSIVE:
+            if rx.fullmatch(path):
+                if path.endswith("/guided") and "1" not in (q.get("ai"), q.get("refresh")):
+                    break   # cached / built-in step-by-step views are cheap
+                if not rate_ok(bucket, self.client_ip()):
+                    return self.send(429, {"error": "Too many requests. Wait a while and try again."},
+                                     headers={"Retry-After": "600"})
+                if bucket == "import":
+                    heavy = _heavy
+                break
+        if heavy is not None and not heavy.acquire(timeout=30):
+            return self.send(503, {"error": "TablePlan is busy with other imports. Try again in a minute."},
+                             headers={"Retry-After": "30"})
         try:
             return self.route(method, path, q)
         except ApiError as e:
             return self.send(e.status, {"error": e.message})
-        except (ValueError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError) as e:
+            log(f"bad request {method} {path}: {type(e).__name__}: {str(e)[:200]}")
+            return self.send(400, {"error": "Bad request: " + (f"missing {e}" if isinstance(e, KeyError) else str(e)[:200])})
+        except Exception:
             traceback.print_exc()
-            return self.send(400, {"error": f"Bad request: {e}"})
-        except Exception as e:
-            traceback.print_exc()
-            return self.send(500, {"error": f"Server error: {e}"})
+            return self.send(500, {"error": "Server error. Details are in the TablePlan log."})
+        finally:
+            if heavy is not None:
+                heavy.release()
 
     def do_GET(self):
         self.handle_any("GET")
@@ -3635,9 +4272,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(429, "Too many tries. Wait 10 minutes and try again.")
             pw = self.body().get("password") or ""
             if not auth_required() or password_ok(pw):
-                _login_fails.pop(ip, None)
+                login_succeeded(ip)
                 return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie(make_session())})
-            _login_fails.setdefault(ip, []).append(time.time())
+            login_failed(ip)
+            log(f"failed sign-in from {ip}")
             time.sleep(1.0)
             raise ApiError(401, "Wrong password" if cfg("app_password_hash") else "Wrong setup code. Find it in the TablePlan server log.")
         if m == "POST" and path == "/api/logout":
@@ -3665,8 +4303,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, setup_status())
         if m == "POST" and path == "/api/setup/household":
             b = self.body()
-            people = max(1, min(30, int(b.get("people") or 2)))
-            set_cfg(household_name=(b.get("name") or "").strip()[:60], people=people,
+            people = max(1, min(30, _v_int(-10**6, 10**6)(b.get("people") or 2)))
+            set_cfg(household_name=_s(b.get("name")).strip()[:60], people=people,
                     scale_to_household=bool(b.get("scale", True)))
             return self.send(200, setup_status()["household"])
         if m == "GET" and path == "/api/setup/mealie":
@@ -3690,7 +4328,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, ai_status())
         if m == "POST" and path == "/api/setup/ai":
             b = self.body()
-            return self.send(200, ai_setup(b.get("api_key"), b.get("model"), bool(b.get("audio", True)), b.get("base_url")))
+            return self.send(200, ai_setup(b.get("api_key"), b.get("model"), bool(b.get("audio", True)),
+                                           b.get("base_url") if not PUBLIC_MODE else None))
         if m == "GET" and path == "/api/setup/email":
             return self.send(200, email_public())
         if m == "POST" and path == "/api/setup/email":
@@ -3711,12 +4350,15 @@ class Handler(BaseHTTPRequestHandler):
                        "email": dict(smtp_host="", smtp_user="", smtp_password="", smtp_from="", mail_to=[])}[which])
             return self.send(200, notify_status())
         if m == "POST" and path == "/api/setup/password":
-            pw = self.body().get("password") or ""
-            if pw and len(pw) < 4:
-                raise ApiError(400, "Use at least 4 characters.")
+            pw = _s(self.body().get("password"), 1024)
+            min_len = 8 if PUBLIC_MODE else 4
+            if pw and len(pw) < min_len:
+                raise ApiError(400, f"Use at least {min_len} characters.")
             if not pw and PUBLIC_MODE:
                 raise ApiError(400, "A password is required because this TablePlan is reachable from the internet.")
             set_cfg(app_password_hash=hash_password(pw) if pw else "")
+            rotate_sessions()   # every other device (and any setup-code sign-in) must sign in again
+            log("household password " + ("changed" if pw else "removed") + f" from {self.client_ip()}; other sessions signed out")
             hdr = {"Set-Cookie": self.cookie(make_session())} if pw else None
             return self.send(200, {"set": bool(pw)}, headers=hdr)
         if m == "POST" and path == "/api/setup/import-mealie":
@@ -3727,22 +4369,20 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- import & updates
         if m == "POST" and path == "/api/import/url":
-            return self.send(200, import_url(self.body().get("url", "").strip()))
+            return self.send(200, import_url(_s(self.body().get("url"), 4000).strip()))
         if m == "POST" and path == "/api/import/text":
             b = self.body()
-            return self.send(200, import_text(b.get("text"), b.get("title") or ""))
+            return self.send(200, import_text(_s(b.get("text"), 200_000), _s(b.get("title"), 300)))
         if m == "POST" and path == "/api/import/images":
             b = self.body()
             return self.send(200, import_images(b.get("images") or [], b.get("text")))
         if m == "POST" and path == "/api/plan/to-list":
             b = self.body()
-            s0 = parse_date(b.get("start")) or today()
-            return self.send(200, plan_to_list(s0, parse_date(b.get("end")) or s0 + timedelta(days=6),
+            return self.send(200, plan_to_list(*date_range(b.get("start"), b.get("end")),
                                                b.get("list_id"), bool(b.get("skip_pantry", True)), b.get("skip_keys")))
         if m == "POST" and path == "/api/plan/preview":
             b = self.body()
-            s0 = parse_date(b.get("start")) or today()
-            return self.send(200, plan_preview(s0, parse_date(b.get("end")) or s0 + timedelta(days=6)))
+            return self.send(200, plan_preview(*date_range(b.get("start"), b.get("end"))))
         # ---- barcode lookup (Open Food Facts) & pantry check-ins
         mm = re.fullmatch(r"/api/upc/(\d{6,14})", path)
         if m == "GET" and mm:
@@ -3779,6 +4419,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, add_items_to_list(b.get("items") or [], b.get("list_id")))
         if m == "GET" and path == "/img/ing":
             name = (q.get("name") or "").strip()[:80]
+            if name and not _pick_row("ing", food_key(name) or name.lower()) and not rate_ok("fetch", self.client_ip()):
+                return self.send(429, b"", "image/png", {"Retry-After": "600"})
             fpath, _ = ingredient_image(name) if name else (None, None)
             if not fpath:
                 return self.send(404, b"", "image/png", {"Cache-Control": "public, max-age=3600"})
@@ -3833,12 +4475,13 @@ class Handler(BaseHTTPRequestHandler):
 
         mm = re.fullmatch(r"/img/([A-Za-z0-9-]{1,64})", path)
         if m == "GET" and mm:
+            if not UUID_RE.fullmatch(mm.group(1)):   # recipe ids are UUIDs; they're used in file paths
+                raise ApiError(404, "Not found")
             return self.image(mm.group(1), q.get("size", "min"))
 
         # --- meal plan
         if m == "GET" and path == "/api/plan":
-            start = parse_date(q.get("start")) or today()
-            end = parse_date(q.get("end")) or start + timedelta(days=6)
+            start, end = date_range(q.get("start"), q.get("end"))
             entries = get_plans(start, end)
             return self.send(200, {"start": iso(start), "end": iso(end), "entries": entries})
         if m == "POST" and path == "/api/plan/generate":
@@ -3962,8 +4605,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.download(render_list_csv(sl), f"{safe}.csv", "text/csv; charset=utf-8")
         mm = re.fullmatch(r"/export/plan\.(csv|ics|txt)", path)
         if m == "GET" and mm:
-            start = parse_date(q.get("start")) or today()
-            end = parse_date(q.get("end")) or start + timedelta(days=6)
+            start, end = date_range(q.get("start"), q.get("end"))
             entries = get_plans(start, end)
             ext = mm.group(1)
             if ext == "ics":
@@ -3978,8 +4620,7 @@ class Handler(BaseHTTPRequestHandler):
         if m == "GET" and mm:
             return self.send(200, print_list(get_list(mm.group(1))), "text/html; charset=utf-8")
         if m == "GET" and path == "/print/plan":
-            start = parse_date(q.get("start")) or today()
-            end = parse_date(q.get("end")) or start + timedelta(days=6)
+            start, end = date_range(q.get("start"), q.get("end"))
             return self.send(200, print_plan(get_plans(start, end), start, end), "text/html; charset=utf-8")
         if m == "GET" and path == "/print/pantry":
             with db() as c:
@@ -4036,9 +4677,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, f.read(), mimetypes.guess_type(fp)[0] or "image/jpeg", {"Cache-Control": "public, max-age=86400"})
         fname = {"min": "min-original.webp", "tiny": "tiny-original.webp", "full": "original.webp"}.get(size, "min-original.webp")
         try:
-            req = urllib.request.Request(f"{cfg('mealie_url')}/api/media/recipes/{recipe_id}/images/{fname}")
-            with urllib.request.urlopen(req, timeout=15) as r:
-                data = r.read()
+            with _open(f"{cfg('mealie_url')}/api/media/recipes/{recipe_id}/images/{fname}", timeout=15,
+                       allow_private=True) as r:
+                data = _read_capped(r, 20_000_000, 60)
             return self.send(200, data, "image/webp", {"Cache-Control": "public, max-age=86400"})
         except Exception:
             return self.send(404, b"", "image/webp", {"Cache-Control": "public, max-age=600"})
@@ -4068,8 +4709,53 @@ def _int_or_none(v):
         return None
 
 
+class Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on simultaneous connections (each one is a thread)."""
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, *a, max_conns=None, **kw):
+        self._slots = threading.BoundedSemaphore(max_conns or int(env("TABLEPLAN_MAX_CONNECTIONS", "64") or 64))
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(timeout=10):   # all busy: drop rather than pile up threads
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
+def secure_data_dir():
+    """Keep the database, secrets and photos readable by this process only (0700 dirs / 0600 files)."""
+    os.umask(0o077)
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    for f in (DB_PATH, DB_PATH + "-wal", DB_PATH + "-shm"):
+        try:
+            if os.path.exists(f):
+                os.chmod(f, 0o600)
+        except OSError:
+            pass
+    try:
+        if os.path.isdir(IMG_DIR):
+            os.chmod(IMG_DIR, 0o700)
+    except OSError:
+        pass
+
+
 def main():
+    secure_data_dir()
     init_db()
+    secure_data_dir()
     load_cfg()
     if not get_internal("usda_synced_at"):
         def first_sync():
@@ -4081,9 +4767,10 @@ def main():
     threading.Thread(target=scheduler, daemon=True).start()
     if PUBLIC_MODE and not cfg("app_password_hash"):
         log(f"PUBLIC MODE · one-time setup code: {SETUP_CODE}  (enter it on the sign-in screen, then set a household password)")
-    log(f"TablePlan {APP_VERSION} listening on :{LISTEN_PORT} · Mealie {cfg('mealie_url')} · data {DB_PATH} · "
+    log(f"TablePlan {APP_VERSION} listening on :{LISTEN_PORT} · {'public' if PUBLIC_MODE else 'home network'} mode"
+        f"{' · trusting proxy headers' if TRUST_PROXY else ''} · backend {'native' if NATIVE else 'Mealie'} · data {DB_PATH} · "
         f"setup {'done' if cfg('setup_complete') else 'pending — open the app to run the wizard'}")
-    ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler).serve_forever()
+    Server(("0.0.0.0", LISTEN_PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":

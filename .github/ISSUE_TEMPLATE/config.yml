@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/thomasjvalenzuela/tableplan/security/advisories/new
+    about: Please report security issues privately, not as public issues. See SECURITY.md.
+  - name: Setup and install guide
+    url: https://thomasjvalenzuela.github.io/tableplan/setup/
+    about: Step-by-step install help for ZimaOS and other Docker hosts.

@@ -92,6 +92,9 @@ class _Node:
         return "".join(out)
 
 
+MAX_DEPTH = 256   # deeper nesting is flattened: bounds recursion and keeps hostile pages from costing O(n^2)
+
+
 class _TreeBuilder(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -104,7 +107,7 @@ class _TreeBuilder(HTMLParser):
         parent = self.stack[-1]
         node = _Node(tag, {k: (v if v is not None else "") for k, v in attrs}, parent)
         parent.children.append(node)
-        if tag not in _VOID:
+        if tag not in _VOID and (len(self.stack) < MAX_DEPTH or tag == "script"):
             self.stack.append(node)
 
     def _autoclose(self, tag):

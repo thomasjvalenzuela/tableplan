@@ -3,6 +3,18 @@
 
 // Small helpers (app.js defines the full set; these are safe duplicates for the wizard, which can run first).
 const _esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// URLs for href/src: only http(s) and same-origin paths. data: is allowed for raster images only (and SVG when img=true,
+// since an <img> never runs scripts). Anything else (javascript:, vbscript:, data:text/html, blob: …) becomes "".
+// Still pass the result through _esc/esc when putting it into HTML.
+function _safeUrl(u, img = false) {
+  // Browsers drop tabs/newlines anywhere and control chars/spaces at the ends ("java\tscript:" still runs), so do the same first.
+  const s = String(u ?? "").replace(/[\t\n\r]/g, "").replace(/^[\u0000- ]+|[\u0000- ]+$/g, "");
+  if (!s || /[\u0000-\u001f\u007f]/.test(s)) return "";
+  if (/^data:/i.test(s)) return (img ? /^data:image\/(png|jpe?g|gif|webp|avif|bmp|svg\+xml)[;,]/i : /^data:image\/(png|jpe?g|gif|webp|avif|bmp)[;,]/i).test(s) ? s : "";
+  let p;
+  try { p = new URL(s, location.origin); } catch (_) { return ""; }
+  return p.protocol === "https:" || p.protocol === "http:" ? s : "";
+}
 async function _api(method, path, body) {
   const headers = { "X-TablePlan": "1" };
   if (body) headers["Content-Type"] = "application/json";
@@ -42,12 +54,12 @@ const Setup = {
       <div class="wgroup">
         <div class="wfield"><label>Household name</label><input id="hh-name" placeholder="The Smiths" value="${_esc(h.name || "")}"></div>
         <div class="wfield"><label>How many people do you cook for?</label>
-          <div class="stepper"><button type="button" data-d="-1">−</button><b id="hh-n">${h.people || 2}</b><button type="button" data-d="1">+</button></div></div>
+          <div class="stepper"><button type="button" data-d="-1">−</button><b id="hh-n">${_esc(h.people || 2)}</b><button type="button" data-d="1">+</button></div></div>
         <div class="wfield"><label>Scale recipes to fit</label><label class="toggle"><input type="checkbox" id="hh-scale" ${h.scale !== false ? "checked" : ""}><span></span></label></div>
       </div>
-      <p class="whint">When you plan a meal, TablePlan sets the serving scale so a recipe written for 4 automatically shopping-lists for ${h.people || 2}. You can still change servings on any recipe.</p>`;
-    let n = h.people || 2;
-    el.querySelectorAll("[data-d]").forEach((b) => (b.onclick = () => { n = Math.max(1, Math.min(30, n + +b.dataset.d)); el.querySelector("#hh-n").textContent = n; el.querySelector(".whint").innerHTML = el.querySelector(".whint").innerHTML.replace(/for \d+\./, `for ${n}.`); }));
+      <p class="whint">When you plan a meal, TablePlan sets the serving scale so a recipe written for 4 automatically shopping-lists for <span id="hh-n2">${_esc(h.people || 2)}</span>. You can still change servings on any recipe.</p>`;
+    let n = Math.max(1, Math.min(30, Math.round(+h.people) || 2));
+    el.querySelectorAll("[data-d]").forEach((b) => (b.onclick = () => { n = Math.max(1, Math.min(30, n + +b.dataset.d)); el.querySelector("#hh-n").textContent = n; el.querySelector("#hh-n2").textContent = n; }));
     return async () => {
       const r = await _api("POST", "/api/setup/household", { name: el.querySelector("#hh-name").value, people: n, scale: el.querySelector("#hh-scale").checked });
       done && done(r); return true;
@@ -145,7 +157,7 @@ const Setup = {
         <div class="wgroup">
           <div class="wfield"><label>Provider</label><select id="em-p">${presets.map(([k, l]) => `<option value="${k}" ${k === p ? "selected" : ""}>${l}</option>`).join("")}</select></div>
           ${p === "custom" ? `<div class="wfield"><label>SMTP server</label><input id="em-host" value="${_esc(e.host || "")}" placeholder="smtp.example.com"></div>
-            <div class="wfield"><label>Port</label><input id="em-port" type="number" value="${e.port || 587}"></div>
+            <div class="wfield"><label>Port</label><input id="em-port" type="number" value="${_esc(e.port || 587)}"></div>
             <div class="wfield"><label>Security</label><select id="em-sec">${["starttls", "ssl", "none"].map((x) => `<option ${x === (e.security || "starttls") ? "selected" : ""}>${x}</option>`).join("")}</select></div>` : ""}
           <div class="wfield"><label>Your email</label><input id="em-user" type="email" value="${_esc(e.user || "")}" placeholder="you@gmail.com" autocomplete="off"></div>
           <div class="wfield"><label>${p === "gmail" ? "App password" : "Password"}</label><input id="em-pw" type="password" placeholder="${e.has_password ? "•••••• saved" : ""}" autocomplete="off"></div>
@@ -199,7 +211,7 @@ const Setup = {
     }
     if (t.code) {
       el.innerHTML = `<div class="wstatus"><b>Last step: link your chat</b><span>Bot @${_esc(t.bot)} is ready</span></div>
-        <a class="btn" href="${_esc(t.link)}" target="_blank" rel="noopener" style="text-decoration:none">Open @${_esc(t.bot)} in Telegram → Start</a>
+        ${_safeUrl(t.link) ? `<a class="btn" href="${_esc(_safeUrl(t.link))}" target="_blank" rel="noopener noreferrer" style="text-decoration:none">Open @${_esc(t.bot)} in Telegram → Start</a>` : ""}
         <p class="whint">Telegram opens a chat with your bot. Tap <b>Start</b>. Want lists in a family group instead? Add the bot to the group and send this code there:</p>
         <div class="wgroup"><div class="wfield"><label>Link code (valid 15 minutes)</label><input readonly value="${_esc(t.code)}" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:.15em;font-size:20px"></div></div>
         <div class="wiz-err" id="tg-err"></div>
@@ -215,7 +227,7 @@ const Setup = {
     }
     el.innerHTML = `<p class="wlead">Telegram is free and works when email won't. You create a private bot just for your household, and only chats you link can receive messages.</p>
       <ol class="whint" style="margin:0 0 12px 18px;padding:0;line-height:1.6">
-        <li>In Telegram, open <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a> and send <code>/newbot</code>.</li>
+        <li>In Telegram, open <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer"><b>@BotFather</b></a> and send <code>/newbot</code>.</li>
         <li>Pick any name, then a username ending in <code>bot</code> (e.g. <code>smith_kitchen_bot</code>).</li>
         <li>Copy the <b>token</b> BotFather replies with and paste it here.</li></ol>
       <div class="wgroup"><div class="wfield"><label>Bot token</label><input id="tg-token" type="password" placeholder="123456789:AAH…" autocomplete="off"></div></div>
@@ -322,7 +334,7 @@ async function runWizard(onFinish) {
         <li><b>🥛 Smart pantry</b><span>Real use-by dates that update as you cook</span></li>
         <li><b>🛒 Shopping lists</b><span>Scaled to your household, emailed or printed</span></li></ul>`;
     if (step.key === "done") {
-      const row = (ok, label, todo) => `<li class="${ok ? "ok" : ""}"><b>${ok ? "✓" : "○"} ${label}</b><span>${ok ? "" : _esc(todo)}</span></li>`;
+      const row = (ok, label, todo) => `<li class="${ok ? "ok" : ""}"><b>${ok ? "✓" : "○"} ${_esc(label)}</b><span>${ok ? "" : _esc(todo)}</span></li>`;
       body.innerHTML = `<ul class="wiz-feats">
         ${st.mealie?.native ? "" : row(st.mealie?.connected, "Recipe library connected", "Settings → Mealie")}
         ${row(st.ai?.enabled, "Screenshot import", "Settings → AI recipe import")}

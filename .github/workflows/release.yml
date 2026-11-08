@@ -13,9 +13,8 @@ on:
       - "**.md"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  packages: write
+# Nothing by default; the job below asks only for what it needs.
+permissions: {}
 
 concurrency:
   group: release
@@ -24,14 +23,23 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write   # push the gh-pages branch
+      packages: write   # push the image to GHCR
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Work out version and names
         id: v
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           base="$(tr -d '[:space:]' < VERSION)"
-          version="${base}.${{ github.run_number }}"
+          case "$base" in *[!0-9.]*|"") echo "::error::VERSION must look like 0.4"; exit 1 ;; esac
+          version="${base}.${RUN_NUMBER}"
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo="${GITHUB_REPOSITORY#*/}"
           repo="${repo,,}"
@@ -41,18 +49,21 @@ jobs:
           echo "owner=${owner}" >> "$GITHUB_OUTPUT"
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
-          # First line of the commit message becomes the release note
-          printf 'notes<<EOF\n%s\nEOF\n' "$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
+          # First line of the commit message becomes the release note. It is only ever
+          # passed to later steps through env vars, never expanded inside a script.
+          # A random heredoc delimiter stops a crafted subject from injecting outputs.
+          delim="NOTES_$(openssl rand -hex 16)"
+          printf 'notes<<%s\n%s\n%s\n' "$delim" "$(git log -1 --pretty=%s)" "$delim" >> "$GITHUB_OUTPUT"
 
       # ---------- image
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -97,7 +108,7 @@ jobs:
           grep -nE "image:|version:|update_at" "$f"
 
       - name: Build ZimaOS store (v2)
-        uses: IceWhaleTech/build-appstore-action@v1
+        uses: IceWhaleTech/build-appstore-action@c9bb47fad5b32d7928a07978fad68801f52e910f # v1.1.3
         with:
           source: zimaos-store
           output: dist
@@ -117,7 +128,7 @@ jobs:
           ls -R dist | head -50
 
       - name: Publish to GitHub Pages (gh-pages branch)
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
@@ -126,10 +137,14 @@ jobs:
           commit_message: "Release ${{ steps.v.outputs.version }}"
 
       - name: Summary
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE: ${{ steps.v.outputs.image }}
+          PAGES: ${{ steps.v.outputs.pages }}
         run: |
           {
-            echo "### TablePlan ${{ steps.v.outputs.version }}"
-            echo "- Image: \`${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}\`"
-            echo "- ZimaOS community store URL: ${{ steps.v.outputs.pages }}/store.json"
-            echo "- SSH install: \`curl -fsSL ${{ steps.v.outputs.pages }}/install.sh | sudo bash\`"
+            echo "### TablePlan ${VERSION}"
+            echo "- Image: \`${IMAGE}:${VERSION}\`"
+            echo "- ZimaOS community store URL: ${PAGES}/store.json"
+            echo "- SSH install: \`curl -fsSL ${PAGES}/install.sh | sudo bash\`"
           } >> "$GITHUB_STEP_SUMMARY"

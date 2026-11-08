@@ -1,7 +1,22 @@
+# Only app/ and docker/ are needed in the build context.
 .git
 .github
+.editorconfig
+.gitignore
+.env
+.env.*
+*.md
+LICENSE
+railway.toml
 zimaos-store
 install
 docs
+dist
 **/__pycache__
-*.md
+**/*.pyc
+app/tests
+app/data
+app/.data
+data
+.data
+.DS_Store

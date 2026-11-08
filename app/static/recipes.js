@@ -25,7 +25,7 @@ function ingLine(x, factor, portion = 1) {
   const food = q > 1 && x.food_plural && !x.unit ? x.food_plural : x.food;
   return { amt: [fmtQty(q), unit].filter(Boolean).join(" "), name: food + (x.note ? `, ${x.note}` : ""), scaled: true };
 }
-const recipeImg = (r, size = "min") => (r && r.has_image ? `/img/${r.id}?size=${size}&v=${encodeURIComponent(r.image_v || "")}` : null);
+const recipeImg = (r, size = "min") => (r && r.has_image ? `/img/${enc(r.id)}?size=${enc(size)}&v=${enc(r.image_v || "")}` : null);
 
 // ------------------------------------------------------------------ RECIPES list
 const rstate = { q: "", filter: "all", list: null, tags: [] };
@@ -53,15 +53,15 @@ async function renderRecipes() {
       $("#r-first").onclick = openAddRecipe; return;
     }
     if (!list.length) { $("#rlist").innerHTML = `<div class="empty">No recipes match.</div>`; return; }
-    const meta = (r) => `<div class="meta">${r.minutes ? `${ic("clock")}<span>${r.minutes} mins</span>` : ""}${r.minutes && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span style="color:var(--red)">♥</span>' : ""}</div>`;
+    const meta = (r) => `<div class="meta">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : ""}${r.minutes && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span style="color:var(--red)">♥</span>' : ""}</div>`;
     $("#rlist").innerHTML = `<div class="group recipe-list">${list.map((r) => {
       const img = recipeImg(r);
-      return `<button class="row" data-slug="${esc(r.slug)}"><div class="thumb" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : "🍽️"}</div>
+      return `<button class="row" data-slug="${esc(r.slug)}"><div class="thumb" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
         <div class="main"><div class="a">${esc(r.name)}</div>${meta(r)}</div><span class="chev">${ic("chevR")}</span></button>`;
     }).join("")}</div>
     <div class="recipe-grid">${list.map((r) => {
       const img = recipeImg(r);
-      return `<button class="rcard" data-slug="${esc(r.slug)}"><div class="img" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : "🍽️"}${r.favorite ? '<span class="heart">♥</span>' : ""}</div>
+      return `<button class="rcard" data-slug="${esc(r.slug)}"><div class="img" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}${r.favorite ? '<span class="heart">♥</span>' : ""}</div>
         <div class="body"><div class="n">${esc(r.name)}</div>${meta(r)}</div></button>`;
     }).join("")}</div>`;
     $$("#rlist [data-slug]").forEach((b) => (b.onclick = () => openRecipe(b.dataset.slug)));
@@ -82,7 +82,7 @@ async function renderRecipe(slug) {
   R.style = state.cfg.settings.recipe_style === "steps" ? "steps" : "classic";
   const img = recipeImg(rec, "full");
   app.innerHTML = `<div class="rd fade-in">
-    <div class="rd-hero" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : "🍽️"}
+    <div class="rd-hero" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}
       <button class="round-btn back" id="rd-back" aria-label="Back">${ic("chevL")}</button>
       <button class="round-btn imgbtn" id="rd-img" aria-label="Change photo">${ic("camera")}</button>
       <button class="round-btn fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite">${rec.favorite ? "♥" : "♡"}</button>
@@ -90,7 +90,7 @@ async function renderRecipe(slug) {
     <div class="rd-body">
       <h1>${esc(rec.name)}</h1>${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
       <div class="stats">
-        <div class="stat">${ic("clock")}<small>Cooking time</small><b>${rec.minutes || "—"} <span>${rec.minutes ? "mins" : ""}</span></b></div>
+        <div class="stat">${ic("clock")}<small>Cooking time</small><b>${esc(rec.minutes || "—")} <span>${rec.minutes ? "mins" : ""}</span></b></div>
         <div class="stat">${ic("chef")}<small>Difficulty</small><b>${esc(rec.difficulty)}</b></div>
         <div class="stat">${ic("users")}<small>Servings</small><div class="stepper"><button data-s="-1" aria-label="Fewer">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More">+</button></div></div>
       </div>
@@ -100,7 +100,7 @@ async function renderRecipe(slug) {
         <button class="pill-btn" id="rd-plan">${ic("cal")} Plan it</button>
         <button class="pill-btn" id="rd-missing">${ic("cart")} Add missing to list</button>
         <button class="pill-btn" id="rd-edit">${ic("edit")} Edit</button>
-        ${rec.source_url ? `<a class="pill-btn" href="${esc(rec.source_url)}" target="_blank" rel="noopener">${ic("link")} Original</a>` : ""}
+        ${extLink(rec.source_url) ? `<a class="pill-btn" ${extLink(rec.source_url)}>${ic("link")} Original</a>` : ""}
       </div>
       <div class="cta-bar"><button class="btn" id="rd-cook">${ic("play")} Start cooking</button></div>
     </div></div>`;
@@ -125,7 +125,8 @@ function pantryTag(x) {
   return d != null && d <= 3 ? `<span class="pill soon">Use soon</span>` : `<span class="pill ok">In ${esc(x.pantry.location)}</span>`;
 }
 function ingPic(x) {
-  return `<div class="pic" data-ing="${esc(x.food || "")}">${x.img ? `<img src="${x.img}" alt="" loading="lazy" data-fb="${esc(x.emoji)}">` : x.emoji}</div>`;
+  const src = safeUrl(x.img, true);
+  return `<div class="pic" data-ing="${esc(x.food || "")}">${src ? `<img src="${esc(src)}" alt="" loading="lazy" data-fb="${esc(x.emoji)}">` : esc(x.emoji)}</div>`;
 }
 async function drawContent() {
   $$("#rd-style button").forEach((b) => b.classList.toggle("on", b.dataset.v === R.style));
@@ -149,7 +150,7 @@ async function drawContent() {
     const g = R.guide;
     let html = `<div class="section-h" style="margin-top:20px"><h2>Step by step</h2><span class="muted" style="font-size:13px">${g.source === "ai" ? "✨ AI-arranged" : "Auto-arranged"} · ${esc(state.cfg.settings.stove)} stove</span></div>`;
     g.steps.forEach((s, n) => {
-      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${x.emoji} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
+      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${esc(x.emoji)} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
       html += `<div class="step-card"><div class="num">${n + 1}. ${esc(s.title || "")}</div><div class="txt">${esc(s.text)}</div>
         ${uses ? `<div class="uses">${uses}</div>` : ""}
         <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${s.timer_sec ? `<span class="badge2 blue">⏱ ${esc(s.timer_label || fmtDur(s.timer_sec))}</span>` : ""}</div>
@@ -174,7 +175,7 @@ async function addMissing() {
   const missing = R.rec.ingredients.filter((x) => !x.pantry && (x.food || x.display));
   if (!missing.length) return toast("You have everything in the pantry 🎉");
   openSheet("Add to shopping list", `<p class="hint" style="margin:0 4px 10px">Untick anything you already have.</p>
-    <div class="group">${missing.map((x) => { const l = ingLine(x, f); return `<label class="row"><span class="emo">${x.emoji}</span><div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="b">${esc(l.amt)}</div>` : ""}</div><input type="checkbox" checked data-t="${esc(l.scaled ? `${l.amt} ${l.name}` : l.amt)}" style="width:22px;height:22px;accent-color:var(--tint)"></label>`; }).join("")}</div>
+    <div class="group">${missing.map((x) => { const l = ingLine(x, f); return `<label class="row"><span class="emo">${esc(x.emoji)}</span><div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="b">${esc(l.amt)}</div>` : ""}</div><input type="checkbox" checked data-t="${esc(l.scaled ? `${l.amt} ${l.name}` : l.amt)}" style="width:22px;height:22px;accent-color:var(--tint)"></label>`; }).join("")}</div>
     <div style="height:14px"></div><button class="btn" id="am-go">${ic("cart")} Add to list</button>`, {
     onMount() { $("#am-go").onclick = async () => {
       const items = $$("[data-t]").filter((c) => c.checked).map((c) => c.dataset.t);
@@ -184,9 +185,9 @@ async function addMissing() {
 }
 function planRecipe(rec) {
   const d0 = isoDate(today());
-  openSheet("Plan this recipe", `<div class="group"><div class="field"><label>Day</label><input type="date" id="pr-d" value="${d0}"></div>
+  openSheet("Plan this recipe", `<div class="group"><div class="field"><label>Day</label><input type="date" id="pr-d" value="${esc(d0)}"></div>
     <div class="field"><label>Meal</label><select id="pr-t">${["dinner", "lunch", "breakfast", "side", "snack", "dessert"].map((t) => `<option value="${t}">${cap(t)}</option>`).join("")}</select></div></div>
-    <p class="hint">Scaled to ${state.cfg.household?.people || 2} people automatically.</p><div style="height:14px"></div><button class="btn" id="pr-go">${ic("cal")} Add to plan</button>`, {
+    <p class="hint">Scaled to ${esc(state.cfg.household?.people || 2)} people automatically.</p><div style="height:14px"></div><button class="btn" id="pr-go">${ic("cal")} Add to plan</button>`, {
     onMount() { $("#pr-go").onclick = async () => { try { await api("POST", "/api/plan/save", { entries: [{ date: $("#pr-d").value, entry_type: $("#pr-t").value, recipe_id: rec.id }] }); closeSheet(); toast("Added to your meal plan"); } catch (e) { fail(e); } }; },
   });
 }
@@ -194,15 +195,29 @@ function planRecipe(rec) {
 // ------------------------------------------------------------------ COOK MODE (walkthrough with timers)
 const C = { i: 0, steps: [], timers: [], tick: null, wake: null, audio: null };
 async function startCook() {
-  if (!R.guide) { try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(R.rec.slug)}/guided`); } catch (e) { return fail(e); } }
-  C.steps = R.guide.steps; C.i = 0;
+  const btn = $("#rd-cook");
+  if (btn?.disabled) return;
+  if (!R.guide) {
+    const label = btn?.innerHTML;
+    if (btn) { btn.disabled = true; btn.innerHTML = state.cfg.ai_key ? "✨ Arranging steps… (first time ~15 s)" : "Preparing…"; }
+    try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(R.rec.slug)}/guided`); }
+    catch (e) { R.guide = null; }
+    finally { if (btn) { btn.disabled = false; btn.innerHTML = label; } }
+  }
+  let steps = R.guide?.steps || [];
+  if (!steps.length) {   // fall back to the recipe's own steps so cooking always works
+    steps = (R.rec.steps || []).filter((s) => s.text).map((s) => ({ title: s.title || "", text: s.text, ingredients: (s.refs || []).map((i) => ({ i, portion: 1 })),
+      timer_sec: s.duration_sec || null, timer_label: null, heat: null, temperature: null, tip: null }));
+  }
+  if (!steps.length) return toast("This recipe has no instructions yet. Tap Edit to add them.", "Edit", () => { location.hash = "edit/" + encodeURIComponent(R.rec.slug); });
+  C.steps = steps.map((s) => ({ ...s, ingredients: s.ingredients || [], text: s.text || "" })); C.i = 0;
   const el = document.createElement("div"); el.className = "cook"; el.id = "cook"; document.body.appendChild(el);
   document.body.style.overflow = "hidden";
   try { C.wake = await navigator.wakeLock?.request("screen"); } catch (_) {}
   if ("Notification" in window && Notification.permission === "default" && window.isSecureContext) { try { Notification.requestPermission(); } catch (_) {} }
   C.tick = setInterval(tickTimers, 1000);
   document.addEventListener("keydown", cookKeys);
-  drawCook();
+  try { drawCook(); } catch (e) { endCook(); fail(e); }
 }
 function endCook() {
   clearInterval(C.tick); C.timers = []; document.removeEventListener("keydown", cookKeys);
@@ -213,7 +228,7 @@ function cookKeys(e) { if (e.key === "ArrowRight") cookMove(1); if (e.key === "A
 function cookMove(d) { C.i = Math.max(0, Math.min(C.steps.length - 1, C.i + d)); drawCook(); }
 function drawCook() {
   const s = C.steps[C.i], rec = R.rec, f = factor(), n = C.steps.length;
-  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${x.emoji} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
+  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${esc(x.emoji)} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
   const running = C.timers.find((t) => t.step === C.i);
   $("#cook").innerHTML = `
     <div class="cook-top"><button class="round-btn" id="ck-x" aria-label="Close">${ic("x")}</button><div class="prog"><i style="width:${((C.i + 1) / n) * 100}%"></i></div><span class="count">${C.i + 1}/${n}</span></div>
@@ -271,10 +286,10 @@ function openImagePicker({ kind, slug, name, after }) {
   const isRec = kind === "recipe";
   openSheet(isRec ? "Recipe photo" : `Photo: ${name}`, `
     <div style="border-radius:16px;overflow:hidden;background:var(--card2);aspect-ratio:${isRec ? "4/3" : "1"};max-height:300px;margin:0 auto 14px;display:grid;place-items:center" id="ip-prev">
-      ${isRec ? (R.rec?.has_image ? `<img src="${recipeImg(R.rec, "full")}" style="width:100%;height:100%;object-fit:cover">` : "🍽️") : `<img src="/img/ing?name=${encodeURIComponent(name)}&t=${Date.now()}" style="width:70%;height:70%;object-fit:contain" data-fb="No photo yet">`}
+      ${isRec ? (R.rec?.has_image ? `<img src="${esc(recipeImg(R.rec, "full"))}" style="width:100%;height:100%;object-fit:cover">` : "🍽️") : `<img src="/img/ing?name=${encodeURIComponent(name)}&t=${Date.now()}" style="width:70%;height:70%;object-fit:contain" data-fb="No photo yet">`}
     </div>
     <div class="btn-row"><button class="btn sec" id="ip-next">${ic("refresh")} Try another</button><label class="btn" style="cursor:pointer">${ic("camera")} Upload<input type="file" accept="image/*" id="ip-file" hidden></label></div>
-    <p class="hint" id="ip-credit">${isRec ? "“Try another” finds openly licensed food photos (Openverse)." : "Ingredient photos come from TheMealDB, then openly licensed photos (Openverse)."} Your own photo always wins.</p>`, {
+    <p class="hint" id="ip-credit">${isRec ? "“Try another” finds openly licensed food photos (Openverse)." : "Ingredient photos come from TheMealDB, then openly licensed photos (Openverse)."} Your own photo always wins.<span class="desktop-only"> Drag & drop or paste an image onto the photo to use it.</span></p>`, {
     onMount() {
       const done = (credit) => { if (credit) $("#ip-credit").textContent = `Photo: ${credit}`; toast("Photo updated"); closeSheet(); after && after(); };
       $("#ip-next").onclick = async (e) => {
@@ -282,11 +297,14 @@ function openImagePicker({ kind, slug, name, after }) {
         try { const r = await api("POST", isRec ? `/api/recipe/${encodeURIComponent(slug)}/image/next` : "/api/ingredient-image/next", isRec ? {} : { name }); done(r.credit); }
         catch (x) { fail(x); btn.disabled = false; btn.innerHTML = `${ic("refresh")} Try another`; }
       };
-      $("#ip-file").onchange = async (e) => {
-        const f = e.target.files[0]; if (!f) return;
+      const upload = async (f) => {
+        if (!f) return;
+        $("#ip-prev").innerHTML = loading();
         const data = await shrink(f);
         try { await api("POST", isRec ? `/api/recipe/${encodeURIComponent(slug)}/image/upload` : "/api/ingredient-image/upload", isRec ? { data } : { name, data }); done("Your photo"); } catch (x) { fail(x); }
       };
+      $("#ip-file").onchange = (e) => upload(e.target.files[0]);
+      dropZone($("#ip-prev"), (files) => upload(files[0]));
     },
   });
 }
@@ -303,12 +321,12 @@ async function openAiSpending() {
     sheetBody().innerHTML = `
       <div class="group"><div class="bigstat"><b>$${total.toFixed(total < 1 ? 3 : 2)}</b><small>${exact ? "Exact OpenAI spend this month (all apps on your account, including Mealie imports)" : "Estimated spend this month from TablePlan's own AI features"}</small>
         ${d.budget ? `<div class="meter" style="max-width:none;margin-top:10px"><i style="width:${pct}%;background:${pct >= 100 ? "var(--red)" : pct >= 80 ? "var(--orange)" : "var(--green)"}"></i></div><small>${pct.toFixed(0)}% of your $${d.budget.toFixed(2)} monthly budget</small>` : ""}</div>
-        ${days.length ? `<div class="bars">${days.map((x) => `<i title="${x.date}: $${x.usd.toFixed(4)}" style="height:${(x.usd / max) * 100}%"></i>`).join("")}</div>` : ""}</div>
+        ${days.length ? `<div class="bars">${days.map((x) => `<i title="${esc(x.date)}: $${(+x.usd).toFixed(4)}" style="height:${((+x.usd / max) * 100) || 0}%"></i>`).join("")}</div>` : ""}</div>
       <div class="group-label">This month by feature</div>
-      <div class="group">${d.by_feature.length ? d.by_feature.map((r) => `<div class="row flush"><div class="main"><div class="a">${esc(cap(r.feature))}</div><div class="b">${r.n} call${r.n === 1 ? "" : "s"}${r.tin ? ` · ${(r.tin / 1000).toFixed(1)}k in / ${(r.tout / 1000).toFixed(1)}k out tokens` : ""}</div></div><b>${r.usd ? "$" + r.usd.toFixed(4) : "—"}</b></div>`).join("") : `<div class="row flush muted">No AI use yet this month.</div>`}</div>
-      <p class="hint">Video imports aren't tracked here; OpenAI's own numbers (below) include everything. Estimates use list prices (${esc(d.model || "gpt-5-mini")}: $${(d.prices[d.model] || d.prices["gpt-5-mini"]).input}/1M in, $${(d.prices[d.model] || d.prices["gpt-5-mini"]).output}/1M out).</p>
+      <div class="group">${d.by_feature.length ? d.by_feature.map((r) => `<div class="row flush"><div class="main"><div class="a">${esc(cap(r.feature))}</div><div class="b">${esc(r.n)} call${r.n === 1 ? "" : "s"}${r.tin ? ` · ${(r.tin / 1000).toFixed(1)}k in / ${(r.tout / 1000).toFixed(1)}k out tokens` : ""}</div></div><b>${r.usd ? "$" + r.usd.toFixed(4) : "—"}</b></div>`).join("") : `<div class="row flush muted">No AI use yet this month.</div>`}</div>
+      <p class="hint">Video imports aren't tracked here; OpenAI's own numbers (below) include everything. Estimates use list prices (${esc(d.model || "gpt-5-mini")}: $${esc(((d.prices || {})[d.model] || (d.prices || {})["gpt-5-mini"] || {}).input)}/1M in, $${esc(((d.prices || {})[d.model] || (d.prices || {})["gpt-5-mini"] || {}).output)}/1M out).</p>
       <div class="group-label">Monthly budget</div>
-      <div class="group"><div class="field"><label>Alert me at (USD / month)</label><input type="number" id="ai-b" min="0" step="1" value="${d.budget || ""}" placeholder="Off"></div></div>
+      <div class="group"><div class="field"><label>Alert me at (USD / month)</label><input type="number" id="ai-b" min="0" step="1" value="${esc(d.budget || "")}" placeholder="Off"></div></div>
       <p class="hint">You get a notification at 80% and 100%. To hard-cap spending, also set a limit in OpenAI → Settings → Limits.</p>
       <div class="group-label">Exact costs from OpenAI</div>
       <div class="group"><div class="field"><input class="full" type="password" id="ai-ak" placeholder="${d.has_admin_key ? "Admin key saved ✓ (enter to replace)" : "sk-admin-… (optional)"}" autocomplete="off"></div></div>
@@ -358,7 +376,7 @@ async function openScanner(after) {
         if (busy) return; busy = true;
         try { navigator.vibrate?.(60); } catch (_) {}
         $("#sc-res").innerHTML = loading();
-        try { showProduct(await api("GET", `/api/upc/${code}`)); } catch (e) { $("#sc-res").innerHTML = `<div class="banner">${esc(e.message)}</div>`; }
+        try { showProduct(await api("GET", `/api/upc/${enc(code)}`)); } catch (e) { $("#sc-res").innerHTML = `<div class="banner">${esc(e.message)}</div>`; }
         busy = false;
       };
       const showProduct = (p) => {
@@ -417,15 +435,15 @@ async function openCheckin(after) {
   try { items = (await api("GET", "/api/pantry")).items; } catch (e) { return fail(e); }
   const acted = new Set();
   openSheet("Pantry check-in", `<p class="hint" style="margin:0 4px 12px">Confirm what's still here. It takes a minute and keeps use-by dates and shopping lists accurate.</p>
-    <div class="group">${items.map((it) => `<div class="row flush" data-id="${it.id}"><span class="emo">${it.emoji || "🥫"}</span><div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(cap(it.location))} · ${Math.round(it.amount_left * 100)}% left${it.expires_on ? ` · ${esc(relExpiry(it))}` : ""}</div></div>
+    <div class="group">${items.map((it) => `<div class="row flush" data-id="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🥫")}</span><div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(cap(it.location))} · ${Math.round(it.amount_left * 100)}% left${it.expires_on ? ` · ${esc(relExpiry(it))}` : ""}</div></div>
       <div style="display:flex;gap:6px"><button class="pill-btn" data-a="keep" style="box-shadow:none;background:var(--fill)">✓</button><button class="pill-btn" data-a="half" style="box-shadow:none;background:var(--fill)">½</button><button class="pill-btn" data-a="gone" style="box-shadow:none;background:var(--fill);color:var(--red)">✕</button></div></div>`).join("") || `<div class="row flush muted">Your pantry is empty. Scan or add items first.</div>`}</div>
     <div style="height:14px"></div><button class="btn" id="ci-done">${ic("check")} Done</button>`, {
     onMount() {
       $$("[data-a]").forEach((b) => (b.onclick = async () => {
         const row = b.closest("[data-id]"), id = row.dataset.id, a = b.dataset.a, it = items.find((x) => String(x.id) === id);
         try {
-          if (a === "gone") await api("PATCH", `/api/pantry/${id}`, { action: "use", left: 0 });
-          if (a === "half") await api("PATCH", `/api/pantry/${id}`, { action: "use", left: Math.min(0.5, it.amount_left) });
+          if (a === "gone") await api("PATCH", `/api/pantry/${enc(id)}`, { action: "use", left: 0 });
+          if (a === "half") await api("PATCH", `/api/pantry/${enc(id)}`, { action: "use", left: Math.min(0.5, it.amount_left) });
           acted.add(id); row.style.opacity = a === "gone" ? ".35" : ".6";
           $$("[data-a]", row).forEach((x) => (x.style.background = x === b ? "var(--ink)" : "var(--fill)", x.style.color = x === b ? "var(--on-ink)" : ""));
         } catch (e) { fail(e); }
@@ -497,16 +515,16 @@ async function renderRecipeEditor(slug) {
       <div class="field"><textarea class="full-area" id="ed-desc" rows="2" placeholder="Short description (optional)">${esc(rec.description)}</textarea></div></div>
     <div class="group-label">Details</div>
     <div class="group">
-      <div class="field"><label>Servings</label><input type="number" id="ed-serv" min="0" step="0.5" value="${rec.servings || ""}"></div>
-      <div class="field"><label>Prep (min)</label><input type="number" id="ed-prep" min="0" value="${rec.prep_minutes || ""}"></div>
-      <div class="field"><label>Cook (min)</label><input type="number" id="ed-cook" min="0" value="${rec.cook_minutes || ""}"></div>
-      <div class="field"><label>Total (min)</label><input type="number" id="ed-total" min="0" value="${rec.total_minutes || ""}"></div>
+      <div class="field"><label>Servings</label><input type="number" id="ed-serv" min="0" step="0.5" value="${esc(rec.servings || "")}"></div>
+      <div class="field"><label>Prep (min)</label><input type="number" id="ed-prep" min="0" value="${esc(rec.prep_minutes || "")}"></div>
+      <div class="field"><label>Cook (min)</label><input type="number" id="ed-cook" min="0" value="${esc(rec.cook_minutes || "")}"></div>
+      <div class="field"><label>Total (min)</label><input type="number" id="ed-total" min="0" value="${esc(rec.total_minutes || "")}"></div>
     </div>
     <div class="group-label">Ingredients</div>
-    <div class="group"><textarea class="full-area mono" id="ed-ing" rows="${Math.min(18, rec.ingredients.length + 3)}" placeholder="One per line, e.g. 1 ½ cups heavy cream">${esc(ingText)}</textarea></div>
+    <div class="group"><textarea class="full-area mono" id="ed-ing" rows="${Math.min(18, (+rec.ingredients.length || 0) + 3)}" placeholder="One per line, e.g. 1 ½ cups heavy cream">${esc(ingText)}</textarea></div>
     <p class="hint">One ingredient per line, amount first (“2 cups flour”), so it scales. Start a line with # for a heading, like “# Sauce”.</p>
     <div class="group-label">Instructions</div>
-    <div class="group"><textarea class="full-area" id="ed-steps" rows="${Math.min(20, rec.steps.length * 3 + 3)}" placeholder="Leave a blank line between steps">${esc(stepText)}</textarea></div>
+    <div class="group"><textarea class="full-area" id="ed-steps" rows="${Math.min(20, (+rec.steps.length || 0) * 3 + 3)}" placeholder="Leave a blank line between steps">${esc(stepText)}</textarea></div>
     <p class="hint">Leave a blank line between steps.</p>
     <div style="height:18px"></div><button class="btn red" id="ed-del">${ic("trash")} Delete recipe</button><div style="height:30px"></div>`;
   const back = () => (history.length > 1 ? history.back() : openRecipe(slug));

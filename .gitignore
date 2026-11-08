@@ -1,6 +1,22 @@
+# Python
 __pycache__/
-*.pyc
-.env
-dist/
+*.py[cod]
+
+# Local data (DATA_DIR) and secrets
 data/
+.data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+
+# Build output
+dist/
+
+# Editors / OS
 .DS_Store
+.idea/
+.vscode/
+*.swp

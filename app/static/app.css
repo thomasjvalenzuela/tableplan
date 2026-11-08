@@ -434,3 +434,5 @@ input::placeholder,textarea::placeholder{color:var(--sub2)}
 .pdf-thumb{width:64px;height:64px;border-radius:10px;background:var(--card2);display:grid;place-items:center;font-size:26px;text-align:center;overflow:hidden}
 .pdf-thumb small{display:block;font-size:9px;color:var(--sub);max-width:60px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 code{font-size:12.5px;background:var(--fill);padding:1px 5px;border-radius:5px;word-break:break-all}
+
+.drop.dragging,#ip-prev.dragging{outline:2.5px dashed var(--tint);outline-offset:-6px;background:color-mix(in srgb,var(--tint) 10%,var(--card2))}

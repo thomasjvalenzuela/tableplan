@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in TablePlan isn't working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. **Security problems should not be filed here**: use the
+        [private vulnerability report](https://github.com/thomasjvalenzuela/tableplan/security/advisories/new) instead.
+
+        Please remove API keys, tokens, passwords and personal details from anything you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: "1. Open Recipes → Import from link\n2. Paste https://…\n3. See error …"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TablePlan version
+      description: Shown at the bottom of the Settings screen (for example 0.4.12).
+      placeholder: "0.4.12"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is TablePlan installed?
+      options:
+        - ZimaOS / CasaOS app store
+        - SSH installer (install.sh)
+        - Docker Compose / Portainer / other Docker host
+        - Railway or another cloud host
+        - Running from source
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: device
+    attributes:
+      label: Where do you see the problem?
+      multiple: true
+      options:
+        - Phone browser
+        - Installed phone app (PWA)
+        - Desktop browser
+        - Server / container (no UI)
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and device
+      placeholder: "Safari on iPhone 15, iOS 18"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Container logs
+      description: "Output of `docker logs tableplan --tail 100`, if relevant. Check it for secrets before posting."
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, the recipe link that failed to import, etc.

@@ -188,9 +188,13 @@ def favorite_ids(c):
 
 # ------------------------------------------------------------------ images
 
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
 def _image_dir(images_dir, recipe_id):
+    # Recipe ids are UUIDs; anything else is refused before it can become part of a file path.
     rid = str(recipe_id)
-    if not re.fullmatch(r"[A-Za-z0-9-]+", rid):
+    if not _UUID_RE.fullmatch(rid):
         raise ValueError("Invalid recipe id.")
     return os.path.join(images_dir, "recipes", rid)
 

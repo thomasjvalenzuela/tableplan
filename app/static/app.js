@@ -48,6 +48,16 @@ const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24">${P[n] || 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Recipe text, image credits and links come from scraped pages and AI output, so treat every server value as untrusted:
+// esc() it into HTML, run URLs through safeUrl() (defined in setup.js as _safeUrl), and build path segments with enc().
+const safeUrl = _safeUrl;
+const enc = (v) => encodeURIComponent(String(v ?? ""));
+// A CSS url("…") token for inline style attributes: the URL is vetted, the characters that could end the token are
+// percent-encoded, and the whole thing is HTML-escaped for the attribute. Returns "" for unsafe URLs.
+const cssUrl = (u) => { const s = safeUrl(u, true); return s ? `url('${esc(s.replace(/['"()\\\s]/g, (c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0").toUpperCase()))}')` : ""; };
+const bgStyle = (u) => { const c = cssUrl(u); return c ? `style="background-image:${c}"` : ""; };
+// External link attributes (href + target + rel), or "" when the URL isn't http(s)/same-origin.
+const extLink = (u) => { const s = safeUrl(u); return s ? `href="${esc(s)}" target="_blank" rel="noopener noreferrer"` : ""; };
 const app = $("#app");
 const state = { tab: "home", cfg: null, summary: null, weekOffset: 0, mealsMode: "week", monthOffset: 0, listId: localStorage.getItem("tp.list") || null, pantryFilter: "all", plan: null };
 
@@ -71,7 +81,7 @@ const fmt = (d, o) => d.toLocaleDateString(undefined, o);
 const dayName = (s) => { const d = parseISO(s), t = today(); const diff = Math.round((d - t) / 864e5);
   return diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : fmt(d, { weekday: "short" }); };
 const cap = (s) => (s || "").charAt(0).toUpperCase() + (s || "").slice(1);
-const imgUrl = (r, size = "min") => (r && r.id && r.has_image !== false ? `/img/${r.id}?size=${size}${r.image_v ? "&v=" + encodeURIComponent(r.image_v) : ""}` : null);
+const imgUrl = (r, size = "min") => (r && r.id && r.has_image !== false ? `/img/${enc(r.id)}?size=${enc(size)}${r.image_v ? "&v=" + enc(r.image_v) : ""}` : null);
 
 function expiryPill(item) {
   const d = item.days_left;
@@ -134,9 +144,9 @@ const REPO = "https://github.com/thomasjvalenzuela/tableplan";
 function renderTabs() {
   const v = state.cfg?.version || "";
   $("#tabs").innerHTML = `<div class="nav-brand"><img src="/static/icon-180.png" alt="">TablePlan</div>` +
-    TABS.map(([id, label, icon]) => `<button class="tab ${state.tab === id ? "on" : ""}" data-tab="${id}">${ic(icon)}<span>${label}</span></button>`).join("") +
+    TABS.map(([id, label, icon]) => `<button class="tab ${state.tab === id ? "on" : ""}" data-tab="${esc(id)}">${ic(icon)}<span>${label}</span></button>`).join("") +
     `<div style="flex:1" class="desktop-only"></div><button class="tab desktop-only ${upd() ? "dot" : ""}" id="nav-settings">${ic("gear")}<span>Settings</span></button>
-     <div class="nav-foot"><span>Version ${esc(v)}</span><a href="${state.cfg?.repo_url || REPO}" target="_blank" rel="noopener" aria-label="TablePlan on GitHub" title="TablePlan on GitHub">${ic("github")}</a></div>`;
+     <div class="nav-foot"><span>Version ${esc(v)}</span><a ${extLink(state.cfg?.repo_url) || extLink(REPO)} aria-label="TablePlan on GitHub" title="TablePlan on GitHub">${ic("github")}</a></div>`;
   $$("#tabs .tab[data-tab]").forEach((b) => (b.onclick = () => go(b.dataset.tab)));
   $("#nav-settings").onclick = () => openSettings();
 }
@@ -213,7 +223,7 @@ async function renderHome() {
   html += `<div class="section-h"><h2>Tonight</h2></div>`;
   if (tonight && tonight.recipe) {
     const img = imgUrl(tonight.recipe, "full");
-    html += `<button class="tile hero wide ${img ? "" : "noimg"}" id="hero" ${img ? `style="background-image:url('${img}')"` : ""}>
+    html += `<button class="tile hero wide ${img ? "" : "noimg"}" id="hero" ${img ? bgStyle(img) : ""}>
       <div class="shade"></div><div class="hero-txt"><div class="t-sub">${esc(cap(tonight.entry_type))}</div><div class="t-title">${esc(entryName(tonight))}</div></div></button>`;
   } else {
     html += `<div class="grid"><button class="tile wide dim" id="plan-now"><span class="ic bg-orange">${ic("sparkle")}</span>
@@ -227,10 +237,10 @@ async function renderHome() {
     const e = s.week.filter((x) => x.date === iso).sort((a, b) => (a.entry_type === "dinner" ? -1 : 1))[0];
     if (e) {
       const img = imgUrl(e.recipe);
-      html += `<button class="day-card" data-entry="${e.id}"><div class="img ${img ? "" : "ph"}" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : ic("dish")}</div>
+      html += `<button class="day-card" data-entry="${esc(e.id)}"><div class="img ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</div>
         <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">${esc(entryName(e))}</div></div></button>`;
     } else {
-      html += `<button class="day-card blank" data-plan-day="${iso}"><div class="img ph" style="background:rgba(255,255,255,.12)">${ic("plus")}</div>
+      html += `<button class="day-card blank" data-plan-day="${esc(iso)}"><div class="img ph" style="background:rgba(255,255,255,.12)">${ic("plus")}</div>
         <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">Not planned</div></div></button>`;
     }
   }
@@ -241,11 +251,11 @@ async function renderHome() {
   if (exp.length) {
     html += `<div class="grid">${exp.slice(0, 6).map((it) => {
       const [i, c] = locIcon[it.location] || locIcon.fridge;
-      return `<button class="tile" data-item="${it.id}"><span class="ic ${it.days_left <= 0 ? "bg-red" : "bg-orange"}">${ic(i)}</span>
+      return `<button class="tile" data-item="${esc(it.id)}"><span class="ic ${it.days_left <= 0 ? "bg-red" : "bg-orange"}">${ic(i)}</span>
         <span style="min-width:0"><div class="t-title">${esc(it.name)}</div><div class="t-sub">${esc(relExpiry(it))}</div></span></button>`;
     }).join("")}</div>`;
   } else {
-    html += `<div class="grid"><div class="tile dim wide"><span class="ic bg-green">${ic("leaf")}</span><span><div class="t-title">Nothing expiring soon</div><div class="t-sub">${s.pantry_count} items tracked</div></span></div></div>`;
+    html += `<div class="grid"><div class="tile dim wide"><span class="ic bg-green">${ic("leaf")}</span><span><div class="t-title">Nothing expiring soon</div><div class="t-sub">${esc(s.pantry_count)} items tracked</div></span></div></div>`;
   }
 
   // Quick actions
@@ -310,7 +320,7 @@ async function renderMeals() {
   $("#mealie-plan").onclick = () => openPlanToList(isoDate(start < today() ? today() : start), isoDate(end), label);
 
   let data;
-  try { data = state.plan = await api("GET", `/api/plan?start=${isoDate(start)}&end=${isoDate(end)}`); }
+  try { data = state.plan = await api("GET", `/api/plan?start=${enc(isoDate(start))}&end=${enc(isoDate(end))}`); }
   catch (e) { $("#days").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
   const byDay = {};
   data.entries.forEach((e) => (byDay[e.date] = byDay[e.date] || []).push(e));
@@ -319,10 +329,10 @@ async function renderMeals() {
     const iso = isoDate(d), es = (byDay[iso] || []).sort((a, b) => order(a.entry_type) - order(b.entry_type));
     const isToday = iso === isoDate(today());
     html += `<div class="group-label">${isToday ? "Today · " : ""}${esc(fmt(d, { weekday: "long", month: "short", day: "numeric" }))}</div><div class="group">`;
-    if (!es.length) html += `<button class="row" data-plan-day="${iso}"><div class="thumb ph" style="background:rgba(127,127,127,.15);color:var(--sub)">${ic("plus")}</div><div class="main"><div class="a muted">Not planned</div><div class="b">Tap to fill from your recipes</div></div></button>`;
+    if (!es.length) html += `<button class="row" data-plan-day="${esc(iso)}"><div class="thumb ph" style="background:rgba(127,127,127,.15);color:var(--sub)">${ic("plus")}</div><div class="main"><div class="a muted">Not planned</div><div class="b">Tap to fill from your recipes</div></div></button>`;
     es.forEach((e) => {
       const img = imgUrl(e.recipe);
-      html += `<button class="row" data-entry="${e.id}"><div class="thumb ${img ? "" : "ph"}" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : ic("dish")}</div>
+      html += `<button class="row" data-entry="${esc(e.id)}"><div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</div>
         <div class="main"><div class="a">${esc(entryName(e))}</div><div class="b">${esc(cap(e.entry_type))}</div></div><span class="chev">${ic("chevR")}</span></button>`;
     });
     html += `</div>`;
@@ -339,20 +349,20 @@ function openEntry(e) {
   const r = e.recipe || {};
   const img = imgUrl(r, "full");
   openSheet(entryName(e), `
-    ${img ? `<div style="height:190px;border-radius:14px;background:#ddd url('${img}') center/cover;margin-bottom:12px"></div>` : ""}
+    ${img && cssUrl(img) ? `<div style="height:190px;border-radius:14px;background:#ddd ${cssUrl(img)} center/cover;margin-bottom:12px"></div>` : ""}
     <div class="muted" style="margin:-4px 2px 14px">${esc(cap(e.entry_type))} · ${esc(fmt(parseISO(e.date), { weekday: "long", month: "long", day: "numeric" }))}</div>
     ${r.slug ? `<button class="btn" id="open-r">${ic("book")} Open recipe</button>
       <p class="hint" style="margin:7px 4px 14px">Change servings on the recipe page and every ingredient scales exactly.</p>` : ""}
     <div class="btn-row"><button class="btn sec" id="swap">${ic("shuffle")} Swap</button><button class="btn red" id="rm">${ic("trash")} Remove</button></div>`, {
     onMount() {
       $("#open-r") && ($("#open-r").onclick = () => { closeSheet(true); openRecipe(r.slug); });
-      $("#rm").onclick = async () => { try { await api("DELETE", `/api/plan/${e.id}`); closeSheet(); toast("Removed from plan"); refresh(); } catch (x) { fail(x); } };
+      $("#rm").onclick = async () => { try { await api("DELETE", `/api/plan/${enc(e.id)}`); closeSheet(); toast("Removed from plan"); refresh(); } catch (x) { fail(x); } };
       $("#swap").onclick = async () => {
         try {
           const planned = (state.plan?.entries || state.summary?.week || []).map((p) => ({ date: p.date, recipe_id: p.recipe?.id, entry_type: p.entry_type }));
           const p = await api("POST", "/api/plan/reroll", { date: e.date, entry_type: e.entry_type, exclude_ids: [r.id], planned });
           await api("POST", "/api/plan/save", { entries: [{ date: p.date, entry_type: p.entry_type, recipe_id: p.recipe.id }] });
-          await api("DELETE", `/api/plan/${e.id}`);
+          await api("DELETE", `/api/plan/${enc(e.id)}`);
           closeSheet(); toast(`Swapped for ${p.recipe.name}`); refresh();
         } catch (x) { fail(x); }
       };
@@ -373,14 +383,14 @@ async function openGenerate(opts = {}) {
     const presets = [[7, "Week"], [14, "2 Wks"], [30, "Month"]];
     sheetBody().innerHTML = `
       <div class="group">
-        <div class="field"><label>Starting</label><input type="date" id="g-start" value="${g.start}"></div>
+        <div class="field"><label>Starting</label><input type="date" id="g-start" value="${esc(g.start)}"></div>
         <div class="field"><label>How long</label><div class="seg" style="margin:0;flex:1;max-width:230px">${presets.map(([n, l]) => `<button data-days="${n}" class="${g.days === n ? "on" : ""}">${l}</button>`).join("")}</div></div>
       </div>
       <div class="group-label">Which meals should I plan?</div>
       <div class="group"><div class="tag-cloud" id="g-types">${["breakfast", "lunch", "dinner", "side"].map((t) => `<button class="tag ${g.meal_types.includes(t) ? "on" : ""}" data-t="${t}">${cap(t)}</button>`).join("")}</div></div>
       <div class="group-label">Preferences</div>
       <div class="group">
-        <div class="field"><label>No repeats for<small class="lh">The same recipe won't show up again within this many days.</small></label><input type="number" id="g-nr" min="0" max="90" value="${g.no_repeat_days}"> <span class="muted">days</span></div>
+        <div class="field"><label>No repeats for<small class="lh">The same recipe won't show up again within this many days.</small></label><input type="number" id="g-nr" min="0" max="90" value="${esc(g.no_repeat_days)}"> <span class="muted">days</span></div>
         <div class="field"><label>Use food before it goes bad<small class="lh">Favors recipes that use pantry items close to their use-by date.</small></label><label class="toggle"><input type="checkbox" id="g-exp" ${g.prefer_expiring ? "checked" : ""}><span></span></label></div>
         <div class="field"><label>Only fill empty days<small class="lh">Leaves meals you already picked alone. Turn off to replace everything.</small></label><label class="toggle"><input type="checkbox" id="g-fill" ${g.fill_empty_only ? "checked" : ""}><span></span></label></div>
         <button class="row" id="g-tags"><div class="main"><div class="a">Kinds of recipes</div><div class="b">${tagSummary(g)} · only use or skip tags like Vegetarian or Soup</div></div><span class="chev">${ic("chevR")}</span></button>
@@ -439,7 +449,7 @@ async function runGenerate(g) {
       html += `<div class="group-label">${esc(fmt(parseISO(d), { weekday: "short", month: "short", day: "numeric" }))}</div><div class="group">`;
       byDay[d].forEach(([p, i]) => {
         const img = imgUrl(p.recipe);
-        html += `<div class="row"><div class="thumb ${img ? "" : "ph"}" ${img ? `style="background-image:url('${img}')"` : ""}>${img ? "" : ic("dish")}</div>
+        html += `<div class="row"><div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</div>
           <div class="main"><div class="a">${esc(p.recipe.name)}${p.recipe.uses_expiring ? '<span class="badge">uses expiring</span>' : ""}</div><div class="b">${esc(cap(p.entry_type))}</div></div>
           <button class="round-btn" style="background:rgba(118,118,128,.14);color:var(--text)" data-rr="${i}" aria-label="Swap">${ic("shuffle")}</button>
           <button class="round-btn" style="background:rgba(118,118,128,.14);color:var(--sub)" data-del="${i}" aria-label="Remove">${ic("x")}</button></div>`;
@@ -484,11 +494,11 @@ async function renderList() {
   }
   if (!lists.find((l) => l.id === state.listId)) state.listId = lists[0].id;
   localStorage.setItem("tp.list", state.listId);
-  const sl = await api("GET", `/api/lists/${state.listId}`).catch((e) => ({ error: e.message }));
+  const sl = await api("GET", `/api/lists/${enc(state.listId)}`).catch((e) => ({ error: e.message }));
   if (sl.error) { $("#lists").innerHTML = `<div class="banner">${esc(sl.error)}</div>`; return; }
   $("#btn-share").onclick = () => openShare("list", { id: sl.id, name: sl.name });
   const count = sl.groups.reduce((n, g) => n + g.items.length, 0);
-  let html = lists.length > 1 ? `<div class="seg">${lists.map((l) => `<button data-l="${l.id}" class="${l.id === state.listId ? "on" : ""}">${esc(l.name)}</button>`).join("")}</div>` : "";
+  let html = lists.length > 1 ? `<div class="seg">${lists.map((l) => `<button data-l="${esc(l.id)}" class="${l.id === state.listId ? "on" : ""}">${esc(l.name)}</button>`).join("")}</div>` : "";
   html += `<div class="subtitle">${count ? `${count} item${count === 1 ? "" : "s"} · tap to check off — food goes into your pantry` : "All done 🎉"}</div>
     <div class="toolbar"><button class="pill-btn" id="l-email">${ic("share")} Send</button><button class="pill-btn" id="l-print">${ic("print")} Print</button>
     <button class="pill-btn" id="l-add">${ic("plus")} Add items</button></div>`;
@@ -496,14 +506,14 @@ async function renderList() {
     html += `<div class="group-label section">${esc(g.label)}</div><div class="group shop">${g.items.map((it) => {
       const title = it.food ? cap(it.food) : it.text;
       const sub = it.food ? (it.qty || (it.text.toLowerCase() !== it.food.toLowerCase() ? it.text : "")) : "";
-      return `<button class="row" data-id="${it.id}" data-name="${esc(it.name)}"><span class="emo">${it.emoji || "🛒"}</span><div class="main"><div class="a">${esc(title)}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}</div><span class="check sq">${ic("check")}</span></button>`;
+      return `<button class="row" data-id="${esc(it.id)}" data-name="${esc(it.name)}"><span class="emo">${esc(it.emoji || "🛒")}</span><div class="main"><div class="a">${esc(title)}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}</div><span class="check sq">${ic("check")}</span></button>`;
     }).join("")}</div>`;
   });
   if (!count) html += `<div class="empty">Nothing left to buy.</div>`;
   $("#lists").innerHTML = html;
   $$("[data-l]").forEach((b) => (b.onclick = () => { state.listId = b.dataset.l; renderList(); }));
   $("#l-email").onclick = () => sendIt({ kind: "list", id: sl.id });
-  $("#l-print").onclick = () => printIt(`/print/list/${sl.id}`);
+  $("#l-print").onclick = () => printIt(`/print/list/${enc(sl.id)}`);
   $("#l-add").onclick = () => openAddItems(sl.id);
   $$("#lists .row[data-id]").forEach((row) => (row.onclick = () => buyItem(sl.id, row)));
 }
@@ -516,7 +526,7 @@ function openAddItems(listId) {
       $("#ai-go").onclick = async () => {
         const items = $("#ai-items").value.split(/\n+/).map((x) => x.trim()).filter(Boolean);
         if (!items.length) return toast("Type at least one item");
-        try { const r = await api("POST", `/api/lists/${listId}/items`, { items }); closeSheet(); toast(`Added ${r.added}`); renderList(); } catch (e) { fail(e); }
+        try { const r = await api("POST", `/api/lists/${enc(listId)}/items`, { items }); closeSheet(); toast(`Added ${r.added}`); renderList(); } catch (e) { fail(e); }
       };
     },
   });
@@ -527,10 +537,10 @@ async function buyItem(listId, row) {
   row.classList.add("done"); $(".check", row).classList.add("on");
   const id = row.dataset.id;
   try {
-    const r = await api("POST", `/api/lists/${listId}/items/${id}/bought`, { to_pantry: "auto" });
+    const r = await api("POST", `/api/lists/${enc(listId)}/items/${enc(id)}/bought`, { to_pantry: "auto" });
     setTimeout(() => { row.style.transition = "opacity .3s"; row.style.opacity = "0"; setTimeout(() => row.remove(), 300); }, 500);
     const undo = async () => {
-      try { await api("POST", `/api/lists/${listId}/items/${id}/undo`, { pantry_item_id: r.pantry_item && r.pantry_item.id }); renderList(); } catch (e) { fail(e); }
+      try { await api("POST", `/api/lists/${enc(listId)}/items/${enc(id)}/undo`, { pantry_item_id: r.pantry_item && r.pantry_item.id }); renderList(); } catch (e) { fail(e); }
     };
     if (r.pantry_item) {
       const p = r.pantry_item;
@@ -570,7 +580,7 @@ async function renderPantry() {
     html += `<div class="group" style="margin-top:12px">${shown.map((it) => {
       const [i, c] = locIcon[it.location] || locIcon.fridge;
       const left = Math.round(it.amount_left * 100);
-      return `<button class="row" data-id="${it.id}"><span class="emo">${it.emoji || "🥫"}</span>
+      return `<button class="row" data-id="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🥫")}</span>
         <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${it.opened_on ? "Opened" : "Sealed"}${left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
@@ -583,7 +593,7 @@ async function renderPantry() {
 function openPantryItem(it, after) {
   if (!it) return;
   const act = async (body, msg) => {
-    try { const r = await api("PATCH", `/api/pantry/${it.id}`, body); if (msg) toast(msg); return r; } catch (e) { fail(e); return null; }
+    try { const r = await api("PATCH", `/api/pantry/${enc(it.id)}`, body); if (msg) toast(msg); return r; } catch (e) { fail(e); return null; }
   };
   const draw = (it) => {
     const left = Math.round(it.amount_left * 100);
@@ -603,11 +613,11 @@ function openPantryItem(it, after) {
         <button data-use="0.75">${ic("open")}¾</button><button data-use="1">${ic("check")}All</button>
       </div>
       <div class="group"><div class="amount"><span class="muted">Left</span><input type="range" min="0" max="100" step="5" value="${left}" id="pi-left"><b id="pi-lv">${left}%</b></div></div>
-      ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and switches to the after-opening shelf life${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge} days)` : ""}.</p>` : ""}
+      ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and switches to the after-opening shelf life${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${esc(it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge)} days)` : ""}.</p>` : ""}
       <div class="group-label">Stored in</div>
       <div class="seg" id="pi-loc">${["fridge", "freezer", "pantry"].map((l) => `<button data-loc="${l}" class="${it.location === l ? "on" : ""}">${cap(l)}</button>`).join("")}</div>
       <div class="group" style="margin-top:12px">
-        <div class="field"><label>Use-by date</label><input type="date" id="pi-date" value="${it.expires_on || ""}"></div>
+        <div class="field"><label>Use-by date</label><input type="date" id="pi-date" value="${esc(it.expires_on || "")}"></div>
         <button class="row" id="pi-rule"><div class="main"><div class="a">Shelf life</div><div class="b">${esc(ruleLine)}</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <p class="hint">Have a printed date? Enter it above and it wins over the estimate.</p>
@@ -647,7 +657,7 @@ function pickRule(it, cb) {
   const run = async () => {
     try {
       const { rules } = await api("GET", `/api/rules?q=${encodeURIComponent(q.value)}`);
-      $("#rres").innerHTML = `<div class="group">${rules.map((r) => `<button class="row" data-r="${r.id}"><div class="main"><div class="a">${esc(r.name)} ${r.source === "custom" ? '<span class="badge">house</span>' : r.source === "usda" ? '<span class="badge" style="background:rgba(0,122,255,.14);color:var(--blue)">USDA</span>' : ""}</div><div class="b">${esc(ruleDesc(r))}</div></div></button>`).join("") || '<div class="row"><div class="main muted">No matches</div></div>'}</div>
+      $("#rres").innerHTML = `<div class="group">${rules.map((r) => `<button class="row" data-r="${esc(r.id)}"><div class="main"><div class="a">${esc(r.name)} ${r.source === "custom" ? '<span class="badge">house</span>' : r.source === "usda" ? '<span class="badge" style="background:rgba(0,122,255,.14);color:var(--blue)">USDA</span>' : ""}</div><div class="b">${esc(ruleDesc(r))}</div></div></button>`).join("") || '<div class="row"><div class="main muted">No matches</div></div>'}</div>
         <p class="hint">Not listed? Add a house rule in Settings → Shelf life.</p>`;
       $$("#rres [data-r]").forEach((b) => (b.onclick = () => cb(rules.find((r) => String(r.id) === b.dataset.r))));
     } catch (e) { fail(e); }
@@ -708,20 +718,20 @@ function openAddRecipe(prefill) {
         body.innerHTML = `<div class="group" style="margin-top:12px"><div class="field"><input class="full" type="url" id="ar-url" placeholder="Recipe site, Instagram, TikTok, YouTube or Google Doc link" autocomplete="off"></div></div>
           <div style="height:12px"></div><button class="btn" id="ar-go">${ic("link")} Import</button>
           <p class="hint">Recipe sites import in seconds. Videos read the caption first; if the recipe is only spoken, AI listens to it (needs your OpenAI key, ~30–90 s). Google Docs must be shared as “Anyone with the link”.</p>`;
-        $("#ar-go").onclick = () => { const u = $("#ar-url").value.trim(); if (!/^https?:\/\//i.test(u)) return toast("Paste a full link starting with https://"); run("link", () => api("POST", "/api/import/url", { url: u })); };
+        $("#ar-go").onclick = () => { const u = $("#ar-url").value.trim(); if (!/^https?:\/\//i.test(u) || !safeUrl(u)) return toast("Paste a full link starting with https://"); run("link", () => api("POST", "/api/import/url", { url: u })); };
         if (navigator.clipboard && navigator.clipboard.readText) {
           $("#ar-url").addEventListener("focus", async () => { try { const t = await navigator.clipboard.readText(); if (/^https?:\/\//.test(t) && !$("#ar-url").value) $("#ar-url").value = t.trim(); } catch (_) {} }, { once: true });
         }
       };
       const drawPhoto = () => {
-        body.innerHTML = `<label class="drop" style="margin-top:12px">${ic("camera")}<div style="margin-top:6px"><b>Choose screenshots, photos or a PDF</b><br><span class="muted">Up to 8 files: a recipe card, cookbook page or a screenshot of a post</span></div>
+        body.innerHTML = `<label class="drop" style="margin-top:12px">${ic("camera")}<div style="margin-top:6px"><b>Choose screenshots, photos or a PDF</b><br><span class="muted">Up to 8 files: a recipe card, cookbook page or a screenshot of a post</span><br><span class="muted desktop-only">or drag & drop / paste them here</span></div>
           <input type="file" id="ar-files" accept="image/*,application/pdf" multiple hidden></label>
           <div class="thumbs" id="ar-thumbs"></div>
           <div style="height:12px"></div><button class="btn" id="ar-go" ${imgs.length ? "" : "disabled"}>${ic("sparkle")} Read recipe with AI</button>
           <p class="hint" id="ar-aihint">${state.setup?.ai?.enabled === false ? "AI import isn't set up yet. Add your OpenAI key in Settings → AI recipe import." : "Usually takes 20–60 seconds. Check the ingredients afterwards."}</p>`;
-        const thumbs = () => { $("#ar-thumbs").innerHTML = imgs.map((im) => im.type === "application/pdf" ? `<div class="pdf-thumb">📄<small>${esc(im.name)}</small></div>` : `<img src="${im.data}" alt="">`).join(""); $("#ar-go").disabled = !imgs.length; };
-        $("#ar-files").onchange = async (e) => {
-          for (const f of [...e.target.files].slice(0, 8 - imgs.length)) {
+        const thumbs = () => { $("#ar-thumbs").innerHTML = imgs.map((im) => im.type === "application/pdf" ? `<div class="pdf-thumb">📄<small>${esc(im.name)}</small></div>` : `${safeUrl(im.data, true) ? `<img src="${esc(safeUrl(im.data, true))}" alt="">` : ""}`).join(""); $("#ar-go").disabled = !imgs.length; };
+        const addFiles = async (files) => {
+          for (const f of [...files].slice(0, 8 - imgs.length)) {
             if (f.type === "application/pdf") {
               if (f.size > 15e6) { toast("That PDF is over 15 MB"); continue; }
               imgs.push({ name: f.name, type: f.type, data: await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(f); }) });
@@ -729,6 +739,8 @@ function openAddRecipe(prefill) {
           }
           thumbs();
         };
+        $("#ar-files").onchange = (e) => addFiles(e.target.files);
+        dropZone($("#ar-body .drop"), addFiles, /^(image\/|application\/pdf)/);
         thumbs();
         $("#ar-go").onclick = () => run("photo", () => api("POST", "/api/import/images", { images: imgs }));
       };
@@ -742,7 +754,7 @@ function openAddRecipe(prefill) {
           $("#ar-body").innerHTML = "";
           $("#ar-mode").style.display = "none";
           $("#ar-result").innerHTML = `<div class="wstatus ok" style="margin-top:4px"><b>Added “${esc(r.name || r.slug)}”</b>
-            <span>${r.ingredients ? `${r.ingredients} ingredients` : ""}${r.servings ? ` · serves ${r.servings}` : ""}</span></div>
+            <span>${r.ingredients ? `${esc(r.ingredients)} ingredients` : ""}${r.servings ? ` · serves ${esc(r.servings)}` : ""}</span></div>
             <div class="btn-row" style="margin-top:12px"><button class="btn sec" id="ar-again">${ic("plus")} Add another</button><button class="btn" id="ar-open">${ic("book")} Open recipe</button></div>`;
           $("#ar-again").onclick = () => openAddRecipe();
           $("#ar-open").onclick = () => { closeSheet(true); openRecipe(r.slug); };
@@ -765,7 +777,11 @@ function openAddRecipe(prefill) {
       };
       $$("#ar-mode button").forEach((bt) => (bt.onclick = () => { $$("#ar-mode button").forEach((x) => x.classList.toggle("on", x === bt)); ({ link: drawLink, photo: drawPhoto, paste: drawPaste, type: drawType })[bt.dataset.m](); }));
       drawLink();
-      if (prefill) { $("#ar-url").value = prefill; setTimeout(() => $("#ar-go").click(), 200); }
+      // Shared/deep-linked URLs are only prefilled. Anyone can craft a /?url= link, so importing always takes a tap.
+      if (typeof prefill === "string" && prefill) {
+        $("#ar-url").value = prefill;
+        $("#ar-body").insertAdjacentHTML("afterbegin", `<div class="banner info" style="margin-top:12px">Import this link? Check it, then tap <b>Import</b>.<br><small style="word-break:break-all">${esc(prefill)}</small></div>`);
+      }
     },
   });
 }
@@ -795,6 +811,17 @@ function importProgress(box, kind) {
     stop() { clearInterval(iv); },
   };
 }
+// Drag & drop (and paste) files onto a zone. onFiles receives an array of File objects.
+function dropZone(el, onFiles, accept = /^image\//) {
+  if (!el) return;
+  const take = (files) => { const ok = [...files].filter((f) => accept.test(f.type)); if (ok.length) onFiles(ok); else if (files.length) toast("That file type isn't supported here"); };
+  ["dragenter", "dragover"].forEach((ev) => el.addEventListener(ev, (e) => { e.preventDefault(); el.classList.add("dragging"); }));
+  ["dragleave", "dragend"].forEach((ev) => el.addEventListener(ev, () => el.classList.remove("dragging")));
+  el.addEventListener("drop", (e) => { e.preventDefault(); el.classList.remove("dragging"); take(e.dataTransfer?.files || []); });
+  const sheet = el.closest(".sheet") || document;
+  const onPaste = (e) => { if (!document.body.contains(el)) return document.removeEventListener("paste", onPaste); const f = [...(e.clipboardData?.files || [])]; if (f.length) { e.preventDefault(); take(f); } };
+  document.addEventListener("paste", onPaste);
+}
 // Downscale photos in the browser (max 1800px) so uploads stay fast on cellular.
 function shrink(file) {
   return new Promise((resolve) => {
@@ -818,10 +845,10 @@ async function openPlanToList(start, end, label) {
   openSheet("Add meals to shopping list", `
     <div class="group">
       <div class="field"><label>Meals</label><span class="muted">${esc(label)}</span></div>
-      <div class="field"><label>List</label><select id="pl-list">${lists.length ? lists.map((l) => `<option value="${l.id}">${esc(l.name)}</option>`).join("") : '<option value="">New list "Groceries"</option>'}</select></div>
+      <div class="field"><label>List</label><select id="pl-list">${lists.length ? lists.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("") : '<option value="">New list "Groceries"</option>'}</select></div>
       <div class="field"><label>Skip what's in the pantry</label><label class="toggle"><input type="checkbox" id="pl-skip" checked><span></span></label></div>
     </div>
-    <p class="hint">Ingredients are scaled for ${people} ${people === 1 ? "person" : "people"} and merged, so two recipes that need onions add up to one line.</p>
+    <p class="hint">Ingredients are scaled for ${esc(people)} ${people === 1 ? "person" : "people"} and merged, so two recipes that need onions add up to one line.</p>
     <div style="height:14px"></div><button class="btn" id="pl-go">${ic("cart")} Add to list</button>`, {
     onMount() {
       $("#pl-go").onclick = async (ev) => {
@@ -832,7 +859,7 @@ async function openPlanToList(start, end, label) {
         const ask = (pv?.items || []).filter((x) => x.ask);
         if (ask.length) {
           sheetBody().innerHTML = `<p class="hint" style="margin:0 4px 10px"><b>Do you already have these?</b> Tap anything you have enough of and it won't go on the list.</p>
-            <div class="group">${ask.map((x, n) => `<label class="row"><span class="emo">${x.emoji || "🥫"}</span><div class="main"><div class="a">${esc(cap(x.name))}</div><div class="b">${esc(x.need || "")}${x.pantry ? ` · ${esc(x.pantry)}` : ""}</div></div><input type="checkbox" data-k="${esc(x.key)}" ${x.have ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--green)"></label>`).join("")}</div>
+            <div class="group">${ask.map((x, n) => `<label class="row"><span class="emo">${esc(x.emoji || "🥫")}</span><div class="main"><div class="a">${esc(cap(x.name))}</div><div class="b">${esc(x.need || "")}${x.pantry ? ` · ${esc(x.pantry)}` : ""}</div></div><input type="checkbox" data-k="${esc(x.key)}" ${x.have && skipPantry ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--green)"></label>`).join("")}</div>
             <div style="height:14px"></div><button class="btn" id="pl-go2">${ic("cart")} Build my list</button>`;
           await new Promise((res) => ($("#pl-go2").onclick = res));
         }
@@ -856,7 +883,7 @@ const anyChannel = () => Object.values(state.cfg.channels || {}).some(Boolean);
 async function sendIt(body, channel = "all") {
   if (!anyChannel()) return toast("Notifications aren't set up yet", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg));
   toast("Sending…");
-  try { const r = await api("POST", "/api/send", { ...body, channel }); toast(`Sent to ${r.sent.map((c) => CH_LABEL[c]).join(" & ")}${r.errors.length ? ` · ${r.errors.length} failed` : ""}`); }
+  try { const r = await api("POST", "/api/send", { ...body, channel }); toast(`Sent to ${r.sent.map((c) => CH_LABEL[c] || c).join(" & ")}${r.errors.length ? ` · ${r.errors.length} failed` : ""}`); }
   catch (e) { fail(e); }
 }
 const emailIt = (body) => sendIt(body, "email");
@@ -877,12 +904,12 @@ function openShare(kind, o) {
   let items = [], title = "Share";
   if (kind === "list") {
     title = o.name || "Shopping list";
-    items = [...sendItems({ kind: "list", id: o.id }), ["print", "Print", () => printIt(`/print/list/${o.id}`)],
-      ["file", "Text file", `/export/list/${o.id}.txt`], ["file", "Spreadsheet (CSV)", `/export/list/${o.id}.csv`]];
-    if (navigator.share) items.unshift(["share", "Send via…", () => shareText(`/export/list/${o.id}.txt`, title)]);
+    items = [...sendItems({ kind: "list", id: o.id }), ["print", "Print", () => printIt(`/print/list/${enc(o.id)}`)],
+      ["file", "Text file", `/export/list/${enc(o.id)}.txt`], ["file", "Spreadsheet (CSV)", `/export/list/${enc(o.id)}.csv`]];
+    if (navigator.share) items.unshift(["share", "Send via…", () => shareText(`/export/list/${enc(o.id)}.txt`, title)]);
   } else if (kind === "plan") {
     title = `Meal plan · ${o.label}`;
-    const q = `start=${o.start}&end=${o.end}`;
+    const q = `start=${enc(o.start)}&end=${enc(o.end)}`;
     items = [...sendItems({ kind: "plan", start: o.start, end: o.end }), ["print", "Print", () => printIt(`/print/plan?${q}`)],
       ["cal", "Add to calendar (.ics)", `/export/plan.ics?${q}`], ["file", "Spreadsheet (CSV)", `/export/plan.csv?${q}`]];
     if (navigator.share) items.unshift(["share", "Send via…", () => shareText(`/export/plan.txt?${q}`, "Meal plan")]);
@@ -891,8 +918,8 @@ function openShare(kind, o) {
     items = [...sendItems({ kind: "pantry" }), ["print", "Print", () => printIt("/print/pantry")], ["file", "Spreadsheet (CSV)", "/export/pantry.csv"]];
   }
   openSheet(title, `<div class="share-grid">${items.map(([i, l, a], n) =>
-    typeof a === "string" ? `<a href="${a}" download>${ic(i)} ${esc(l)}</a>` : `<button data-n="${n}">${ic(i)} ${esc(l)}</button>`).join("")}</div>
-    ${state.cfg.channels?.telegram ? `<p class="hint">Telegram messages go to ${esc(state.cfg.telegram_chat || "your chat")}.</p>` : ""}${state.cfg.email_ready ? `<p class="hint">Email goes to ${esc(state.cfg.mail_to.join(", "))}.</p>` : ""}`, {
+    typeof a === "string" ? `<a href="${esc(safeUrl(a))}" download>${ic(i)} ${esc(l)}</a>` : `<button data-n="${n}">${ic(i)} ${esc(l)}</button>`).join("")}</div>
+    ${state.cfg.channels?.telegram ? `<p class="hint">Telegram messages go to ${esc(state.cfg.telegram_chat || "your chat")}.</p>` : ""}${state.cfg.email_ready ? `<p class="hint">Email goes to ${esc((state.cfg.mail_to || []).join(", "))}.</p>` : ""}`, {
     onMount() { $$("[data-n]").forEach((b) => (b.onclick = () => { closeSheet(); items[+b.dataset.n][2](); })); },
   });
 }
@@ -911,10 +938,10 @@ async function openSettings() {
       ${up.update_available ? `<button class="update-banner" id="st-up">${ic("refresh")}<span><b>Update available: ${esc(up.latest)}</b><small>Update it from the ZimaOS App Store</small></span></button>` : ""}
       <div class="group-label">Setup</div>
       <div class="group">
-        <button class="row" data-sec="household"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("home")}</span><div class="main"><div class="a">Household</div><div class="b">${esc(hh.name || "Household")} · cooking for ${hh.people || 2}${hh.scale === false ? " · scaling off" : ""}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" data-sec="household"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("home")}</span><div class="main"><div class="a">Household</div><div class="b">${esc(hh.name || "Household")} · cooking for ${esc(hh.people || 2)}${hh.scale === false ? " · scaling off" : ""}</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.backend === "native" ? "" : `<button class="row" data-sec="mealie"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Recipe library (Mealie)</div><div class="b">${c.connected ? "Connected" : "Not connected"}</div></div><span class="chev">${ic("chevR")}</span></button>`}
         <button class="row" data-sec="ai"><span class="ic bg-indigo" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("sparkle")}</span><div class="main"><div class="a">AI recipe import</div><div class="b">OpenAI key for screenshots, photos & videos</div></div><span class="chev">${ic("chevR")}</span></button>
-        <button class="row" data-sec="notify"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Notifications</div><div class="b">${Object.entries(c.channels || {}).filter(([, v]) => v).map(([k]) => CH_LABEL[k][0].toUpperCase() + CH_LABEL[k].slice(1)).join(", ") || "Not set up · Telegram, ntfy or email"}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" data-sec="notify"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Notifications</div><div class="b">${Object.entries(c.channels || {}).filter(([, v]) => v).map(([k]) => esc(cap(CH_LABEL[k] || k))).join(", ") || "Not set up · Telegram, ntfy or email"}</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="password"><span class="ic bg-gray" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("open")}</span><div class="main"><div class="a">Password</div><div class="b">${c.auth_required ? "On" : "Off (anyone on your Wi-Fi)"}</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <div class="group-label">Cooking</div>
@@ -929,9 +956,9 @@ async function openSettings() {
       <p class="hint" style="margin-top:-2px">Meals to plan</p>
       <div class="group">
         <div class="tag-cloud" id="st-types">${["breakfast", "lunch", "dinner", "side"].map((t) => `<button class="tag ${s.meal_types.includes(t) ? "on" : ""}" data-t="${t}">${cap(t)}</button>`).join("")}</div>
-        <div class="field"><label>No repeats for (days)<small class="lh">The same recipe won't come back within this many days.</small></label><input type="number" id="st-nr" value="${s.no_repeat_days}" min="0" max="90"></div>
+        <div class="field"><label>No repeats for (days)<small class="lh">The same recipe won't come back within this many days.</small></label><input type="number" id="st-nr" value="${esc(s.no_repeat_days)}" min="0" max="90"></div>
         <div class="field"><label>Use food before it goes bad<small class="lh">Plans favor recipes using items close to their use-by date.</small></label><label class="toggle"><input type="checkbox" id="st-exp" ${s.prefer_expiring ? "checked" : ""}><span></span></label></div>
-        <div class="field"><label>Warn me this many days early<small class="lh">Items show as “use soon” when they're this close to their use-by date.</small></label><input type="number" id="st-win" value="${s.expiring_window_days}" min="1" max="14"></div>
+        <div class="field"><label>Warn me this many days early<small class="lh">Items show as “use soon” when they're this close to their use-by date.</small></label><input type="number" id="st-win" value="${esc(s.expiring_window_days)}" min="1" max="14"></div>
         <div class="field"><label>Plan next week automatically on<small class="lh">TablePlan fills next week's empty days for you at 8 AM.</small></label><select id="st-auto">${[["", "Off"], ["sun", "Sunday"], ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"], ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"]].map(([v, l]) => `<option value="${v}" ${s.auto_plan_day === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
         <div class="field"><label>Send me the plan<small class="lh">Get the new week's plan on your phone or by email.</small></label><label class="toggle"><input type="checkbox" id="st-aemail" ${s.auto_plan_email ? "checked" : ""}><span></span></label></div>
         <div class="field"><label>Daily “use soon” reminder<small class="lh">A morning message listing food that's about to expire.</small></label><label class="toggle"><input type="checkbox" id="st-xa" ${s.expiry_alert ? "checked" : ""}><span></span></label></div>
@@ -946,23 +973,23 @@ async function openSettings() {
       </div>
       <p class="hint">Weekly is recommended: a quick “still have it?” review keeps use-by dates and shopping lists honest.</p>
       <div class="group-label">AI</div>
-      <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${s.ai_budget}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
+      <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${esc(s.ai_budget)}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Import</div>
       <div class="group"><button class="row" id="st-share"><span class="ic bg-pink" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;background:#E1306C">${ic("share")}</span><div class="main"><div class="a">Share to TablePlan from your phone</div><div class="b">Send Instagram, TikTok and recipe links straight in</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Shelf life data</div>
       <div class="group">
-        <div class="row"><div class="main"><div class="a">USDA FoodKeeper</div><div class="b">${counts.usda ? `${counts.usda} foods · synced ${esc((c.usda_synced_at || "").replace("T", " "))}` : "Not synced yet — using starter table"}</div></div></div>
+        <div class="row"><div class="main"><div class="a">USDA FoodKeeper</div><div class="b">${counts.usda ? `${esc(counts.usda)} foods · synced ${esc((c.usda_synced_at || "").replace("T", " "))}` : "Not synced yet — using starter table"}</div></div></div>
         <button class="row" id="st-sync"><div class="main"><div class="a" style="color:var(--blue)">${counts.usda ? "Re-sync now" : "Sync now"}</div></div></button>
-        <button class="row" id="st-rules"><div class="main"><div class="a">House rules & edits</div><div class="b">${counts.custom || 0} custom · ${counts.starter || 0} starter</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-rules"><div class="main"><div class="a">House rules & edits</div><div class="b">${esc(counts.custom || 0)} custom · ${esc(counts.starter || 0)} starter</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
 
       <div class="group-label">Advanced</div>
       <div class="group">
-        ${c.backend === "native" ? `<button class="row" id="st-mimport"><div class="main"><div class="a">Import from Mealie</div><div class="b">Copy recipes, photos, plans and lists from an old Mealie</div></div><span class="chev">${ic("chevR")}</span></button>` : `<a class="row" href="${esc(c.mealie_url)}" target="_blank" rel="noopener" style="text-decoration:none"><div class="main"><div class="a">Mealie admin</div><div class="b">Not needed day to day. TablePlan handles everything.</div></div><span class="chev">${ic("ext")}</span></a>`}
+        ${c.backend === "native" ? `<button class="row" id="st-mimport"><div class="main"><div class="a">Import from Mealie</div><div class="b">Copy recipes, photos, plans and lists from an old Mealie</div></div><span class="chev">${ic("chevR")}</span></button>` : `<a class="row" ${extLink(c.mealie_url)} style="text-decoration:none"><div class="main"><div class="a">Mealie admin</div><div class="b">Not needed day to day. TablePlan handles everything.</div></div><span class="chev">${ic("ext")}</span></a>`}
         <button class="row" id="st-wizard"><div class="main"><div class="a">Run setup wizard again</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
-      <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server<span class="desktop-only"><br><a href="${c.repo_url || REPO}" target="_blank" rel="noopener" style="color:var(--sub)">Source code (AGPL-3.0)</a></span></p>`;
+      <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server<span class="desktop-only"><br><a ${extLink(c.repo_url) || extLink(REPO)} style="color:var(--sub)">Source code (AGPL-3.0)</a></span></p>`;
     $$("#st-types .tag").forEach((b) => (b.onclick = async () => { const t = b.dataset.t; const mt = s.meal_types.includes(t) ? s.meal_types.filter((x) => x !== t) : [...s.meal_types, t]; if (!mt.length) return; await save({ meal_types: mt }); b.classList.toggle("on"); }));
     $("#st-nr").onchange = (e) => save({ no_repeat_days: +e.target.value || 0 });
     $("#st-exp").onchange = (e) => save({ prefer_expiring: e.target.checked });
@@ -1007,7 +1034,7 @@ function openShareSetup() {
     <button class="btn sec" id="sc-copy">${ic("link")} Copy the address for step 3</button>
     <div class="group-label">Android</div>
     <p class="hint" style="margin:0 4px">Add TablePlan to your home screen from Chrome (⋮ → Install app). It then appears in every app's Share menu.</p>
-    <p class="hint">Shared posts open TablePlan and import automatically. Public posts work best; private accounts need screenshots.</p>`, {
+    <p class="hint">Shared posts open TablePlan with the link filled in; tap Import to add it. Public posts work best; private accounts need screenshots.</p>`, {
     onMount() { $("#sc-copy").onclick = async () => { try { await navigator.clipboard.writeText(base + "/?url="); toast("Copied"); } catch (_) { toast(base + "/?url="); } }; },
   });
 }
@@ -1022,7 +1049,7 @@ function openMealieImport() {
         const b = e.currentTarget; b.disabled = true; b.textContent = "Importing…";
         try {
           const r = await api("POST", "/api/setup/import-mealie", { url: $("#mi-url").value.trim(), token: $("#mi-tok").value.trim() });
-          $("#mi-res").innerHTML = `<div class="wstatus ok" style="margin-top:12px"><b>Done</b><span>${r.recipes.recipes ?? 0} recipes (${r.recipes.images ?? 0} photos) · ${r.plans.imported ?? 0} planned meals · ${r.lists.items ?? 0} list items</span></div>`;
+          $("#mi-res").innerHTML = `<div class="wstatus ok" style="margin-top:12px"><b>Done</b><span>${esc(r.recipes?.recipes ?? 0)} recipes (${esc(r.recipes?.images ?? 0)} photos) · ${esc(r.plans?.imported ?? 0)} planned meals · ${esc(r.lists?.items ?? 0)} list items</span></div>`;
           b.textContent = "Import again"; b.disabled = false;
         } catch (x) { fail(x); b.disabled = false; b.textContent = "Import"; }
       };
@@ -1038,7 +1065,7 @@ function rulesBrowser(back) {
   let t;
   const run = async () => {
     const { rules } = await api("GET", `/api/rules?q=${encodeURIComponent($("#rb-q").value)}`);
-    $("#rb-res").innerHTML = `<div class="group">${rules.map((r) => `<button class="row" data-r="${r.id}"><div class="main"><div class="a">${esc(r.name)} ${r.source === "custom" ? '<span class="badge">house</span>' : ""}</div><div class="b">${esc(ruleDesc(r))}</div></div><span class="chev">${ic("chevR")}</span></button>`).join("") || '<div class="row muted">No matches</div>'}</div>`;
+    $("#rb-res").innerHTML = `<div class="group">${rules.map((r) => `<button class="row" data-r="${esc(r.id)}"><div class="main"><div class="a">${esc(r.name)} ${r.source === "custom" ? '<span class="badge">house</span>' : ""}</div><div class="b">${esc(ruleDesc(r))}</div></div><span class="chev">${ic("chevR")}</span></button>`).join("") || '<div class="row muted">No matches</div>'}</div>`;
     $$("#rb-res [data-r]").forEach((b) => (b.onclick = () => editRule(rules.find((r) => String(r.id) === b.dataset.r), () => rulesBrowser(back))));
   };
   $("#rb-q").oninput = () => { clearTimeout(t); t = setTimeout(run, 220); };
@@ -1052,10 +1079,10 @@ function editRule(r, back) {
     <div class="group">
       <div class="field"><input class="full" id="er-name" placeholder="Name (e.g. Heavy cream)" value="${esc(v.name)}"></div>
       <div class="field"><input class="full" id="er-kw" placeholder="Also matches (comma separated)" value="${esc(v.keywords || "")}"></div>
-      <div class="field"><label>Usually stored in</label><select id="er-loc">${["fridge", "freezer", "pantry"].map((l) => `<option ${v.default_location === l ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="field"><label>Usually stored in</label><select id="er-loc">${["fridge", "freezer", "pantry"].map((l) => `<option ${v.default_location === l ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
     </div>
     <div class="group-label">Days it keeps</div>
-    <div class="group">${F.map(([k, l]) => `<div class="field"><label>${l}</label><input type="number" min="0" data-k="${k}" value="${v[k] ?? ""}" placeholder="—"></div>`).join("")}</div>
+    <div class="group">${F.map(([k, l]) => `<div class="field"><label>${l}</label><input type="number" min="0" data-k="${k}" value="${esc(v[k] ?? "")}" placeholder="—"></div>`).join("")}</div>
     <p class="hint">${r && r.source === "usda" ? "Saving turns this into a house rule, so USDA re-syncs won't overwrite your numbers." : "House rules win over USDA data when both match."}${r && r.tips ? `<br><br>USDA tip: ${esc(r.tips)}` : ""}</p>
     <div style="height:14px"></div><div class="btn-row"><button class="btn sec" id="er-back">Cancel</button><button class="btn" id="er-save">Save</button></div>`;
   $("#er-back").onclick = back;
@@ -1063,7 +1090,7 @@ function editRule(r, back) {
     const body = { name: $("#er-name").value.trim(), keywords: $("#er-kw").value.trim(), default_location: $("#er-loc").value };
     $$("[data-k]").forEach((i) => (body[i.dataset.k] = i.value === "" ? null : +i.value));
     if (!body.name) return toast("Name is required");
-    try { await api(r ? "PUT" : "POST", r ? `/api/rules/${r.id}` : "/api/rules", body); toast("Saved"); back(); } catch (e) { fail(e); }
+    try { await api(r ? "PUT" : "POST", r ? `/api/rules/${enc(r.id)}` : "/api/rules", body); toast("Saved"); back(); } catch (e) { fail(e); }
   };
 }
 
@@ -1071,10 +1098,14 @@ function editRule(r, back) {
 async function reloadCfg() { try { state.cfg = await api("GET", "/api/config"); } catch (_) {} refresh(); }
 function openUpdateHelp() {
   const u = state.update || {};
-  openSheet("Update TablePlan", `<div class="whatsnew"><ul>
-    <li><span class="ic bg-blue">1</span><span><b>Open ZimaOS</b><span>On any computer, go to your ZimaOS dashboard.</span></span></li>
-    <li><span class="ic bg-blue">2</span><span><b>Open the App Store</b><span>TablePlan shows an <b>Update</b> button there once ZimaOS checks the store (refresh the page if you don't see it yet).</span></span></li>
-    <li><span class="ic bg-blue">3</span><span><b>Tap Update</b><span>Your recipes, plans and pantry are kept. TablePlan restarts in about a minute.</span></span></li></ul></div>
+  const zima = (u.install || "zimaos") === "zimaos";
+  const steps = zima ? [
+    ["Open ZimaOS", "On any computer, go to your ZimaOS dashboard."],
+    ["Open the App Store", "TablePlan shows an <b>Update</b> button there once ZimaOS checks the store (refresh the page if you don't see it yet)."],
+    ["Tap Update", "Your recipes, plans and pantry are kept. TablePlan restarts in about a minute."]]
+    : [["Update TablePlan", esc(u.how || "Pull the new image and restart the container.")], ["That's it", "Your data lives in the data volume and is kept."]];
+  openSheet("Update TablePlan", `<div class="whatsnew"><ul>${steps.map(([t, d], n) => `<li><span class="ic bg-blue">${n + 1}</span><span><b>${t}</b><span>${d}</span></span></li>`).join("")}</ul></div>
+    ${u.notes ? `<p class="hint"><b>What's new:</b> ${esc(u.notes)}</p>` : ""}
     <p class="hint" style="text-align:center">Installed ${esc(u.version || state.cfg.version)}${u.latest ? ` · latest ${esc(u.latest)}` : ""}</p>`);
 }
 
@@ -1090,8 +1121,10 @@ function openUpdateHelp() {
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ai: a }; }).catch(() => {});
   route();
   const qs = new URLSearchParams(location.search);
-  const shared = qs.get("share_url") || qs.get("url") || (qs.get("share_text") || "").match(/https?:\/\/\S+/)?.[0];
-  if (shared) { history.replaceState(null, "", "/" + location.hash); setTimeout(() => openAddRecipe(shared), 400); }
+  const shared = [qs.get("share_url"), qs.get("url"), (qs.get("share_text") || "").match(/https?:\/\/\S+/)?.[0]]
+    .map((u) => (u || "").trim().slice(0, 2048)).find((u) => /^https?:\/\//i.test(u) && safeUrl(u));
+  if (qs.has("share_url") || qs.has("url") || qs.has("share_text") || qs.has("share_title")) history.replaceState(null, "", "/" + location.hash);
+  if (shared) setTimeout(() => openAddRecipe(shared), 400);
   window.addEventListener("popstate", route);
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });
