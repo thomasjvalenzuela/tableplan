@@ -2345,6 +2345,13 @@ def ensure_image_provider():
             pass
 
 
+def _safe(fn, *a):
+    try:
+        return fn(*a)
+    except Exception as e:
+        log(f"background {getattr(fn, '__name__', fn)} failed:", e)
+
+
 def import_from_mealie(b):
     """One-time copy of recipes, photos, favorites, plans and lists from an existing Mealie (safe to re-run)."""
     if not NATIVE:
@@ -2381,6 +2388,8 @@ def import_from_mealie(b):
 
 def _imported(slug):
     slug = slug.strip('"') if isinstance(slug, str) else slug
+    if cfg("openai_key"):   # prepare the AI step-by-step version in the background so it's instant later
+        threading.Thread(target=lambda: _safe(guided, slug, True), daemon=True).start()
     _recipe_cache["at"] = 0
     try:
         r = mealie("GET", f"/api/recipes/{urllib.parse.quote(slug)}")
@@ -2613,11 +2622,9 @@ def guided_auto(rec):
         out.append({"title": "Preheat", "text": f"Preheat the oven to {t}" + (" (convection, already lowered 25°F)" if oven == "convection" and unit == "F" else "")
                     + ". It takes about 10–15 minutes, so keep going with the next steps while it heats.",
                     "ingredients": [], "timer_sec": 600, "timer_label": "Oven preheating", "heat": None, "temperature": t, "tip": None})
-    if leftovers:
-        out.append({"title": "Get ready", "text": "Measure out and prep these before you start cooking.",
-                    "ingredients": [{"i": i, "portion": 1} for i in leftovers], "timer_sec": None, "timer_label": None,
-                    "heat": None, "temperature": None, "tip": None})
-    return {"source": "auto", "steps": out + steps, "tips": []}
+    names = [rec["ingredients"][i]["food"] or rec["ingredients"][i]["display"] for i in leftovers]
+    tips = [f"Also have ready: {', '.join(n for n in names if n)}."] if leftovers and any(names) else []
+    return {"source": "auto", "steps": out + steps, "tips": tips}
 
 
 GUIDE_SCHEMA = {
@@ -2755,7 +2762,13 @@ def guided_ai(rec):
         + f". Give temperatures in °{st.get('temp_unit') or 'F'}. Translate heat levels to that stove, with a short practical cue "
         "(e.g. 'gas: flame just touching the pan'). For every step that involves waiting (simmer, bake, rest, marinate, boil), "
         "set timer_minutes and a short timer_label such as 'Simmer sauce'. If something useful can be done while waiting, say so in the text. "
-        "Steps are short and imperative, one action each. tips: up to 3 short tips specific to this recipe.")
+        "Steps are short and imperative, one action each. tips: up to 3 short tips specific to this recipe. "
+        "INGREDIENT PLACEMENT (most important): each step's ingredients list holds ONLY the ingredients physically added or used "
+        "in that exact step, with the amount used there. Example: 'Whisk the wet ingredients' lists only buttermilk, eggs and melted "
+        "butter; the next step 'Add the dry ingredients' lists only flour, sugar, baking powder and salt. If an original step adds "
+        "two groups at different moments, split it into separate steps. Never make a 'gather' or 'prep everything' step that lists "
+        "ingredients. Don't re-list a mixture made earlier (e.g. 'the batter'). Every ingredient index appears at least once; an "
+        "ingredient split across steps gets a portion in each (portions add up to 1).")
     data = openai_chat([
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": f"Recipe: {rec['name']} (serves {rec['servings'] or '?'})\n\nIngredients:\n{ing_lines}\n\nOriginal steps:\n{step_lines}"},
@@ -2771,12 +2784,29 @@ def guided_ai(rec):
                       "heat": s0.get("heat"), "temperature": s0.get("temperature"), "tip": None})
     if not steps:
         raise ApiError(502, "The AI didn't return any steps. Try again.")
+    used = {x["i"] for st in steps for x in st["ingredients"]}
+    for x in rec["ingredients"]:   # safety net: attach anything the AI skipped to the first step that mentions it
+        if x["i"] in used or not x["food"]:
+            continue
+        key = clean_food(x["food"]).lower().split()[-1] if clean_food(x["food"]) else ""
+        st = next((st for st in steps if key and key in st["text"].lower()), None)
+        if st:
+            st["ingredients"].append({"i": x["i"], "portion": 1})
     return {"source": "ai", "steps": steps, "tips": (data.get("tips") or [])[:3]}
 
 
-def guided(slug, use_ai=False, refresh=False):
+def guided(slug, use_ai=None, refresh=False):
+    """Step-by-step version of a recipe. Uses AI automatically when an OpenAI key is set (cached), else the built-in arranger."""
+    if use_ai is None:
+        use_ai = bool(cfg("openai_key"))
+        if use_ai:
+            try:
+                return guided(slug, True, refresh)
+            except ApiError as e:
+                log("AI step-by-step failed, using built-in:", e.message)
+                use_ai = False
     rec = recipe_detail(slug)
-    profile = _guided_profile() + ("|ai" if use_ai else "|auto")
+    profile = _guided_profile() + ("|ai2" if use_ai else "|auto2")
     if not refresh:
         with db() as c:
             row = c.execute("SELECT * FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], profile)).fetchone()
@@ -2790,7 +2820,7 @@ def guided(slug, use_ai=False, refresh=False):
     has_ai = False
     if not use_ai:
         with db() as c:
-            has_ai = bool(c.execute("SELECT 1 FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], _guided_profile() + "|ai")).fetchone())
+            has_ai = bool(c.execute("SELECT 1 FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], _guided_profile() + "|ai2")).fetchone())
     return {**data, "cached": False, "ai_available": has_ai}
 
 
@@ -3526,7 +3556,8 @@ class Handler(BaseHTTPRequestHandler):
             if act == "favorite" and m == "POST":
                 return self.send(200, set_favorite(slug, bool(self.body().get("favorite", True))))
             if act == "guided" and m == "GET":
-                return self.send(200, guided(slug, q.get("ai") == "1", q.get("refresh") == "1"))
+                ai = {"1": True, "0": False}.get(q.get("ai"))
+                return self.send(200, guided(slug, ai, q.get("refresh") == "1"))
             if act == "image/next" and m == "POST":
                 return self.send(200, recipe_image_next(slug))
             if act == "image/upload" and m == "POST":

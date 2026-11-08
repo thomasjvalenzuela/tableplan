@@ -142,7 +142,7 @@ async function drawContent() {
     box.innerHTML = html;
   } else {
     if (!R.guide) {
-      box.innerHTML = loading();
+      box.innerHTML = state.cfg.ai_key ? `<div class="importing"><div class="pot">✨</div><div class="stage">Arranging the steps for your kitchen…</div><div class="muted small">First time only, about 10–20 seconds. After that it's instant.</div></div>` : loading();
       try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided${R.guideAi ? "?ai=1" : ""}`); }
       catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
     }
