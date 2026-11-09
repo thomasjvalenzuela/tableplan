@@ -201,6 +201,17 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 );
 CREATE INDEX IF NOT EXISTS ix_ai_usage_at ON ai_usage(at);
 CREATE TABLE IF NOT EXISTS upc_cache (code TEXT PRIMARY KEY, data TEXT, at TEXT);
+CREATE TABLE IF NOT EXISTS trips (
+  id INTEGER PRIMARY KEY, store_id TEXT, store_name TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, method TEXT NOT NULL,
+  items INTEGER NOT NULL DEFAULT 0, checked INTEGER NOT NULL DEFAULT 0, total REAL, files TEXT NOT NULL DEFAULT '[]',
+  undo TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS purchases (
+  id INTEGER PRIMARY KEY, trip_id INTEGER REFERENCES trips(id) ON DELETE CASCADE, store_name TEXT NOT NULL DEFAULT '',
+  date TEXT NOT NULL, food_id INTEGER, name TEXT NOT NULL, raw_text TEXT NOT NULL DEFAULT '', qty REAL, unit TEXT,
+  price REAL, pantry_item_id INTEGER, list_item_id TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_purchases_food ON purchases(food_id, date);
 CREATE TABLE IF NOT EXISTS upc_local (code TEXT PRIMARY KEY, food_id INTEGER, name TEXT NOT NULL, quantity TEXT DEFAULT '', at TEXT);
 CREATE TABLE IF NOT EXISTS image_picks (
   kind TEXT, key TEXT, idx INTEGER DEFAULT 0, file TEXT, credit TEXT, missing INTEGER DEFAULT 0, updated TEXT,
@@ -4414,6 +4425,293 @@ def plu_lookup(code):
             "variety": label, "rule": {"id": rule["id"], "name": rule["name"], "location": rule["default_location"]} if rule else None}
 
 
+# ============================================================ grocery trips (receipt or scanner) and purchases
+
+RECEIPT_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["store_name", "date", "items", "total"],
+    "properties": {
+        "store_name": {"type": "string"}, "date": {"type": "string"}, "total": {"type": ["number", "null"]},
+        "items": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                             "required": ["raw_text", "name", "quantity", "unit", "price", "is_food"],
+                                             "properties": {"raw_text": {"type": "string"}, "name": {"type": "string"},
+                                                            "quantity": {"type": ["number", "null"]}, "unit": {"type": "string"},
+                                                            "price": {"type": ["number", "null"]}, "is_food": {"type": "boolean"}}}},
+    },
+}
+RECEIPT_PROMPT = (
+    "Read this grocery receipt. List ONLY the purchased items actually printed on it, in order; never invent items. "
+    "Skip subtotals, taxes, bag fees, coupons, discounts, savings, deposits, payment and loyalty lines (a discount just "
+    "lowers the item above it; use the final price you can see for the item if it's clear, else the printed price).\n"
+    "For each item: raw_text = the line exactly as printed; name = a plain, normalised grocery name without brand or size "
+    "(expand abbreviations: 'GRND BF 80/20' -> 'ground beef 80/20', 'ORG BNNA' -> 'organic bananas', 'HVY WHP CRM' -> "
+    "'heavy whipping cream', 'BNLS SKNLS CHKN BRST' -> 'boneless skinless chicken breast', 'GV' / 'KS' / 'TJ' / '365' / 'S. TRUTH' "
+    "are store brands); quantity and unit from the line or the pack size (weighted produce like 'BANANAS 2.31 lb @ 0.59/lb' "
+    "-> quantity 2.31, unit 'lb'; '2 @ 3.49' -> quantity 2, unit ''; '12 CT' -> 12); price = the line total in dollars; "
+    "is_food = false for non-food (paper towels, soap, batteries, pet supplies, cleaning, medicine, gift cards).\n"
+    "Grocer conventions: Costco prints item numbers before names and 'E' tax flags; Walmart prints UPCs and 'X/N/O' "
+    "flags; Aldi uses short names and 'A/B' tax codes; Kroger, Safeway/Albertsons, Publix, H-E-B, Meijer and Target show "
+    "'SC' or 'You saved' discount lines under items; Trader Joe's and Whole Foods use readable names. store_name = the store "
+    "as printed; date = YYYY-MM-DD if printed, else empty; total = the receipt total or null.")
+_WEIGHTED_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(lb|lbs|kg|oz)\b\s*@\s*\$?\s*(\d+(?:\.\d+)?)", re.I)
+_COUNT_AT_RE = re.compile(r"\b(\d+)\s*@\s*\$?\s*(\d+(?:\.\d+)?)")
+
+
+def _receipt_line_fix(it):
+    """Fill quantity/unit/price from the printed line when the reader missed them (weighted produce, 'N @ price')."""
+    raw = it.get("raw_text") or ""
+    m = _WEIGHTED_RE.search(raw)
+    if m and not it.get("quantity"):
+        it["quantity"], it["unit"] = float(m.group(1)), n_units.normalize(m.group(2))
+        if it.get("price") is None:
+            it["price"] = round(float(m.group(1)) * float(m.group(3)), 2)
+    m = _COUNT_AT_RE.search(raw)
+    if m and not it.get("quantity") and not _WEIGHTED_RE.search(raw):
+        it["quantity"], it["unit"] = float(m.group(1)), ""
+        if it.get("price") is None:
+            it["price"] = round(float(m.group(1)) * float(m.group(2)), 2)
+    if it.get("unit"):
+        it["unit"] = n_units.normalize(it["unit"])
+    return it
+
+
+def _receipt_content(images):
+    content = [{"type": "text", "text": RECEIPT_PROMPT}]
+    for im in images[:6]:
+        data = im.get("data") if isinstance(im, dict) else None
+        if not isinstance(data, str):
+            raise ApiError(400, "Expected photos or PDFs of the receipt.")
+        if data.startswith("data:application/pdf"):
+            content.append({"type": "file", "file": {"filename": "receipt.pdf", "file_data": data}})
+        elif re.match(r"data:image/(jpeg|jpg|png|webp|gif|heic|heif);base64,", data[:40]):
+            content.append({"type": "image_url", "image_url": {"url": data, "detail": "high"}})
+        else:
+            raise ApiError(400, "Upload a photo or PDF of the receipt.")
+    return content
+
+
+def trip_rows(c, items, lid=None):
+    """Match receipt/scan items to canonical foods, unchecked list items and inventory; pick a default action."""
+    lid = lid or n_lists.single_list(c)
+    rows, used_list = [], set()
+    for it in items:
+        name = " ".join(str(it.get("name") or it.get("raw_text") or "").split())[:80]
+        if not name:
+            continue
+        fid = n_foods.resolve(c, name) if n_foods.normalize(name) else None
+        f = n_foods.get(c, fid) if fid else None
+        li = None
+        if fid is not None:
+            li = c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0 AND food_id=? ORDER BY position",
+                           (lid, fid)).fetchall()
+            li = next((r for r in li if r["id"] not in used_list), None)
+        if li:
+            used_list.add(li["id"])
+        unit = n_units.normalize(it.get("unit") or "")
+        qty = it.get("quantity") if isinstance(it.get("quantity"), (int, float)) and it.get("quantity") > 0 else None
+        pi = None
+        if fid is not None:
+            for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND food_id=? ORDER BY id DESC", (fid,)):
+                if r["qty"] is not None and qty is not None and n_units.convert(1, unit, r["unit"]) is not None:
+                    pi = r
+                    break
+        rule = match_rule(c, f["name"] if f else name)
+        loc = (f or {}).get("location") or (rule["default_location"] if rule else "pantry")
+        food = it.get("is_food", True) is not False
+        rows.append({"raw_text": (it.get("raw_text") or "")[:120], "name": f["name"] if f else name, "food_id": fid,
+                     "quantity": qty, "unit": unit, "price": it.get("price") if isinstance(it.get("price"), (int, float)) else None,
+                     "location": loc if loc in LOCATIONS else "pantry",
+                     "list_item": {"id": li["id"], "text": n_lists._display(li)} if li else None,
+                     "pantry_item": {"id": pi["id"], "name": pi["name"], "left_text": pantry_left_text(pi)} if pi else None,
+                     "action": "ignore" if not food else "check_off" if li else "add"})
+    return rows
+
+
+def receipt_read(b):
+    """POST /api/receipt {images}: read a receipt with AI and return the review rows (nothing is changed yet)."""
+    require_native()
+    if not cfg("openai_key"):
+        raise ApiError(400, "Reading receipts needs AI. Add your OpenAI key in Settings → AI recipe import, or scan the items instead.")
+    images = b.get("images")
+    if not isinstance(images, list) or not images:
+        raise ApiError(400, "Add a photo or PDF of the receipt.")
+    out = openai_chat([{"role": "user", "content": _receipt_content(images)}], "receipt", RECEIPT_SCHEMA, "receipt",
+                      f"{len(images)} file(s)")
+    items = [_receipt_line_fix(dict(x)) for x in out.get("items") or [] if isinstance(x, dict)]
+    with db() as c:
+        rows = trip_rows(c, items)
+    d = parse_date(out.get("date"))
+    return {"store_name": (out.get("store_name") or "").strip()[:60], "date": iso(d) if d else iso(today()),
+            "total": out.get("total"), "rows": rows}
+
+
+def _save_trip_files(trip_id, images):
+    out = []
+    d = os.path.join(IMG_DIR, "trips", str(int(trip_id)))
+    for i, im in enumerate((images or [])[:6], 1):
+        data = im.get("data") if isinstance(im, dict) else ""
+        head, _, b64 = (data or "").partition(",")
+        if not b64:
+            continue
+        try:
+            blob = base64.b64decode(b64)
+        except ValueError:
+            continue
+        if head.startswith("data:application/pdf") and blob[:5] == b"%PDF-":
+            ext = "pdf"
+        else:
+            kind = n_recipes.sniff_image(blob[:64])
+            if not kind:
+                continue
+            ext = "jpg" if kind == "jpg" else kind
+        if len(blob) > 15_000_000:
+            continue
+        os.makedirs(d, exist_ok=True)
+        name = f"receipt-{i}.{ext}"
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(blob)
+        out.append(name)
+    return out
+
+
+def trip_apply(b):
+    """POST /api/trip/apply: tick off list items, add or top up inventory, record purchases; one Undo for all of it."""
+    require_native()
+    rows = b.get("rows")
+    if not isinstance(rows, list) or not rows or len(rows) > 300:
+        raise ApiError(400, "Nothing to apply.")
+    store_id = _store_arg(b.get("store_id"))
+    store_name = " ".join(_s(b.get("store_name"), 60).split())
+    d = parse_date(b.get("date")) or today()
+    method = b.get("method") if b.get("method") in ("receipt", "scanner") else "receipt"
+    undo = {"created": [], "increased": [], "checked": []}
+    checked = items = 0
+    total = 0.0
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as c:
+        if store_id is not None:
+            st = n_lists.get_store(c, store_id)
+            if not st:
+                raise ApiError(404, "Store not found")
+            store_name = store_name or st["name"]
+        lid = n_lists.single_list(c)
+        cur = c.execute("INSERT INTO trips(store_id, store_name, date, method, created_at) VALUES (?,?,?,?,?)",
+                        (store_id, store_name, iso(d), method, now))
+        trip_id = cur.lastrowid
+        for r in rows:
+            if not isinstance(r, dict):
+                raise ApiError(400, "Bad row.")
+            action = r.get("action")
+            if action not in ("check_off", "add", "increase", "ignore"):
+                raise ApiError(400, "Unknown action.")
+            name = " ".join(_s(r.get("name"), 80).split())
+            if not name:
+                continue
+            price = r.get("price") if isinstance(r.get("price"), (int, float)) and not isinstance(r.get("price"), bool) and 0 <= r["price"] < 100000 else None
+            qty = r.get("quantity") if isinstance(r.get("quantity"), (int, float)) and not isinstance(r.get("quantity"), bool) and 0 < r["quantity"] < 1e6 else None
+            unit = n_units.normalize(_s(r.get("unit"), 20)) if qty is not None else None
+            if unit and n_units.dimension(unit) is None:
+                unit = ""
+            loc = r.get("location") if r.get("location") in LOCATIONS else None
+            fid = _food_id(c, name)
+            pid = li_id = None
+            if action == "check_off":
+                li = c.execute("SELECT id FROM shopping_items WHERE id=? AND list_id=? AND checked=0",
+                               (_s(r.get("list_item_id"), 64), lid)).fetchone() if r.get("list_item_id") else None
+                if li:
+                    n_lists.set_checked(c, lid, li["id"], True)
+                    undo["checked"].append(li["id"])
+                    li_id = li["id"]
+                    checked += 1
+                action = "add"
+            if action == "increase" and r.get("pantry_item_id") is not None:
+                p = pantry_row(c, _int_id(r.get("pantry_item_id"), "item"))
+                add = n_units.convert(qty, unit, p["unit"]) if p and p["qty"] is not None and qty is not None else None
+                if add is not None:
+                    undo["increased"].append({"id": p["id"], "qty": p["qty"], "original_qty": p["original_qty"], "amount_left": p["amount_left"]})
+                    nq = p["qty"] + add
+                    orig = max(nq, (p["original_qty"] or p["qty"]) + add)
+                    c.execute("UPDATE pantry_items SET qty=?, original_qty=?, amount_left=? WHERE id=?", (nq, orig, min(1.0, nq / orig), p["id"]))
+                    event(c, p["id"], "restocked", f"+{n_units.fmt(add, p['unit'])} ({store_name or 'trip'})")
+                    pid = p["id"]
+                else:
+                    action = "add"
+            if action == "add":
+                pid = add_pantry_item(c, name, loc, None, n_units.fmt(qty, unit) if qty is not None else "", li_id, qty, unit, fid)
+                undo["created"].append(pid)
+            if action != "ignore":
+                items += 1
+            if price is not None:
+                total += price
+            c.execute("INSERT INTO purchases(trip_id, store_name, date, food_id, name, raw_text, qty, unit, price, pantry_item_id, "
+                      "list_item_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      (trip_id, store_name, iso(d), fid if action != "ignore" else None, name, _s(r.get("raw_text"), 120), qty, unit,
+                       price, pid, li_id))
+        total = round(total, 2) if any(isinstance(r.get("price"), (int, float)) for r in rows if isinstance(r, dict)) else None
+        c.execute("UPDATE trips SET items=?, checked=?, total=?, undo=? WHERE id=?", (items, checked, total, json.dumps(undo), trip_id))
+    files = _save_trip_files(trip_id, b.get("files"))
+    if files:
+        with db() as c:
+            c.execute("UPDATE trips SET files=? WHERE id=?", (json.dumps(files), trip_id))
+    summary = " · ".join(x for x in (store_name or "Grocery trip", plural_s(items, "item"),
+                                       f"${total:,.2f}" if total is not None else "",
+                                       f"{checked} checked off your list" if checked else "") if x)
+    return {"ok": True, "trip_id": trip_id, "items": items, "checked": checked, "total": total, "summary": summary}
+
+
+def plural_s(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def trip_undo(trip_id):
+    require_native()
+    with db() as c:
+        t = c.execute("SELECT * FROM trips WHERE id=?", (trip_id,)).fetchone()
+        if not t or t["status"] != "done":
+            raise ApiError(404, "That trip can't be undone any more.")
+        u = json.loads(t["undo"] or "{}")
+        for pid in u.get("created") or []:
+            c.execute("DELETE FROM pantry_items WHERE id=?", (pid,))
+        for x in u.get("increased") or []:
+            c.execute("UPDATE pantry_items SET qty=?, original_qty=?, amount_left=? WHERE id=?",
+                      (x["qty"], x["original_qty"], x["amount_left"], x["id"]))
+        for iid in u.get("checked") or []:
+            c.execute("UPDATE shopping_items SET checked=0, checked_at=NULL, checked_how=NULL WHERE id=?", (iid,))
+        c.execute("DELETE FROM purchases WHERE trip_id=?", (trip_id,))
+        c.execute("UPDATE trips SET status='undone' WHERE id=?", (trip_id,))
+    shutil.rmtree(os.path.join(IMG_DIR, "trips", str(int(trip_id))), ignore_errors=True)
+    return {"ok": True}
+
+
+def trip_record_scans(b):
+    """A scanner trip: the scans are already in the inventory; record the trip and its purchases for later budgeting."""
+    require_native()
+    ids = b.get("pantry_item_ids")
+    if not isinstance(ids, list) or not ids or len(ids) > 500:
+        raise ApiError(400, "Nothing was scanned.")
+    store_id = _store_arg(b.get("store_id"))
+    store_name = " ".join(_s(b.get("store_name"), 60).split())
+    with db() as c:
+        if store_id is not None and not store_name:
+            st = n_lists.get_store(c, store_id)
+            store_name = st["name"] if st else ""
+        cur = c.execute("INSERT INTO trips(store_id, store_name, date, method, created_at, undo) VALUES (?,?,?,?,?,?)",
+                        (store_id, store_name, iso(today()), "scanner", datetime.now().isoformat(timespec="seconds"),
+                         json.dumps({"created": []})))
+        tid, n, checked = cur.lastrowid, 0, 0
+        for pid in ids:
+            p = pantry_row(c, _int_id(pid, "item"))
+            if not p:
+                continue
+            n += 1
+            checked += 1 if p["mealie_item_id"] else 0
+            c.execute("INSERT INTO purchases(trip_id, store_name, date, food_id, name, qty, unit, pantry_item_id, list_item_id) "
+                      "VALUES (?,?,?,?,?,?,?,?,?)", (tid, store_name, iso(today()), p["food_id"], p["name"], p["qty"], p["unit"],
+                                                     p["id"], p["mealie_item_id"]))
+        c.execute("UPDATE trips SET items=?, checked=? WHERE id=?", (n, checked, tid))
+    return {"ok": True, "trip_id": tid, "summary": " · ".join(x for x in (store_name or "Grocery trip", plural_s(n, "item"),
+                                                                          f"{checked} checked off your list" if checked else "") if x)}
+
+
 def _pantry_image(pid, url):
     """Save a product photo for a pantry item (public HTTPS only, real image bytes only)."""
     try:
@@ -6541,7 +6839,7 @@ def scheduler():
 
 # Request body limits: screenshots/PDFs and photo uploads are big, everything else is small JSON.
 BODY_LIMITS = [
-    (re.compile(r"/api/import/images"), 36_000_000),            # ~25 MB of files once base64-encoded
+    (re.compile(r"/api/import/images|/api/receipt|/api/trip/apply"), 36_000_000),   # ~25 MB of files once base64-encoded
     (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload|/api/scan/photo"), 12_000_000),   # 8 MB image
 ]
 BODY_LIMIT_DEFAULT = 1_000_000
@@ -6553,7 +6851,7 @@ EXPENSIVE = [
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish)"), "ai"),
     (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
-    (re.compile(r"/api/scan/photo"), "ai"),
+    (re.compile(r"/api/scan/photo|/api/receipt"), "ai"),
     (re.compile(r"/api/(upc/\d+|scan|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
 ]
@@ -6950,6 +7248,15 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/scan/photo":
             require_native()
             return self.send(200, scan_photo(self.body()))
+        if m == "POST" and path == "/api/receipt":
+            return self.send(200, receipt_read(self.body()))
+        if m == "POST" and path == "/api/trip/apply":
+            return self.send(200, trip_apply(self.body()))
+        if m == "POST" and path == "/api/trip/scans":
+            return self.send(200, trip_record_scans(self.body()))
+        mm = re.fullmatch(r"/api/trip/(\d{1,12})/undo", path)
+        if m == "POST" and mm:
+            return self.send(200, trip_undo(int(mm.group(1))))
         if m == "POST" and path == "/api/scan/undo":
             return self.send(200, scan_undo(self.body()))
         mm = re.fullmatch(r"/api/scan/(\d{1,12})/(more|less)", path)

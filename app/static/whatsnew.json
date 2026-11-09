@@ -1,5 +1,13 @@
 [
  {
+  "id": "grocery-trip",
+  "date": "2026-11-09",
+  "icon": "cart",
+  "color": "blue",
+  "title": "Log a grocery trip",
+  "text": "Snap your receipt or scan what you bought: list items get ticked off, your inventory fills up, and prices are saved by store."
+ },
+ {
   "id": "several-meals",
   "date": "2026-11-09",
   "icon": "cal",

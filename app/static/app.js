@@ -1013,7 +1013,7 @@ function drawList(focusAdd) {
       <input id="qa" name="qa" placeholder="${esc(addTo ? `Add to ${addTo}…` : "Add an item…")}" enterkeyhint="done" maxlength="200" aria-label="Add an item">
       <button type="submit" class="qa-go" aria-label="Add">${ic("check")}</button></form>
     <div class="subtitle list-sub">${listSubtitle(toBuy, anyLeft)}</div>
-    <div class="toolbar"><button class="pill-btn" id="l-send">${ic("share")} Send</button><button class="pill-btn" id="l-print">${ic("print")} Print</button></div>`;
+    <div class="toolbar"><button class="pill-btn" id="l-trip">${ic("cart")} Log a grocery trip</button><button class="pill-btn" id="l-send">${ic("share")} Send</button><button class="pill-btn" id="l-print">${ic("print")} Print</button></div>`;
 
   // store → aisle grouping (stores in their saved order, "Any store" last)
   const order = [...stores.map((s) => String(s.id)), "none"];
@@ -1036,6 +1036,7 @@ function drawList(focusAdd) {
   $$("#st-bar [data-sf]").forEach((b) => (b.onclick = () => { setStoreFilter(b.dataset.sf); drawList(); }));
   $("#st-add").onclick = () => addStoreInline();
   $("#l-send").onclick = () => sendIt({ kind: "list", id: d.id });
+  $("#l-trip").onclick = () => openTrip(() => reloadList());
   $("#l-print").onclick = () => printIt(`/print/list/${enc(d.id)}`);
   $("#qa-form").onsubmit = (e) => { e.preventDefault(); quickAdd(); };
   $("#qa").onpaste = (e) => {
@@ -1260,11 +1261,12 @@ async function renderPantry() {
   const view = invView();
   app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="round-btn" id="btn-share" aria-label="Share">${ic("share")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
     `<h1 class="title">Inventory</h1>
-    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button><button class="pill-btn" id="p-ci">${ic("check")} Check-in</button></div>
+    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button><button class="pill-btn" id="p-trip">${ic("cart")} Log a grocery trip</button><button class="pill-btn" id="p-ci">${ic("check")} Check-in</button></div>
     <div id="pantry">${loading()}</div>`;
   bindTopbar();
   $("#p-scan").onclick = () => startStockUp(renderPantry);
   $("#p-ci").onclick = () => openCheckin(renderPantry);
+  $("#p-trip").onclick = () => openTrip(renderPantry);
   $("#btn-addp").onclick = () => openAddPantry(renderPantry);
   $("#btn-share").onclick = () => openShare("pantry", {});
   $$("#inv-view [data-v]").forEach((b) => (b.onclick = () => { try { localStorage.setItem("tp.invView", b.dataset.v); } catch (_) {} renderPantry(); }));

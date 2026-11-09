@@ -750,3 +750,21 @@ body.scanning .toast{bottom:calc(60vh + 10px)}
 .pk-types button{padding:7px 10px;font-size:13.5px;white-space:nowrap}
 .day-card .more-n{font-size:11.5px;color:var(--sub);margin-top:2px}
 @media (min-width:1024px){.bday-h{gap:6px}.bday-h span{margin-left:auto}.bday-add{margin-top:0;width:22px;height:22px;flex:none;align-self:center}.bday-add svg{width:14px;height:14px}}
+/* grocery trip */
+.trip-methods{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.trip-m{display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:14px;border-radius:14px;border:0;background:var(--card);box-shadow:var(--shadow);text-align:left;color:var(--text);font:inherit;cursor:pointer}
+.trip-m svg{width:22px;height:22px;color:var(--blue)}
+.trip-m span{font-size:13px;color:var(--sub)}
+.trip-m:disabled{opacity:.5}
+.trip-head{display:flex;flex-direction:column;gap:2px;margin:0 2px 10px}
+.trip-head b{font-size:18px}
+.trip-rows{display:flex;flex-direction:column;gap:8px}
+.trip-row{padding:10px;border-radius:12px;background:var(--card);box-shadow:var(--shadow);display:flex;flex-direction:column;gap:6px}
+.trip-row.ignored{opacity:.55}
+.tr-top,.tr-bottom{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.trip-row input,.trip-row select{font:inherit;font-size:15px;padding:7px 9px;border-radius:9px;border:1px solid var(--sep);background:var(--card2);color:var(--text);min-width:0}
+.tr-name{flex:1;font-weight:600}
+.tr-act{flex:0 1 170px}
+.tr-qty{width:72px}
+.tr-price{display:inline-flex;align-items:center;gap:2px;margin-left:auto;color:var(--sub)}
+.tr-price input{width:80px}

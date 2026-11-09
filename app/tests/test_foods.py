@@ -1,5 +1,6 @@
 """Canonical foods: normalisation, resolution, merge with Undo, and the migration."""
 
+import json
 import os
 import shutil
 import sqlite3
@@ -276,3 +277,76 @@ class LookupChain(unittest.TestCase):
                 self.assertEqual(c.execute("SELECT name FROM upc_local WHERE code='0001112223334'").fetchone()[0], "Table salt")
         finally:
             S.set_cfg(openai_key="")
+
+
+class GroceryTrip(unittest.TestCase):
+    def setUp(self):
+        with S.db() as c:
+            for t in ("pantry_items", "shopping_items", "purchases", "trips"):
+                c.execute(f"DELETE FROM {t}")
+        S.set_cfg(openai_key="sk-test")
+
+    def tearDown(self):
+        S.set_cfg(openai_key="")
+
+    READ = {"store_name": "ALDI", "date": "2026-11-08", "total": 12.53, "items": [
+        {"raw_text": "BANANAS 2.31 lb @ 0.59/lb", "name": "bananas", "quantity": None, "unit": "", "price": None, "is_food": True},
+        {"raw_text": "GRND BF 80/20 1.0 LB 5.49", "name": "ground beef 80/20", "quantity": 1, "unit": "lb", "price": 5.49, "is_food": True},
+        {"raw_text": "HVY WHP CRM 16OZ 3.29", "name": "heavy whipping cream", "quantity": 16, "unit": "fl oz", "price": 3.29, "is_food": True},
+        {"raw_text": "PAPER TOWELS 2.39", "name": "paper towels", "quantity": None, "unit": "", "price": 2.39, "is_food": False},
+        {"raw_text": "2 @ 0.89 LIMES", "name": "limes", "quantity": None, "unit": "", "price": None, "is_food": True}]}
+
+    def test_receipt_rows_and_weighted_produce(self):
+        S.list_add({"items": ["1 lb ground beef", "2 cups heavy cream"]})
+        with mock.patch.object(S, "openai_chat", return_value=json_copy(self.READ)) as oc:
+            out = S.receipt_read({"images": [{"data": "data:image/jpeg;base64,AAAA"}]})
+        self.assertIn("GRND BF", oc.call_args.args[0][0]["content"][0]["text"])
+        rows = {r["name"]: r for r in out["rows"]}
+        self.assertEqual((out["store_name"], out["date"]), ("ALDI", "2026-11-08"))
+        self.assertEqual((rows["Banana"]["quantity"], rows["Banana"]["unit"], rows["Banana"]["price"]), (2.31, "lb", 1.36))
+        self.assertEqual((rows["Lime"]["quantity"], rows["Lime"]["price"]), (2.0, 1.78))
+        self.assertEqual(rows["Ground beef"]["action"], "check_off")
+        self.assertEqual(rows["Heavy cream"]["action"], "check_off")
+        self.assertEqual(rows["Paper towel"]["action"], "ignore")
+        self.assertEqual(rows["Banana"]["action"], "add")
+
+    def test_apply_and_undo(self):
+        S.list_add({"items": ["1 lb ground beef"]})
+        with S.db() as c:
+            cream = S.add_pantry_item(c, "Heavy cream", "fridge", None, "", None, 1, "cup")
+        with mock.patch.object(S, "openai_chat", return_value=json_copy(self.READ)):
+            out = S.receipt_read({"images": [{"data": "data:image/jpeg;base64,AAAA"}]})
+        rows = out["rows"]
+        for r in rows:
+            r["list_item_id"] = (r.get("list_item") or {}).get("id")
+            if r["name"] == "Heavy cream":
+                r["action"], r["pantry_item_id"] = "increase", cream
+        res = S.trip_apply({"store_name": "Aldi", "date": out["date"], "rows": rows, "method": "receipt",
+                            "files": [{"data": "data:image/png;base64," + __import__("base64").b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 40).decode()}]})
+        self.assertEqual((res["items"], res["checked"]), (4, 1))
+        self.assertEqual(res["total"], 14.31)
+        self.assertIn("Aldi · 4 items · $14.31 · 1 checked off your list", res["summary"])
+        with S.db() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM purchases WHERE trip_id=?", (res["trip_id"],)).fetchone()[0], 5)
+            self.assertAlmostEqual(S.pantry_row(c, cream)["qty"], 3.0, places=2)   # 1 cup + 16 fl oz
+            files = json.loads(c.execute("SELECT files FROM trips WHERE id=?", (res["trip_id"],)).fetchone()[0])
+        self.assertEqual(files, ["receipt-1.png"])
+        self.assertTrue(all(i["checked"] for i in S.ongoing_list()["items"] if "beef" in i["text"]))
+        S.trip_undo(res["trip_id"])
+        with S.db() as c:
+            self.assertEqual(S.pantry_row(c, cream)["qty"], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM pantry_items").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM purchases").fetchone()[0], 0)
+        self.assertFalse(any(i["checked"] for i in S.ongoing_list()["items"]))
+        with self.assertRaises(S.ApiError):
+            S.trip_undo(res["trip_id"])
+
+    def test_scanner_trip_is_recorded(self):
+        with S.db() as c:
+            a = S.add_pantry_item(c, "Milk")
+        out = S.trip_record_scans({"pantry_item_ids": [a], "store_name": "Costco"})
+        self.assertEqual(out["summary"], "Costco · 1 item")
+
+
+def json_copy(d):
+    return json.loads(json.dumps(d))

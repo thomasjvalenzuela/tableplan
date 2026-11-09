@@ -648,9 +648,9 @@ function startScanSession(after) {
 function drawStockInput() {
   const box = $("#sb-input"); if (!box) return;
   const m = stockMethod();
-  $("#sb-method").innerHTML = STOCK_METHODS.map(([k, l]) => `<button data-m="${k}" class="${m === k ? "on" : ""}" role="radio" aria-checked="${m === k}" ${k === "receipt" ? 'aria-disabled="true"' : ""}>${esc(l)}${k === "receipt" ? '<small class="soon">Soon</small>' : ""}</button>`).join("");
+  $("#sb-method").innerHTML = STOCK_METHODS.map(([k, l]) => `<button data-m="${k}" class="${m === k ? "on" : ""}" role="radio" aria-checked="${m === k}" >${esc(l)}</button>`).join("");
   $$("#sb-method [data-m]").forEach((b) => (b.onclick = () => {
-    if (b.dataset.m === "receipt") return toast("Receipt scanning is coming soon");
+    if (b.dataset.m === "receipt") { endScanSession(); return openTrip(SS.after || (state.tab === "pantry" ? renderPantry : null)); }
     setStockMethod(b.dataset.m); drawSession();
     if (b.dataset.m === "camera") openScanner(SS.after);
   }));
@@ -681,7 +681,10 @@ function endScanSession() {
   SS.active = false;
   $("#scan-bar")?.remove(); document.body.classList.remove("scanning");
   const n = scanCount();
-  if (n) toast(`Added ${plural(n, "item")} to your inventory`);
+  const trip = SS.trip; SS.trip = null;
+  const ids = SS.rows.map((r) => r.item?.id).filter((x) => x != null);
+  if (trip && ids.length) api("POST", "/api/trip/scans", { ...trip, pantry_item_ids: ids }).then((r) => toast(r.summary)).catch(() => {});
+  else if (n) toast(`Added ${plural(n, "item")} to your inventory`);
   if (SS.after) SS.after(); else if (state.tab === "pantry") renderPantry();
   SS.after = null;
 }
@@ -853,6 +856,88 @@ async function openScanner(after) {
       obs.observe(document.body, { childList: true, subtree: true });
     },
   });
+}
+
+// ------------------------------------------------------------------ grocery trip: a receipt or scanning, then one review
+const readFile = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+const TRIP_UNITS = [["", "count"], ["lb", "lb"], ["oz", "oz"], ["kg", "kg"], ["g", "g"], ["fl oz", "fl oz"], ["cup", "cup"], ["pint", "pint"], ["quart", "quart"], ["gallon", "gallon"], ["l", "l"], ["ml", "ml"]];
+async function openTrip(after) {
+  const T = { store_id: null, store_name: "", stores: [], files: [], read: null, step: 1 };
+  try { T.stores = await api("GET", "/api/stores"); } catch (_) {}
+  openSheet("Log a grocery trip", `<div id="trip"></div>`, { onMount: () => draw() });
+  function draw() {
+    const box = $("#trip"); if (!box) return;
+    if (T.step === 1) {
+      box.innerHTML = `<div class="group-label" style="margin-top:2px">Where did you shop?</div>
+        <div class="chips wrap" id="tr-stores">${T.stores.map((st) => `<button class="filter ${String(T.store_id) === String(st.id) ? "on" : ""}" data-sid="${esc(st.id)}">${esc(st.name)}</button>`).join("")}<button class="filter ${T.store_id === "other" ? "on" : ""}" data-sid="other">Other</button></div>
+        ${T.store_id === "other" ? `<div class="group" style="margin-top:8px"><div class="field"><input class="full" id="tr-other" maxlength="60" placeholder="Store name" value="${esc(T.store_name)}"></div></div>` : ""}
+        <div class="group-label">How do you want to add it?</div>
+        <div class="trip-methods">
+          <button class="trip-m" id="tr-receipt" ${state.cfg.ai_key ? "" : "disabled"}>${ic("file")}<b>Receipt</b><span>${state.cfg.ai_key ? "Photo, PDF or drop a file" : "Needs an OpenAI key (Settings)"}</span></button>
+          <button class="trip-m" id="tr-scan">${ic("scan")}<b>Scan the items</b><span>Scanner or camera</span></button>
+        </div>`;
+      $$("#tr-stores [data-sid]").forEach((b) => (b.onclick = () => { T.store_id = b.dataset.sid; T.store_name = b.dataset.sid === "other" ? T.store_name : b.textContent; draw(); if (T.store_id === "other") $("#tr-other")?.focus(); }));
+      $("#tr-other") && ($("#tr-other").oninput = (e) => { T.store_name = e.target.value; });
+      $("#tr-receipt").onclick = () => { T.step = 2; draw(); };
+      $("#tr-scan").onclick = () => {
+        closeSheet();
+        SS.trip = { store_id: T.store_id && T.store_id !== "other" ? T.store_id : null, store_name: T.store_name };
+        startStockUp(after);
+      };
+      return;
+    }
+    if (T.step === 2) {
+      box.innerHTML = `<button class="link-btn" id="tr-back">${ic("chevL")} Back</button>
+        <label class="drop" id="tr-drop" style="padding:26px;margin-top:6px">${ic("camera")}<div style="margin-top:8px"><b>Take a photo of the receipt</b><br><span class="muted">or choose photos or a PDF, or drop them here</span></div>
+          <input type="file" accept="image/*,application/pdf" multiple id="tr-file" hidden></label>
+        <div id="tr-status"></div>`;
+      $("#tr-back").onclick = () => { T.step = 1; draw(); };
+      const go = async (files) => {
+        $("#tr-status").innerHTML = `<div class="importing"><div class="pot">🧾</div><div class="stage">Reading your receipt…</div><div class="muted small">Usually 10–20 seconds.</div></div>`;
+        try {
+          T.files = [];
+          for (const f of files.slice(0, 6)) T.files.push({ data: f.type === "application/pdf" ? await readFile(f) : await shrink(f) });
+          T.read = await api("POST", "/api/receipt", { images: T.files });
+          if (!T.store_name && T.read.store_name) T.store_name = T.read.store_name;
+          T.step = 3; draw();
+        } catch (e) { $("#tr-status").innerHTML = `<div class="banner">${esc(e.message)}</div>`; }
+      };
+      $("#tr-file").onchange = (e) => go([...e.target.files]);
+      dropZone($("#tr-drop"), go, /^(image\/|application\/pdf)/);
+      return;
+    }
+    const rows = T.read.rows;
+    const acts = (r) => [r.list_item ? ["check_off", "Check off + add"] : null, ["add", "Add to inventory"], r.pantry_item ? ["increase", `Add to ${r.pantry_item.name}`] : null, ["ignore", "Ignore"]].filter(Boolean);
+    box.innerHTML = `<div class="trip-head"><b>${esc(T.store_name || "Grocery trip")}</b><span class="muted">${esc(fmt(parseISO(T.read.date), { month: "short", day: "numeric" }))} · ${esc(plural(rows.length, "line"))}${T.read.total != null ? ` · $${esc((+T.read.total).toFixed(2))}` : ""}</span></div>
+      <div class="trip-rows">${rows.map((r, i) => `<div class="trip-row ${r.action === "ignore" ? "ignored" : ""}" data-i="${i}">
+        <div class="tr-top"><input class="tr-name" value="${esc(r.name)}" aria-label="Item name" maxlength="80"><select class="tr-act" aria-label="What to do">${acts(r).map(([k, l]) => `<option value="${k}" ${r.action === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
+        <div class="muted small">${esc(r.raw_text)}${r.list_item ? ` · on your list: ${esc(r.list_item.text)}` : ""}</div>
+        <div class="tr-bottom"><input class="tr-qty" type="number" inputmode="decimal" min="0" step="any" value="${r.quantity != null ? esc(r.quantity) : ""}" placeholder="Qty" aria-label="Quantity">
+          <select class="tr-unit" aria-label="Unit">${TRIP_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (r.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          <select class="tr-loc" aria-label="Store in">${["fridge", "freezer", "pantry"].map((l) => `<option value="${l}" ${r.location === l ? "selected" : ""}>${cap(l)}</option>`).join("")}</select>
+          <span class="tr-price">$<input type="number" inputmode="decimal" min="0" step="0.01" value="${r.price != null ? esc((+r.price).toFixed(2)) : ""}" aria-label="Price"></span></div></div>`).join("")}</div>
+      <div style="height:12px"></div><button class="btn" id="tr-apply">Apply all</button>`;
+    $$("#trip .trip-row").forEach((el) => {
+      const r = rows[+el.dataset.i];
+      $(".tr-name", el).onchange = (e) => { r.name = e.target.value; };
+      $(".tr-act", el).onchange = (e) => { r.action = e.target.value; el.classList.toggle("ignored", r.action === "ignore"); };
+      $(".tr-qty", el).onchange = (e) => { r.quantity = e.target.value === "" ? null : +e.target.value; };
+      $(".tr-unit", el).onchange = (e) => { r.unit = e.target.value; };
+      $(".tr-loc", el).onchange = (e) => { r.location = e.target.value; };
+      $(".tr-price input", el).onchange = (e) => { r.price = e.target.value === "" ? null : +e.target.value; };
+    });
+    $("#tr-apply").onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      try {
+        const res = await api("POST", "/api/trip/apply", { store_id: T.store_id && T.store_id !== "other" ? T.store_id : null, store_name: T.store_name,
+          date: T.read.date, method: "receipt", files: T.files,
+          rows: rows.map((r) => ({ ...r, list_item_id: r.list_item?.id || null, pantry_item_id: r.pantry_item?.id ?? null })) });
+        closeSheet();
+        toast(res.summary, "Undo", async () => { try { await api("POST", `/api/trip/${enc(res.trip_id)}/undo`); toast("Trip undone"); after && after(); } catch (x) { fail(x); } });
+        after && after();
+      } catch (x) { fail(x); e.currentTarget && (e.currentTarget.disabled = false); }
+    };
+  }
 }
 
 // ------------------------------------------------------------------ pantry check-in (quick review)
