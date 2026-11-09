@@ -45,7 +45,7 @@ import urllib.request
 import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -118,6 +118,9 @@ DEFAULT_SETTINGS = {
     "expiring_window_days": 3,
     "plan_horizon_days": 14,          # how many days the planner board shows
     "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
+    "polish_imports": True,           # AI rewrites imported steps clearly (never amounts); needs an OpenAI key
+    "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
+                   "Drink"],          # recipe categories, in display order
 }
 
 
@@ -204,6 +207,10 @@ def init_db():
     with db() as c:
         c.executescript(SCHEMA)
         n_recipes.init(c); n_plans.init(c); n_lists.init(c)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(pantry_items)")}
+        for col, typ in (("qty", "REAL"), ("unit", "TEXT"), ("original_qty", "REAL")):
+            if col not in cols:   # known amounts: qty left in `unit`, original_qty = the full package
+                c.execute(f"ALTER TABLE pantry_items ADD COLUMN {col} {typ}")
         if not c.execute("SELECT 1 FROM settings WHERE key='stores_seeded'").fetchone():
             n_lists.seed_stores(c, DEFAULT_STORES)
             c.execute("INSERT INTO settings(key, value) VALUES ('stores_seeded', 'true')")
@@ -292,6 +299,25 @@ def _v_enum(*choices):
     return f
 
 
+def _v_categories(v):
+    if not isinstance(v, list) or len(v) > MAX_CATEGORIES:
+        raise ValueError(f"must be a list of at most {MAX_CATEGORIES} names")
+    out = []
+    for x in v:
+        if not isinstance(x, str):
+            raise ValueError("names must be text")
+        x = " ".join(x.split())
+        if not 1 <= len(x) <= 30:
+            raise ValueError("names must be 1-30 characters")
+        if x.lower() in (y.lower() for y in out):
+            raise ValueError(f"has {x} twice")
+        out.append(x)
+    return out
+
+
+MAX_CATEGORIES = 30
+
+
 def _v_strlist(max_items, max_len, choices=None):
     def f(v):
         if not isinstance(v, list) or len(v) > max_items:
@@ -328,6 +354,8 @@ SETTINGS_VALIDATORS = {
     "expiring_window_days": _v_int(0, 60),
     "plan_horizon_days": _v_int(7, 28),
     "plan_reminder_days": _v_int(0, 7),
+    "polish_imports": _v_bool,
+    "categories": _v_categories,
 }
 
 
@@ -784,7 +812,34 @@ def event(c, item_id, action, detail=""):
               (item_id, datetime.now().isoformat(timespec="seconds"), action, detail))
 
 
-def add_pantry_item(c, name, location=None, package_date=None, quantity_text="", mealie_item_id=None):
+def parse_amount(text):
+    """'1 pint' -> (1.0, 'pint'); '2 avocados' -> (2.0, ''); '½ cup' -> (0.5, 'cup'); no number -> (None, None)."""
+    t = (text or "").strip()
+    for k, v in _UFRAC.items():
+        t = re.sub(rf"(\d)\s*{k}", rf"\1 {v}", t).replace(k, v)
+    m = re.match(rf"^\s*{_QTY}\s*(fl\.?\s*oz\b|[A-Za-z]+\.?)?", t)
+    if not m:
+        return None, None
+    try:
+        q = _qty_val(m.group(1))
+    except (ValueError, ZeroDivisionError):
+        return None, None
+    if not q or q <= 0:
+        return None, None
+    word = (m.group(2) or "").rstrip(".")
+    u = n_units.normalize(word) if word else ""
+    if word and n_units.dimension(u) is None:
+        u = ""   # "2 avocados": a plain count
+    return float(q), u
+
+
+def add_pantry_item(c, name, location=None, package_date=None, quantity_text="", mealie_item_id=None,
+                    qty=None, unit=None):
+    """Stock an item. qty/unit, when known, are the amount bought (otherwise parsed from quantity_text)."""
+    if qty is None and quantity_text:
+        qty, unit = parse_amount(quantity_text)
+    qty = float(qty) if qty is not None and float(qty) > 0 else None
+    unit = n_units.normalize(unit) if qty is not None else None
     rule = match_rule(c, name)
     loc = location if location in LOCATIONS else (rule["default_location"] if rule else "fridge")
     t = today()
@@ -796,9 +851,9 @@ def add_pantry_item(c, name, location=None, package_date=None, quantity_text="",
         exp, src = (t + timedelta(days=d), "estimate") if d else (None, "none")
     cur = c.execute(
         """INSERT INTO pantry_items(name, quantity_text, location, purchased_on, frozen_on, expires_on,
-           expiry_source, rule_id, mealie_item_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+           expiry_source, rule_id, mealie_item_id, created_at, qty, unit, original_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (name.strip(), quantity_text or "", loc, iso(t), iso(t) if loc == "freezer" else None, iso(exp), src,
-         rule["id"] if rule else None, mealie_item_id, datetime.now().isoformat(timespec="seconds")))
+         rule["id"] if rule else None, mealie_item_id, datetime.now().isoformat(timespec="seconds"), qty, unit, qty))
     event(c, cur.lastrowid, "added", f"{loc}; expires {iso(exp) or 'unknown'}")
     return cur.lastrowid
 
@@ -828,6 +883,9 @@ def apply_pantry_action(c, item_id, body):
             event(c, item_id, "finished")
             return
         updates = {"amount_left": left}
+        if item["qty"] is not None and (item["original_qty"] or item["qty"]):
+            updates["qty"] = round(left * (item["original_qty"] or item["qty"]), 4)   # keep the known amount in step
+            updates["original_qty"] = item["original_qty"] or item["qty"]
         if not item["opened_on"] and item["location"] != "freezer":
             updates["opened_on"] = iso(t)
             od = opened_days(rule, item["location"])
@@ -914,6 +972,29 @@ def apply_pantry_action(c, item_id, body):
             c.execute("UPDATE pantry_items SET name=?, quantity_text=? WHERE id=?",
                       (name, body.get("quantity_text", item["quantity_text"]), item_id))
 
+    elif action == "amount":
+        raw = body.get("qty")
+        if raw in (None, ""):
+            c.execute("UPDATE pantry_items SET qty=NULL, unit=NULL, original_qty=NULL WHERE id=?", (item_id,))
+            event(c, item_id, "amount", "cleared")
+            return
+        try:
+            q = float(raw)
+        except (TypeError, ValueError):
+            raise ApiError(400, "Type the amount as a number.")
+        if not 0 <= q <= 1e6:
+            raise ApiError(400, "That amount doesn't look right.")
+        unit = n_units.normalize(_s(body.get("unit"), 20))
+        if unit and n_units.dimension(unit) is None:
+            raise ApiError(400, "Pick a unit from the list.")
+        orig = item["original_qty"]
+        if orig is None or n_units.normalize(item["unit"]) != unit or q > orig:
+            orig = q
+        left = max(0.0, min(1.0, q / orig)) if orig else 0.0
+        c.execute("UPDATE pantry_items SET qty=?, unit=?, original_qty=?, amount_left=? WHERE id=?",
+                  (q, unit, orig or None, left, item_id))
+        event(c, item_id, "amount", n_units.fmt(q, unit))
+
     elif action == "toss":
         c.execute("UPDATE pantry_items SET status='tossed', finished_on=? WHERE id=?", (iso(t), item_id))
         event(c, item_id, "tossed")
@@ -938,9 +1019,17 @@ def pantry_json(c, row):
         "purchased_on": row["purchased_on"], "opened_on": row["opened_on"], "frozen_on": row["frozen_on"],
         "expires_on": row["expires_on"], "expiry_source": row["expiry_source"],
         "days_left": (exp - t).days if exp else None, "status": row["status"], "emoji": food_emoji(row["name"]),
+        "qty": row["qty"], "unit": row["unit"] or "", "left_text": pantry_left_text(row),
         "rule": {"id": rule["id"], "name": rule["name"], "source": rule["source"],
                  **{f: rule[f] for f in RULE_FIELDS}, "tips": rule["tips"]} if rule else None,
     }
+
+
+def pantry_left_text(row):
+    """'1 cup left' when the amount is known, else '50% left'."""
+    if row["qty"] is not None:
+        return n_units.fmt(row["qty"], row["unit"]) + " left"
+    return f"{round((row['amount_left'] or 0) * 100)}% left"
 
 
 def list_pantry(c, status="active"):
@@ -1070,6 +1159,7 @@ _recipe_lock = threading.Lock()
 
 sys.path.insert(0, HERE) if HERE not in sys.path else None  # python -I omits the script dir
 from native import lists as n_lists, plans as n_plans, recipes as n_recipes, scraper as n_scraper  # noqa: E402
+from native import units as n_units  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -1163,7 +1253,7 @@ def _fetch_page(url):
 
 AI_RECIPE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["found", "complete", "missing", "source_url", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags"],
+    "required": ["found", "complete", "missing", "source_url", "name", "description", "servings", "prep_minutes", "cook_minutes", "total_minutes", "ingredients", "steps", "tags", "categories"],
     "properties": {
         "found": {"type": "boolean"}, "complete": {"type": "boolean"}, "missing": {"type": "string"}, "source_url": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"},
         "servings": {"type": "number"}, "prep_minutes": {"type": "integer"}, "cook_minutes": {"type": "integer"},
@@ -1172,8 +1262,25 @@ AI_RECIPE_SCHEMA = {
                                                     "properties": {"section": {"type": "string"}, "line": {"type": "string"}}}},
         "steps": {"type": "array", "items": {"type": "string"}},
         "tags": {"type": "array", "items": {"type": "string"}},
+        "categories": {"type": "array", "items": {"type": "string"}},
     },
 }
+
+
+def _category_prompt():
+    return ("categories: pick 1-2 that fit from exactly this list (copy the names exactly): "
+            + "; ".join(get_settings()["categories"]) + ".")
+
+
+def _pick_categories(names):
+    """AI-suggested categories, keeping only (at most 2) names from the household's list."""
+    known = {c.lower(): c for c in get_settings()["categories"]}
+    out = []
+    for n in names if isinstance(names, list) else []:
+        c = known.get(" ".join(str(n).split()).lower()) if isinstance(n, str) else None
+        if c and c not in out:
+            out.append(c)
+    return [{"name": c} for c in out[:2]]
 
 
 def ai_recipe(text, images=None, feature="recipe import", detail=""):
@@ -1183,7 +1290,7 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
     content = [{"type": "text", "text": (
         "Extract the single recipe from the material below. Clean up typos, spacing and formatting, but never change the recipe: keep every amount, ingredient, temperature, time and step exactly. Copy ingredient lines with amounts, amount first "
         "(e.g. '1 1/2 cups heavy cream'); put section headings in 'section' (empty if none). Steps are the instructions "
-        "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content. Set complete=false when part of the recipe is clearly missing: no ingredient list, no instructions, text cut off mid-list or mid-step (e.g. a second page or screenshot wasn't included), or steps that use ingredients the list doesn't include; then explain what's missing in 'missing' (one short sentence). Missing amounts in a spoken video recipe do not count as incomplete.")
+        "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content. Set complete=false when part of the recipe is clearly missing: no ingredient list, no instructions, text cut off mid-list or mid-step (e.g. a second page or screenshot wasn't included), or steps that use ingredients the list doesn't include; then explain what's missing in 'missing' (one short sentence). Missing amounts in a spoken video recipe do not count as incomplete. " + _category_prompt())
         + (f"\n\n{text[:30000]}" if text else "")}]
     for im in images or []:
         data = im.get("data") or ""
@@ -1223,10 +1330,105 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
             "totalTimeSeconds": mins(out.get("total_minutes")) or ((mins(out.get("prep_minutes")) or 0) + (mins(out.get("cook_minutes")) or 0)) or None,
             "recipeIngredient": ings,
             "recipeInstructions": [{"id": str(uuid.uuid4()), "title": "", "text": s, "ingredientReferences": []} for s in out["steps"] if s.strip()],
-            "tags": [{"name": t} for t in (out.get("tags") or [])[:8]]}
+            "tags": [{"name": t} for t in (out.get("tags") or [])[:8]],
+            "recipeCategory": _pick_categories(out.get("categories"))}
+
+
+POLISH_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["description", "ingredients", "steps", "categories"],
+    "properties": {
+        "description": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}},
+        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                                    "required": ["section", "line"],
+                                                    "properties": {"section": {"type": "string"}, "line": {"type": "string"}}}},
+        "steps": {"type": "array", "items": {"type": "string"}},
+    },
+}
+POLISH_PROMPT = (
+    "You are editing a recipe for a home cook. Return the same recipe with clearer wording.\n"
+    "- description: 1-2 appetizing, factual sentences about the dish.\n"
+    "- ingredients: exactly the same number of lines, in the same order, with the same section headings. Tidy the "
+    "wording and spell out units (e.g. '2 c. flour' -> '2 cups all-purpose flour', 'tbs' -> 'tablespoons').\n"
+    "- steps: rewrite each step as clear, complete, descriptive sentences. Name the pan or vessel, the heat level, "
+    "temperatures, times and doneness cues (e.g. 'until golden and 165°F inside') when the source gives them.\n"
+    "NEVER change ingredients, amounts, temperatures, times or the order of the method. Never add or remove "
+    "ingredients, and never add or remove actions in the steps. If the source lacks a detail, do not invent numbers; "
+    "just write the sentence clearly. Keep section headings as they are.")
+_NUM_TOKEN = re.compile(r"\d+(?:[.,/]\d+)?|[½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]")
+
+
+def _num_tokens(line):
+    """Digit and fraction tokens of a line ('1 ½ cups' -> {'1', '½'}), to check a rewrite kept every number."""
+    return set(_NUM_TOKEN.findall(line or ""))
+
+
+def _polish_on():
+    return bool(cfg("openai_key")) and bool(get_settings().get("polish_imports", True))
+
+
+REWORD_EXTRA = ("Reword for clarity only. Do not change the recipe. Don't make anything up, but use common sense to fill "
+                "in obvious wording gaps (e.g. 'the pan', 'until done' -> a clear doneness cue) without adding new "
+                "amounts, ingredients or temperatures.")
+
+
+def polish_recipe(data, extra=""):
+    """AI pass that rewrites a new import's steps and description clearly and tidies ingredient wording, without
+    changing amounts. Keeps the originals in extras.original. Returns new data (the input when the polish is unsafe)."""
+    ings = [g for g in data.get("recipeIngredient") or [] if _ing_line(g)]
+    steps = [st for st in data.get("recipeInstructions") or [] if (st.get("text") or "").strip()]
+    if not ings and not steps:
+        return data
+    orig_lines = [_ing_line(g) for g in ings]
+    orig_steps = [st["text"].strip() for st in steps]
+    section, sections = None, []
+    for g in ings:
+        section = g.get("title") or section
+        sections.append(section or "")
+    source = {"name": data.get("name") or "", "description": data.get("description") or "",
+              "ingredients": [{"section": sec, "line": ln} for sec, ln in zip(sections, orig_lines)], "steps": orig_steps}
+    out = openai_chat([{"role": "system", "content": POLISH_PROMPT + "\n- " + _category_prompt()
+                        + (("\n" + extra) if extra else "")},
+                       {"role": "user", "content": json.dumps(source, ensure_ascii=False)}],
+                      "recipe_polish", POLISH_SCHEMA, "polish", (data.get("name") or "")[:80])
+    new_steps = [x.strip() for x in out.get("steps") or [] if isinstance(x, str) and x.strip()]
+    if len(new_steps) < len(orig_steps) - 1 or not new_steps and orig_steps:
+        log(f"polish discarded for {data.get('name')!r}: steps {len(orig_steps)} -> {len(new_steps)}")
+        return data
+    new_lines = [(x.get("line") or "").strip() for x in out.get("ingredients") or [] if isinstance(x, dict)]
+    lines_ok = len(new_lines) == len(orig_lines) and all(
+        nl and _num_tokens(ol) <= _num_tokens(nl) for ol, nl in zip(orig_lines, new_lines))
+    if not lines_ok:
+        log(f"polish kept the original ingredient lines for {data.get('name')!r} (count or numbers changed)")
+    data = dict(data)
+    if lines_ok:
+        new_ings = []
+        for g, line in zip(ings, new_lines):
+            g = dict(g)
+            g.update(note=line, display=line, originalText=line, quantity=0, unit=None, food=None)
+            new_ings.append(g)
+        data["recipeIngredient"] = new_ings
+    data["recipeInstructions"] = [{"id": str(uuid.uuid4()), "title": "", "text": t, "ingredientReferences": []}
+                                  for t in new_steps]
+    if not data.get("recipeCategory"):
+        cats = _pick_categories(out.get("categories"))
+        if cats:
+            data["recipeCategory"] = cats
+    desc = (out.get("description") or "").strip()
+    if desc:
+        data["description"] = desc[:2000]
+    extras = dict(data.get("extras") or {})
+    if not isinstance(extras.get("original"), dict):   # repeated rewording keeps the true original
+        extras["original"] = {"ingredients": orig_lines, "steps": orig_steps, "description": source["description"]}
+    data["extras"] = extras
+    return data
 
 
 def _save_new_recipe(data, image_url=None):
+    if _polish_on():
+        try:
+            data = polish_recipe(data)
+        except Exception as e:   # the import still succeeds, just unpolished
+            log("recipe polish skipped:", getattr(e, "message", None) or e)
     with db() as c:
         slug = n_recipes.create(c, data.get("name") or "Untitled recipe", data)
         rid = n_recipes.get(c, slug)["id"]
@@ -1276,7 +1478,11 @@ def native_api(method, path, body=None, multipart=None):
             if method == "PUT":
                 return n_recipes.get(c, n_recipes.update(c, key, body or {}))
             if method == "DELETE":
+                gone = n_recipes.get(c, key)
                 n_recipes.delete(c, key, images_dir=IMG_DIR)
+                if gone:   # its unbought list lines go too (shared lines keep the other recipes' amounts)
+                    for lst in n_lists.list_lists(c):
+                        n_lists.remove_recipe_items(c, lst["id"], gone["id"])
                 c.execute("DELETE FROM meal_plans WHERE recipe_id NOT IN (SELECT id FROM recipes) AND recipe_id IS NOT NULL")
                 return {}
         # ---- favorites / user
@@ -1299,6 +1505,7 @@ def native_api(method, path, body=None, multipart=None):
                 r = e.get("recipe")
                 items.append({"id": e["id"], "date": e["date"], "entryType": e["entry_type"], "title": e["title"], "text": e["text"],
                               "recipeScale": e["scale"], "recipeId": e["recipeId"],
+                              "cooked": e.get("cooked", False), "skipped": e.get("skipped", False),
                               "recipe": {"id": r["id"], "name": r["name"], "slug": r["slug"], "image": r["image_v"] or None} if r else None})
             return {"items": items}
         if p == "/api/households/mealplans" and method == "POST":
@@ -1454,6 +1661,7 @@ def get_plans(start, end):
             "id": p.get("id"), "date": p.get("date"), "entry_type": p.get("entryType"),
             "title": p.get("title") or "", "text": p.get("text") or "",
             "scale": p.get("recipeScale") or 1,
+            "cooked": bool(p.get("cooked")), "skipped": bool(p.get("skipped")),
             "recipe": {"id": rec.get("id") or p.get("recipeId"), "name": rec.get("name"), "slug": rec.get("slug"),
                        "has_image": bool(rec.get("image")), "image_v": rec.get("image") or "",
                        "link": recipe_link(rec.get("slug"))} if (rec or p.get("recipeId")) else None,
@@ -2630,6 +2838,110 @@ def clean_food(name):
 
 # ============================================================ in-app recipe editing (saves to Mealie)
 
+def _category_arg(v):
+    """Validated category names (from the settings list, in its spelling and order)."""
+    if not isinstance(v, list) or len(v) > MAX_CATEGORIES:
+        raise ApiError(400, "Send categories as a list of names.")
+    known = {c.lower(): c for c in get_settings()["categories"]}
+    want = set()
+    for x in v:
+        if not isinstance(x, str) or " ".join(x.split()).lower() not in known:
+            raise ApiError(400, f"Unknown category: {str(x)[:40]}")
+        want.add(" ".join(x.split()).lower())
+    return [c for c in get_settings()["categories"] if c.lower() in want]
+
+
+def _set_categories(c, rec, names):
+    rec = dict(rec, recipeCategory=[{"name": n} for n in names])
+    return n_recipes.update(c, rec["id"], rec)
+
+
+def _rec_categories(rec):
+    return [x.get("name") for x in rec.get("recipeCategory") or [] if isinstance(x, dict) and x.get("name")]
+
+
+def recipes_bulk(b):
+    """POST /api/recipes/bulk {slugs, categories}: set the categories of many recipes at once."""
+    require_native()
+    slugs = b.get("slugs")
+    if not isinstance(slugs, list) or not 1 <= len(slugs) <= 2000 or not all(isinstance(x, str) for x in slugs):
+        raise ApiError(400, "Pick at least one recipe.")
+    names = _category_arg(b.get("categories"))
+    n = 0
+    with db() as c:
+        for slug in slugs:
+            rec = n_recipes.get(c, slug)
+            if rec:
+                _set_categories(c, rec, names)
+                n += 1
+    _recipe_cache["at"] = 0
+    return {"ok": True, "updated": n}
+
+
+def category_rename(b):
+    """Rename a category in settings and in every recipe that uses it."""
+    require_native()
+    old, new = " ".join(_s(b.get("from"), 60).split()), " ".join(_s(b.get("to"), 60).split())
+    cats = get_settings()["categories"]
+    idx = next((i for i, x in enumerate(cats) if x.lower() == old.lower()), None)
+    if idx is None:
+        raise ApiError(404, "Category not found")
+    cats = list(cats)
+    cats[idx] = new
+    save_settings({"categories": cats})   # validates the new name (length, duplicates)
+    n = 0
+    with db() as c:
+        for rec in n_recipes.list_summaries(c):
+            names = _rec_categories(rec)
+            if any(x.lower() == old.lower() for x in names):
+                full = n_recipes.get(c, rec["id"])
+                _set_categories(c, full, [new if x.lower() == old.lower() else x for x in _rec_categories(full)])
+                n += 1
+    _recipe_cache["at"] = 0
+    return {"ok": True, "categories": cats, "recipes": n}
+
+
+def category_delete(b):
+    """Delete a category from settings and recipes. Returns what Undo needs."""
+    require_native()
+    name = " ".join(_s(b.get("name"), 60).split())
+    cats = list(get_settings()["categories"])
+    idx = next((i for i, x in enumerate(cats) if x.lower() == name.lower()), None)
+    if idx is None:
+        raise ApiError(404, "Category not found")
+    name = cats.pop(idx)
+    save_settings({"categories": cats})
+    slugs = []
+    with db() as c:
+        for rec in n_recipes.list_summaries(c):
+            if any(x.lower() == name.lower() for x in _rec_categories(rec)):
+                full = n_recipes.get(c, rec["id"])
+                slugs.append(_set_categories(c, full, [x for x in _rec_categories(full) if x.lower() != name.lower()]))
+    _recipe_cache["at"] = 0
+    return {"ok": True, "categories": cats, "undo": {"name": name, "position": idx, "slugs": slugs}}
+
+
+def category_undo_delete(b):
+    require_native()
+    name = " ".join(_s(b.get("name"), 60).split())
+    pos = b.get("position")
+    pos = pos if isinstance(pos, int) and not isinstance(pos, bool) and pos >= 0 else 10_000
+    slugs = b.get("slugs") if isinstance(b.get("slugs"), list) else []
+    cats = list(get_settings()["categories"])
+    if name.lower() not in (x.lower() for x in cats):
+        cats.insert(min(pos, len(cats)), name)
+        save_settings({"categories": cats})
+    with db() as c:
+        for slug in slugs[:2000]:
+            rec = n_recipes.get(c, slug) if isinstance(slug, str) else None
+            if rec and name not in _rec_categories(rec):
+                order = {x.lower(): i for i, x in enumerate(cats)}
+                names = sorted(_rec_categories(rec) + [name], key=lambda x: order.get(x.lower(), 99))
+                _set_categories(c, rec, names)
+    _recipe_cache["at"] = 0
+    return {"ok": True, "categories": cats}
+
+
 def recipe_update(slug, b):
     r = mealie("GET", f"/api/recipes/{_q(slug)}")
     if "name" in b:
@@ -2646,6 +2958,8 @@ def recipe_update(slug, b):
             v = int(float(b.get(key) or 0))
             r[field] = f"{v} minutes" if v else None
             r[field + "Seconds"] = v * 60 if v else None
+    if "categories" in b:
+        r["recipeCategory"] = [{"name": n} for n in _category_arg(b.get("categories"))]
     if isinstance(b.get("ingredients"), list):
         old = {}
         for ing in r.get("recipeIngredient") or []:
@@ -3164,8 +3478,63 @@ def recipe_detail(slug):
         "ingredients": ings, "steps": steps, "source_url": r.get("orgURL") or "",
         "link": recipe_link(r.get("slug")), "updated": r.get("dateUpdated") or r.get("updatedAt") or "",
         "unparsed": 0, "total_minutes": round(int(r.get("totalTimeSeconds") or 0) / 60) or None,
-        "missing": recipe_missing(r["id"]),
+        "missing": recipe_missing(r["id"]), "cook_entry": cook_entry_for(r["id"]),
+        "original": _original(r),
     }
+
+
+def recipe_polish(slug):
+    """"Reword with AI" on an existing recipe: same safety checks as the import polish; the original text survives."""
+    require_native()
+    if not cfg("openai_key"):
+        raise ApiError(400, "Add your OpenAI key in Settings → AI recipe import to reword recipes.")
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    if not rec:
+        raise ApiError(404, "Recipe not found")
+    new = polish_recipe(rec, REWORD_EXTRA)
+    if new is rec:
+        raise ApiError(422, "The AI's rewrite dropped part of the method, so nothing was changed. Try again.")
+    with db() as c:
+        slug = n_recipes.update(c, rec["id"], new)
+        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+    _recipe_cache["at"] = 0
+    return recipe_detail(slug)
+
+
+def recipe_restore_original(slug):
+    """Put an imported/reworded recipe's original ingredient, step and description text back."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        o = _original(rec)
+        if not o:
+            raise ApiError(404, "There's no original text for this recipe.")
+        ings, section = [], None
+        old = [g for g in rec.get("recipeIngredient") or [] if _ing_line(g)]
+        for i, line in enumerate(o["ingredients"]):
+            title = old[i].get("title") if i < len(old) and len(old) == len(o["ingredients"]) else None
+            ings.append({"referenceId": str(uuid.uuid4()), "title": title, "note": line, "display": line,
+                         "originalText": line, "quantity": 0, "unit": None, "food": None})
+        rec = dict(rec, recipeIngredient=ings, description=o["description"] or rec.get("description") or "",
+                   recipeInstructions=[{"id": str(uuid.uuid4()), "title": "", "text": t, "ingredientReferences": []}
+                                       for t in o["steps"]])
+        slug = n_recipes.update(c, rec["id"], rec)
+        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+    _recipe_cache["at"] = 0
+    return recipe_detail(slug)
+
+
+def _original(r):
+    """The pre-polish text of an imported recipe, or None."""
+    o = (r.get("extras") or {}).get("original") if isinstance(r.get("extras"), dict) else None
+    if not isinstance(o, dict):
+        return None
+    strs = lambda v: [str(x) for x in v if isinstance(x, (str, int, float))] if isinstance(v, list) else []  # noqa: E731
+    return {"ingredients": strs(o.get("ingredients")), "steps": strs(o.get("steps")),
+            "description": str(o.get("description") or "")}
 
 
 def add_items_to_list(texts, list_id=None):
@@ -4138,6 +4507,177 @@ def plan_delete(eid):
     return {"ok": True, "removed": removed, "undo": undo}
 
 
+def plan_skip(eid, skipped=True):
+    """A past day that wasn't cooked: stop asking about it."""
+    require_native()
+    with db() as c:
+        if not n_plans.set_skipped(c, eid, skipped):
+            raise ApiError(404, "Plan entry not found")
+    return {"ok": True}
+
+
+COOK_SNAPSHOT = ("qty", "unit", "original_qty", "amount_left", "status", "finished_on", "opened_on", "expires_on",
+                 "expiry_source")
+
+
+def _pantry_by_key(c):
+    """Active pantry rows by food key (plain and cleaned names), soonest-expiring first."""
+    out = {}
+    rows = c.execute("SELECT * FROM pantry_items WHERE status='active' ORDER BY "
+                     "CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id").fetchall()
+    for r in rows:
+        for k in {food_key(r["name"]), food_key(clean_food(r["name"]))}:
+            if k:
+                out.setdefault(k, []).append(r["id"])
+    return out
+
+
+def _cook_needs(rec, factor):
+    """[(food name, quantity or None, unit)] for a recipe's non-staple ingredients, scaled by factor."""
+    out = []
+    for ing in rec.get("recipeIngredient") or []:
+        line = _ing_line(ing)
+        if not line:
+            continue
+        p = parse_ing_text(line)
+        if p:
+            name, q, unit = clean_food(p["food"]), p["quantity"] * factor, p["unit"] or ""
+        else:
+            name, q, unit = clean_food(line), None, ""
+        key = food_key(name)
+        if not key or name.lower() in STAPLES or key in _STAPLE_KEYS:
+            continue
+        out.append((name, q, unit))
+    return out
+
+
+_STAPLE_KEYS = {food_key(x) for x in STAPLES}
+
+
+def recipe_cooked(slug, b):
+    """Mark a recipe cooked: take what it used out of the pantry (undoable) and tick off its plan entry."""
+    require_native()
+    b = b if isinstance(b, dict) else {}
+    plan_id = _int_id(b["plan_id"]) if b.get("plan_id") not in (None, "") else None
+    servings = b.get("servings")
+    if servings not in (None, ""):
+        if isinstance(servings, bool) or not isinstance(servings, (int, float, str)):
+            raise ApiError(400, "Servings must be a number.")
+        try:
+            servings = float(servings)
+        except ValueError:
+            raise ApiError(400, "Servings must be a number.")
+        if not 0 < servings <= 1000:
+            raise ApiError(400, "Servings must be between 0 and 1000.")
+    else:
+        servings = None
+    token = secrets.token_urlsafe(12)
+    deducted, unknown, finished = [], [], []
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        entry = n_plans.get_entry(c, plan_id) if plan_id is not None else None
+        if plan_id is not None and not entry:
+            raise ApiError(404, "Plan entry not found")
+        base = _num(rec.get("recipeServings")) or _num(rec.get("recipeYieldQuantity"))
+        if servings is not None:
+            factor = servings / base if base else 1.0
+        else:
+            factor = float(entry["scale"]) if entry else 1.0
+        pantry = _pantry_by_key(c)
+        snap = {}
+        for name, need, unit in _cook_needs(rec, factor):
+            ids = pantry.get(food_key(name)) or []
+            row = next((r for r in (pantry_row(c, i) for i in ids) if r and r["status"] == "active"), None)
+            if not row:
+                continue
+            if row["id"] not in snap:
+                snap[row["id"]] = {k: row[k] for k in COOK_SNAPSHOT}
+                event(c, row["id"], "cooked", json.dumps({"token": token, "before": snap[row["id"]],
+                                                          "recipe": rec.get("name") or ""}))
+            used_txt = n_units.fmt(need, unit, name) if need is not None else name
+            amt = n_units.convert(need, unit, row["unit"]) if (need is not None and row["qty"] is not None) else None
+            if amt is not None:
+                orig = row["original_qty"] or row["qty"]
+                left = row["qty"] - amt
+                if left <= 1e-6:
+                    c.execute("UPDATE pantry_items SET qty=0, original_qty=?, amount_left=0, status='used', finished_on=? "
+                              "WHERE id=?", (orig, iso(today()), row["id"]))
+                    finished.append(row["name"])
+                    deducted.append({"name": row["name"], "used": used_txt, "left_text": "finished"})
+                    continue
+                c.execute("UPDATE pantry_items SET qty=?, original_qty=?, amount_left=? WHERE id=?",
+                          (left, orig, max(0.0, min(1.0, left / orig)) if orig else 0.0, row["id"]))
+                if not row["opened_on"] and row["location"] != "freezer":
+                    apply_pantry_action(c, row["id"], {"action": "open"})
+                deducted.append({"name": row["name"], "used": used_txt, "left_text": pantry_left_text(pantry_row(c, row["id"]))})
+                continue
+            # amount unknown (or units that don't convert): it's open now, and about half of it is gone
+            if not row["opened_on"] and row["location"] != "freezer":
+                apply_pantry_action(c, row["id"], {"action": "open"})
+            left = max(0.0, (row["amount_left"] or 0) - 0.5)
+            if left <= 1e-6:
+                c.execute("UPDATE pantry_items SET amount_left=0, status='used', finished_on=? WHERE id=?",
+                          (iso(today()), row["id"]))
+                finished.append(row["name"])
+            else:
+                c.execute("UPDATE pantry_items SET amount_left=? WHERE id=?", (left, row["id"]))
+            unknown.append(row["name"])
+        if entry:
+            prev = n_plans.set_cooked(c, plan_id, now)
+            c.execute("INSERT INTO pantry_events(item_id, at, action, detail) VALUES (NULL,?,?,?)",
+                      (now, "cooked-plan", json.dumps({"token": token, "plan_id": plan_id, "before": prev})))
+        c.execute("INSERT INTO pantry_events(item_id, at, action, detail) VALUES (NULL,?,?,?)",
+                  (now, "cooked-recipe", json.dumps({"token": token, "recipe_id": rec["id"]})))
+    return {"ok": True, "deducted": deducted, "unknown": sorted(set(unknown), key=str.lower),
+            "finished": sorted(set(finished), key=str.lower), "undo_token": token, "plan_id": plan_id}
+
+
+def cooked_undo(b):
+    """Put the pantry back the way it was before a "cooked", and un-cook the plan entry."""
+    require_native()
+    token = _s((b or {}).get("undo_token"), 64).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", token):
+        raise ApiError(400, "Nothing to undo.")
+    restored = 0
+    with db() as c:
+        rows = c.execute("SELECT * FROM pantry_events WHERE action IN ('cooked', 'cooked-plan', 'cooked-recipe') "
+                         "AND detail LIKE ? ORDER BY id DESC", (f'%"token": "{token}"%',)).fetchall()
+        rows = [(r, json.loads(r["detail"])) for r in rows]
+        rows = [(r, d) for r, d in rows if d.get("token") == token]
+        if not rows:
+            raise ApiError(404, "That can't be undone any more.")
+        for r, d in rows:
+            if r["action"] == "cooked" and r["item_id"] is not None:
+                before = {k: d["before"].get(k) for k in COOK_SNAPSHOT}
+                c.execute(f"UPDATE pantry_items SET {', '.join(f'{k}=?' for k in COOK_SNAPSHOT)} WHERE id=?",
+                          (*before.values(), r["item_id"]))
+                event(c, r["item_id"], "cook undone")
+                restored += 1
+            elif r["action"] == "cooked-plan":
+                try:
+                    n_plans.set_cooked(c, d["plan_id"], d.get("before"))
+                except KeyError:
+                    pass
+            c.execute("UPDATE pantry_events SET action=action || ' (undone)' WHERE id=?", (r["id"],))
+    return {"ok": True, "restored": restored}
+
+
+def cook_entry_for(recipe_id):
+    """The plan entry to tick off when this recipe is cooked: planned today or in the last 2 days, not cooked or
+    skipped yet. {id, date, today} or None."""
+    if not NATIVE or not recipe_id:
+        return None
+    t = today()
+    with db() as c:
+        for e in n_plans.recent_for_recipe(c, recipe_id, iso(t - timedelta(days=2)), iso(t)):
+            if not e.get("cooked_at") and not e.get("skipped_at"):
+                return {"id": e["id"], "date": e["date"], "today": e["date"] == iso(t)}
+    return None
+
+
 def plan_status():
     s = get_settings()
     t = today()
@@ -4203,6 +4743,7 @@ def list_item_json(i, names):
     food = (i.get("food") or {}).get("name") or ""
     return {"id": i["id"], "text": item_text(i), "name": item_name(i), "food": food, "qty": _qty_text(i),
             "emoji": food_emoji(food or i.get("note") or i.get("display")), "checked": bool(i.get("checked")),
+            "checked_at": i.get("checkedAt"), "have": i.get("checkedHow") == "have",
             "store_id": i.get("storeId"), "aisle": ((i.get("label") or {}).get("name") or "Other"),
             "recipes": [names[r] for r in i.get("recipeIds") or [] if r in names]}
 
@@ -4211,18 +4752,26 @@ def _recipe_names(c):
     return {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM recipes")}
 
 
-def ongoing_list():
+CHECKED_VISIBLE_HOURS = 4   # a ticked item stays on the list, struck through, this long
+
+
+def ongoing_list(now=None):
+    """The list: unchecked items plus items checked in the last few hours (shown in place, struck through).
+    Older checked items only appear in recently_checked. `count` is the number still to buy."""
     require_native()
+    cut = ((now or datetime.now(timezone.utc)) - timedelta(hours=CHECKED_VISIBLE_HOURS)).isoformat(timespec="seconds")
     with db() as c:
         lid = n_lists.single_list(c)
         sl = n_lists.get_list(c, lid)
-        recent = n_lists.recently_checked(c, lid, 20)
+        fresh = n_lists.checked_since(c, lid, cut)
+        recent = n_lists.recently_checked(c, lid, 20, before=cut)
         stores = n_lists.list_stores(c)
         names = _recipe_names(c)
     order = {s["id"]: i for i, s in enumerate(stores)}
-    items = [list_item_json(i, names) for i in sl["listItems"] if not i["checked"]]
+    unchecked = [list_item_json(i, names) for i in sl["listItems"] if not i["checked"]]
+    items = unchecked + [list_item_json(i, names) for i in fresh]
     items.sort(key=lambda x: (order.get(x["store_id"], len(order)), x["aisle"] == "Other", x["aisle"].lower()))
-    return {"id": lid, "name": sl["name"], "items": items,
+    return {"id": lid, "name": sl["name"], "items": items, "count": len(unchecked),
             "recently_checked": [list_item_json(i, names) for i in recent],
             "stores": [{"id": s["id"], "name": s["name"]} for s in stores]}
 
@@ -4291,13 +4840,17 @@ def recipe_have_all(slug):
 # ============================================================ recipe export, print and share
 
 PRINT_SIZES = {   # page size, sheet inches, margin, base font pt, minimum font pt, two columns, title pt
-    "card35": {"page": "5in 3in", "w": 5.0, "h": 3.0, "m": 0.18, "font": 8.5, "min": 6.5, "cols": True, "title": 12},
-    "card46": {"page": "6in 4in", "w": 6.0, "h": 4.0, "m": 0.22, "font": 9.5, "min": 6.5, "cols": True, "title": 14},
-    "card57": {"page": "7in 5in", "w": 7.0, "h": 5.0, "m": 0.28, "font": 10.5, "min": 6.5, "cols": True, "title": 16},
-    "half": {"page": "5.5in 8.5in", "w": 5.5, "h": 8.5, "m": 0.4, "font": 10.5, "min": 7.5, "cols": False, "title": 18},
+    # Cut-out cards: printed on US Letter with dashed cut lines; w x h is the card, `per` cards per page.
+    "card35": {"card": True, "w": 5.0, "h": 3.0, "per": 3, "font": 8.5, "min": 8, "title": 11},
+    "card46": {"card": True, "w": 6.0, "h": 4.0, "per": 2, "font": 9.5, "min": 8, "title": 13},
+    "card57": {"card": True, "w": 7.0, "h": 5.0, "per": 2, "font": 10, "min": 8, "title": 15},
+    "half": {"card": True, "w": 8.0, "h": 5.25, "per": 2, "font": 10, "min": 8, "title": 16},   # Letter halves inside 0.25in margins
+    # Whole pages
     "letter": {"page": "letter", "w": 8.5, "h": 11.0, "m": 0.6, "font": 11.5, "min": 9, "cols": True, "title": 24},
     "a4": {"page": "A4", "w": 8.27, "h": 11.69, "m": 0.6, "font": 11.5, "min": 9, "cols": True, "title": 24},
 }
+CARD_PAGE_MARGIN = 0.25   # inches, on Letter
+CARD_PAD = 0.15
 
 
 def _servings_arg(v):
@@ -4432,6 +4985,8 @@ def print_recipe(slug, size="letter", servings=None, style="classic", photo=True
     steps = _print_steps(slug, rec, style)
     e = html.escape
     nonce = getattr(_req, "nonce", "") or ""
+    if sz.get("card"):
+        return _print_cards(rec, lines, steps, sv, sz, photo, nonce)
     inner_w, inner_h = sz["w"] - 2 * sz["m"], sz["h"] - 2 * sz["m"]
     ing_html = ""
     for ln in lines:
@@ -4480,6 +5035,83 @@ h3{{font-size:.85em;margin:.5em 0 .15em}}
 {f'<p class="desc">{e(rec["description"][:400])}</p>' if rec.get("description") and not sz['h'] < 6 else ''}
 <div class="cols"><section><h2>Ingredients</h2>{ing_html}</section><section><h2>Steps</h2><ol>{steps_html}</ol></section></div>
 <div class="foot"><span>{e(src)}</span><span>TablePlan</span></div></div>
+<script nonce="{e(nonce)}">{js}</script></body></html>"""
+
+
+def _print_cards(rec, lines, steps, sv, sz, photo, nonce):
+    """Cut-out cards on US Letter: each card is a dashed box of the exact size. Content fills card 1 and flows onto
+    more cards ("Name · 2 of 3", "continued"); a small script measures and moves blocks, adding Letter pages as needed."""
+    e = html.escape
+    name = rec["name"] or "Recipe"
+    meta = _meta_line(rec, sv)
+    blocks = [f'<h1 class="b">{e(name)}</h1>']
+    if photo and rec.get("has_image") and UUID_RE.fullmatch(str(rec.get("id") or "")):
+        blocks.insert(0, f'<img class="photo" alt="" src="/img/{e(rec["id"])}?size=full">')
+    if meta:
+        blocks.append(f'<div class="meta b">{e(meta)}</div>')
+    blocks.append('<h2 class="b">Ingredients</h2>')
+    for ln in lines:
+        if ln["section"]:
+            blocks.append(f'<h3 class="b">{e(ln["section"])}</h3>')
+        blocks.append(f'<div class="b ing">{e(ln["text"])}</div>')
+    blocks.append('<h2 class="b">Steps</h2>')
+    for i, st in enumerate(steps, 1):
+        blocks.append(f'<div class="b step"><span class="n">{i}.</span><span>'
+                      + (f"<b>{e(st['title'])}.</b> " if st["title"] else "") + e(st["text"])
+                      + (f' <span class="x">{e(st["extra"])}</span>' if st["extra"] else "") + "</span></div>")
+    src = rec.get("source_url") or ""
+    blocks.append(f'<div class="b foot"><span>{e(src)}</span><span>TablePlan</span></div>')
+    w, h, pad, m = sz["w"], sz["h"], CARD_PAD, CARD_PAGE_MARGIN
+    page_w, page_h = 8.5 - 2 * m, 11 - 2 * m
+    css = f"""@page{{size:letter;margin:{m}in}}
+*{{box-sizing:border-box}}html,body{{margin:0;padding:0;background:#f2f2f7}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1c1c1e;
+-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+.page{{width:{page_w}in;height:{page_h}in;margin:56px auto 24px;background:#fff;display:flex;flex-direction:column;
+align-items:center;box-shadow:0 0 0 {m}in #fff,0 2px 12px {m}in rgba(0,0,0,.08)}}
+.card{{position:relative;width:{w}in;height:{h}in;border:1px dashed #999;break-inside:avoid;page-break-inside:avoid;
+font-size:{max(sz['font'], sz['min'])}pt;line-height:1.28}}
+.card+.card{{margin-top:-1px}}
+.cut{{position:absolute;top:-.62em;left:-.5em;font-size:9pt;line-height:1;color:#999;background:#fff;padding:0 1px}}
+.cin{{position:absolute;inset:{pad}in;overflow:hidden}}
+.more{{position:absolute;right:{pad}in;bottom:.02in;font-size:6.5pt;color:#8e8e93;font-style:italic}}
+.cont{{font-size:.8em;color:#6e6e73;border-bottom:1px solid #e5e5ea;margin-bottom:.3em;padding-bottom:.1em}}
+h1{{font-size:{sz['title']}pt;margin:0 0 .1em;line-height:1.15;letter-spacing:-.01em}}
+.meta{{color:#6e6e73;font-size:.85em;margin-bottom:.3em}}
+h2{{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:#6e6e73;margin:.35em 0 .2em;border-bottom:1px solid #e5e5ea}}
+h3{{font-size:.85em;margin:.35em 0 .1em}}
+.ing{{padding-left:.9em;text-indent:-.7em;margin:0 0 .12em}}.ing::before{{content:"•";display:inline-block;width:.7em;text-indent:0}}
+.step{{display:flex;gap:.35em;margin:0 0 .25em}}.step .n{{font-weight:600;min-width:1.1em}}
+.x{{color:#6e6e73;font-size:.85em;white-space:nowrap}}
+.photo{{float:right;width:35%;max-height:{h * 0.5:.2f}in;object-fit:cover;border-radius:3px;margin:0 0 .3em .6em}}
+.foot{{clear:both;margin-top:.4em;color:#8e8e93;font-size:.72em;display:flex;justify-content:space-between;gap:1em}}
+.foot span:first-child{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+#tp-src{{display:none}}
+.bar{{position:fixed;top:10px;right:12px;display:flex;gap:8px;align-items:center}}
+.bar button{{font:inherit;font-size:14px;padding:8px 14px;border-radius:999px;border:0;background:#007aff;color:#fff}}
+.bar button.sec{{background:#e5e5ea;color:#1c1c1e}}.bar small{{color:#6e6e73;font-size:12px}}
+@media print{{html,body{{background:#fff}}.bar{{display:none}}.page{{margin:0;box-shadow:none;break-after:page;page-break-after:always}}
+.page:last-child{{break-after:auto;page-break-after:auto}}.card{{border:1px dashed #999}}}}"""
+    js = ("(function(){var name=" + json.dumps(name).replace("<", "\\u003c") + ",per=" + str(sz["per"]) + ";"
+          "var src=document.getElementById('tp-src'),out=document.getElementById('tp-pages'),cards=[],page=null;"
+          "function card(){if(!page||page.childElementCount>=per){page=document.createElement('div');page.className='page';out.appendChild(page);}"
+          "var c=document.createElement('div');c.className='card';var cut=document.createElement('span');cut.className='cut';"
+          "cut.textContent='\u2702';c.appendChild(cut);var i=document.createElement('div');i.className='cin';c.appendChild(i);"
+          "page.appendChild(c);cards.push(i);if(cards.length>1){var h=document.createElement('div');h.className='cont';i.appendChild(h);}return i;}"
+          "function over(i){return i.scrollHeight>i.clientHeight+1;}"
+          "function lay(){out.textContent='';cards=[];page=null;var blocks=[].slice.call(src.children).map(function(b){return b.cloneNode(true);});"
+          "var cur=card();blocks.forEach(function(b){cur.appendChild(b);if(over(cur)&&cur.querySelectorAll('.b').length>1){"
+          "cur.removeChild(b);cur=card();cur.appendChild(b);}});"
+          "var n=cards.length;cards.forEach(function(i,k){var h=i.querySelector('.cont');if(h)h.textContent=name+' \u00b7 '+(k+1)+' of '+n;"
+          "if(k<n-1){var m=document.createElement('div');m.className='more';m.textContent='continued \u2192';i.parentNode.appendChild(m);}});}"
+          "document.getElementById('tp-done').onclick=function(){history.length>1?history.back():window.close();};"
+          "document.getElementById('tp-print').onclick=function(){window.print();};"
+          "lay();window.addEventListener('load',function(){lay();"
+          "if(location.search.indexOf('auto=1')>=0)setTimeout(function(){window.print();},300);});})();")
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(name)}</title><style>{css}</style></head><body>
+<div class="bar"><small>Prints on Letter paper with dashed lines to cut out</small><button class="sec" id="tp-done">Done</button><button id="tp-print">Print</button></div>
+<div id="tp-src">{''.join(blocks)}</div><div id="tp-pages"></div>
 <script nonce="{e(nonce)}">{js}</script></body></html>"""
 
 
@@ -4837,7 +5469,7 @@ BODY_LIMIT_DEFAULT = 1_000_000
 EXPENSIVE = [
     (re.compile(r"/api/import/(url|text|images)"), "import"),
     (re.compile(r"/api/setup/import-mealie"), "import"),
-    (re.compile(r"/api/recipe/[^/]+/(guided|image/next)"), "ai"),
+    (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish)"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
     (re.compile(r"/api/(upc/\d+|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
@@ -5243,9 +5875,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, recipe_update(urllib.parse.unquote(mm.group(1)), self.body()))
         if m == "DELETE" and mm:
             return self.send(200, recipe_delete(urllib.parse.unquote(mm.group(1))))
-        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all)", path)
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all|cooked|polish|restore-original)", path)
         if mm:
             slug, act = urllib.parse.unquote(mm.group(1)), mm.group(2)
+            if act == "polish" and m == "POST":
+                return self.send(200, recipe_polish(slug))
+            if act == "restore-original" and m == "POST":
+                return self.send(200, recipe_restore_original(slug))
+            if act == "cooked" and m == "POST":
+                return self.send(200, recipe_cooked(slug, self.body()))
             if act == "have-all" and m == "POST":
                 return self.send(200, recipe_have_all(slug))
             if act == "favorite" and m == "POST":
@@ -5313,6 +5951,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, get_settings())
 
         # --- recipes & images
+        if m == "POST" and path == "/api/recipes/bulk":
+            return self.send(200, recipes_bulk(self.body()))
+        if m == "POST" and path == "/api/categories/rename":
+            return self.send(200, category_rename(self.body()))
+        if m == "POST" and path == "/api/categories/delete":
+            return self.send(200, category_delete(self.body()))
+        if m == "POST" and path == "/api/categories/undo-delete":
+            return self.send(200, category_undo_delete(self.body()))
         if m == "GET" and path == "/api/recipes":
             pool = recipe_pool(refresh=q.get("refresh") == "1")
             tags = sorted({t for r in pool for t in r["tags"] + r["categories"] if t}, key=str.lower)
@@ -5354,6 +6000,11 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.fullmatch(r"/api/plan/(\d{1,15})", path)
         if m == "DELETE" and mm:
             return self.send(200, plan_delete(int(mm.group(1))))
+        mm = re.fullmatch(r"/api/plan/(\d{1,15})/skip", path)
+        if m == "POST" and mm:
+            return self.send(200, plan_skip(int(mm.group(1)), self.body().get("skipped", True) is not False))
+        if m == "POST" and path == "/api/cooked/undo":
+            return self.send(200, cooked_undo(self.body()))
 
         # --- the ongoing list and stores
         if m == "GET" and path == "/api/list":
@@ -5603,11 +6254,19 @@ class Handler(BaseHTTPRequestHandler):
                 name = b.get("name") or item_name(item)
                 # "auto": only stock things we have shelf-life data for (skips paper towels, soap, etc.)
                 if mode is True or (mode == "auto" and match_rule(c, name)):
-                    pid = add_pantry_item(c, name, b.get("location"), b.get("package_date"), item_text(item), item_id)
+                    q = _num(item.get("quantity"))
+                    u = (item.get("unit") or {}).get("name") or ""
+                    known = q is not None and q > 0 and (item.get("food") or u)
+                    pid = add_pantry_item(c, name, b.get("location"), b.get("package_date"), item_text(item), item_id,
+                                          q if known else None, u if known else None)
                 return {"ok": True, "pantry_item": pantry_json(c, pantry_row(c, pid)) if pid else None}
             set_checked(sl, item_id, False)
             if b.get("pantry_item_id"):
                 c.execute("DELETE FROM pantry_items WHERE id=? AND mealie_item_id=?", (b["pantry_item_id"], item_id))
+            else:   # unticked later (e.g. after a reload): drop the pantry item that tick created, if it's untouched
+                cut = (datetime.now() - timedelta(hours=CHECKED_VISIBLE_HOURS)).isoformat(timespec="seconds")
+                c.execute("DELETE FROM pantry_items WHERE mealie_item_id=? AND status='active' AND created_at>=? "
+                          "AND opened_on IS NULL AND amount_left>=1", (item_id, cut))
             return {"ok": True}
 
     def image(self, recipe_id, size):

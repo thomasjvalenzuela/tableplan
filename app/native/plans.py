@@ -30,6 +30,10 @@ def init(c):
         );
         CREATE INDEX IF NOT EXISTS idx_meal_plans_date ON meal_plans(date);
     """)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(meal_plans)")}
+    for col in ("cooked_at", "skipped_at"):
+        if col not in cols:
+            c.execute(f"ALTER TABLE meal_plans ADD COLUMN {col} TEXT")
 
 
 def _date(v):
@@ -103,7 +107,8 @@ def get_plans(c, start_iso, end_iso, recipe_lookup):
             cache[rid] = _recipe(rid, recipe_lookup)
         out.append({"id": r["id"], "date": r["date"], "entry_type": r["entry_type"],
                     "title": r["title"], "text": r["text"], "scale": r["scale"],
-                    "recipeId": rid, "recipe": cache[rid]})
+                    "recipeId": rid, "recipe": cache[rid],
+                    "cooked": bool(r["cooked_at"]), "skipped": bool(r["skipped_at"])})
     return out
 
 
@@ -129,6 +134,27 @@ def update_entry(c, id, **fields):
         return c.execute("SELECT 1 FROM meal_plans WHERE id = ?", (id,)).fetchone() is not None
     cols = ", ".join(f"{k} = ?" for k in f)
     return c.execute(f"UPDATE meal_plans SET {cols} WHERE id = ?", (*f.values(), id)).rowcount > 0
+
+
+def set_cooked(c, id, at=None):
+    """Mark an entry cooked now (or clear it with at=None). Returns the previous cooked_at."""
+    row = c.execute("SELECT cooked_at FROM meal_plans WHERE id = ?", (id,)).fetchone()
+    if not row:
+        raise KeyError(id)
+    c.execute("UPDATE meal_plans SET cooked_at = ? WHERE id = ?", (at, id))
+    return row["cooked_at"]
+
+
+def set_skipped(c, id, skipped=True):
+    return c.execute("UPDATE meal_plans SET skipped_at = ? WHERE id = ?",
+                     (_now() if skipped else None, id)).rowcount > 0
+
+
+def recent_for_recipe(c, recipe_id, start_iso, end_iso):
+    """Entries for a recipe in [start, end], newest first."""
+    return [dict(r) for r in c.execute(
+        "SELECT * FROM meal_plans WHERE recipe_id = ? AND date BETWEEN ? AND ? ORDER BY date DESC, id DESC",
+        (str(recipe_id), _date(start_iso), _date(end_iso)))]
 
 
 def get_entry(c, id):

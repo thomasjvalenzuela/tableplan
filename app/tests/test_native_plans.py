@@ -45,7 +45,7 @@ class PlansTest(unittest.TestCase):
         self.assertIsNone(got[0]["recipe"])
         self.assertEqual(got[0]["recipeId"], "missing")
         d = got[2]
-        self.assertEqual(set(d), {"id", "date", "entry_type", "title", "text", "scale", "recipe", "recipeId"})
+        self.assertEqual(set(d), {"id", "date", "entry_type", "title", "text", "scale", "recipe", "recipeId", "cooked", "skipped"})
         self.assertEqual(d["recipe"], RECIPES["r1"])
         self.assertEqual(d["scale"], 2.0)
         self.assertIsNone(got[1]["recipe"])

@@ -323,6 +323,7 @@ async function renderMeals() {
     `<h1 class="title">Plan</h1><div class="subtitle" id="plan-sub">&nbsp;</div>
     <div class="toolbar"><button class="pill-btn" id="fill">${ic("sparkle")} Fill empty days</button>
       <button class="pill-btn" id="to-list">${ic("cart")} Shopping list<span id="list-n"></span></button></div>
+    <div id="past" class="past"></div>
     <div id="board" class="board">${loading()}</div>
     <p class="hint board-hint"><span class="mobile-only">Touch and hold a meal, then drag it to another day.</span><span class="desktop-only">Drag a meal onto another day to move it. Dropping on a planned day swaps the two.</span></p>`;
   bindTopbar();
@@ -336,12 +337,13 @@ async function drawBoard() {
   const H = horizon(), t0 = today(), start = isoDate(t0), end = isoDate(addDays(t0, H - 1));
   const board = $("#board");
   if (!board) return;
-  let data, status, list;
+  let data, status, list, past;
   try {
-    [data, status, list] = await Promise.all([
+    [data, status, list, past] = await Promise.all([
       api("GET", `/api/plan?start=${enc(start)}&end=${enc(end)}`),
       api("GET", "/api/plan/status").catch(() => null),
       api("GET", "/api/list").catch(() => null),
+      api("GET", `/api/plan?start=${enc(isoDate(addDays(t0, -7)))}&end=${enc(isoDate(addDays(t0, -1)))}`).catch(() => null),
     ]);
   } catch (e) { board.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
   if (!document.body.contains(board)) return;
@@ -357,8 +359,9 @@ async function drawBoard() {
   $("#plan-sub").innerHTML = (through ? `<span class="${low ? "warn" : ""}">Planned through ${esc(fmt(parseISO(through), { weekday: "short", month: "short", day: "numeric" }))}</span>` : "Nothing planned yet") +
     (empty ? ` · ${esc(plural(empty, "empty day"))}` : "");
   $("#fill").disabled = !empty;
-  const n = list && Array.isArray(list.items) ? list.items.length : null;
+  const n = list && Array.isArray(list.items) ? list.items.filter((x) => !x.checked).length : null;
   $("#list-n").textContent = n === null ? "" : ` (${n})`;
+  drawPast(((past && past.entries) || []).filter((e) => PLAN_TYPES.includes(e.entry_type) && e.recipe?.slug && !e.cooked && !e.skipped));
 
   let html = "";
   for (let i = 0; i < H; i++) {
@@ -368,11 +371,11 @@ async function drawBoard() {
     PLAN_TYPES.forEach((type) => {
       const e = (byDay[iso] || {})[type];
       if (!e) { html += `<button class="bempty" data-pick="${esc(iso)}" data-type="${esc(type)}">${ic("plus")}<span>Add ${esc(type)}</span></button>`; return; }
-      const r = e.recipe || {}, img = imgUrl(r), miss = +e.missing || 0;
-      html += `<div class="bcard" data-entry="${esc(e.id)}" tabindex="0" role="button" aria-label="${esc(entryName(e))}, ${esc(dayLong(iso))}. Open recipe">
-        <div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</div>
+      const r = e.recipe || {}, img = imgUrl(r), miss = e.cooked ? 0 : +e.missing || 0;
+      html += `<div class="bcard ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}" tabindex="0" role="button" aria-label="${esc(entryName(e))}, ${esc(dayLong(iso))}${e.cooked ? ", cooked" : ""}. Open recipe">
+        <div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}${e.cooked ? `<span class="cooked-badge" aria-hidden="true">✓</span>` : ""}</div>
         <div class="main"><div class="a">${esc(entryName(e))}</div>
-          <div class="b">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} min</span>` : PLAN_TYPES.length > 1 ? esc(cap(type)) : ""}${miss ? `<span class="pill soon miss-chip">Missing ${esc(miss)}</span>` : ""}</div></div>
+          <div class="b">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} min</span>` : PLAN_TYPES.length > 1 ? esc(cap(type)) : ""}${miss ? `<span class="pill soon miss-chip">Missing ${esc(miss)}</span>` : ""}${e.cooked ? `<span class="pill ok">Cooked</span>` : r.slug ? `<button class="cook-pill" data-cook="${esc(e.id)}" aria-label="Mark ${esc(entryName(e))} as cooked">✓ Cook</button>` : ""}</div></div>
         <button class="bmore" data-more="${esc(e.id)}" aria-label="More options for ${esc(entryName(e))}">${ic("more")}</button></div>`;
     });
     html += `</div>`;
@@ -382,6 +385,8 @@ async function drawBoard() {
   board.onclick = (ev) => {
     if (Date.now() < DND.quietUntil) return;
     const more = ev.target.closest("[data-more]"), pick = ev.target.closest("[data-pick]"), card = ev.target.closest(".bcard");
+    const cook = ev.target.closest("[data-cook]");
+    if (cook) { const e = find(cook.dataset.cook); if (e) cookEntry(e, cook); return; }
     if (more) return entryMenu(more, find(more.dataset.more));
     if (pick) return openPicker(pick.dataset.pick, pick.dataset.type);
     if (card) { const e = find(card.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else if (e) entryMenu($(".bmore", card), e); }
@@ -389,6 +394,52 @@ async function drawBoard() {
   board.onkeydown = (ev) => { const card = ev.target.closest?.(".bcard"); if (card && ev.target === card && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); card.click(); } };
   board.oncontextmenu = (ev) => { if (ev.target.closest(".bcard")) ev.preventDefault(); };
   boardDnD(board, (id, from, to) => moveEntry(find(id), to, true));
+}
+
+// ---------- cooked: take what a recipe used out of the pantry (with Undo) and tick off the plan entry
+function cookedMessage(r) {
+  const parts = [...(r.deducted || []).map((d) => d.used), ...(r.unknown || []).map((n) => n.toLowerCase())];
+  if (!parts.length) return "Cooked";
+  return `Cooked · used ${parts.slice(0, 3).join(", ")}${parts.length > 3 ? "…" : ""}`;
+}
+async function markCooked(slug, body, after) {
+  const r = await api("POST", `/api/recipe/${enc(slug)}/cooked`, body || {});
+  toast(cookedMessage(r), "Undo", async () => {
+    try { await api("POST", "/api/cooked/undo", { undo_token: r.undo_token }); toast("Undone"); if (after) after(); } catch (x) { fail(x); }
+  });
+  if (after) after();
+  return r;
+}
+async function cookEntry(e, btn) {
+  if (!e?.recipe?.slug) return;
+  if (btn) btn.disabled = true;
+  try { await markCooked(e.recipe.slug, { plan_id: e.id }, replan); }
+  catch (x) { fail(x); if (btn) btn.disabled = false; }
+}
+async function skipEntry(e, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await api("POST", `/api/plan/${enc(e.id)}/skip`, {});
+    toast(`Skipped ${entryName(e)}`, "Undo", async () => {
+      try { await api("POST", `/api/plan/${enc(e.id)}/skip`, { skipped: false }); replan(); } catch (x) { fail(x); }
+    });
+  } catch (x) { fail(x); }
+  replan();
+}
+function drawPast(entries) {
+  const box = $("#past");
+  if (!box) return;
+  if (!entries.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="past-h">Earlier this week</div>` + entries.map((e) =>
+    `<div class="past-row" data-pentry="${esc(e.id)}"><div class="main"><b>${esc(entryName(e))}</b><span>${esc(dayLong(e.date))}, ${esc(shortDate(e.date))}</span></div>
+      <span class="q">Cooked?</span><button class="cook-pill" data-pcook="${esc(e.id)}" aria-label="Yes, I cooked ${esc(entryName(e))}">✓</button>
+      <button class="skip-btn" data-pskip="${esc(e.id)}">Skip</button></div>`).join("");
+  const find = (id) => entries.find((x) => String(x.id) === String(id));
+  box.onclick = (ev) => {
+    const c = ev.target.closest("[data-pcook]"), sk = ev.target.closest("[data-pskip]");
+    if (c) cookEntry(find(c.dataset.pcook), c);
+    if (sk) skipEntry(find(sk.dataset.pskip), sk);
+  };
 }
 
 // ---------- drag & drop: mouse drags after a few pixels; touch needs a ~300 ms hold so normal scrolling still works
@@ -399,7 +450,7 @@ function boardDnD(board, onDrop) {
   board.dataset.dnd = "1";
   board.addEventListener("pointerdown", (e) => {
     const card = e.target.closest(".bcard");
-    if (!card || e.target.closest(".bmore") || (e.pointerType === "mouse" && e.button !== 0) || DND.s) return;
+    if (!card || e.target.closest(".bmore, .cook-pill") || (e.pointerType === "mouse" && e.button !== 0) || DND.s) return;
     const s = DND.s = { card, id: card.dataset.entry, from: card.closest(".bday").dataset.date, pid: e.pointerId,
       x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, touch: e.pointerType !== "mouse", active: false, target: null };
     if (s.touch) { s.timer = setTimeout(begin, 300); card.classList.add("pressing"); }
@@ -761,7 +812,7 @@ async function runGenerate(g) {
 }
 
 // ------------------------------------------------------------------ SHOPPING LIST (one ongoing list, grouped by store, then aisle)
-const L = { data: null, filter: localStorage.getItem("tp.store") || "all", quietUntil: 0 };
+const L = { data: null, filter: localStorage.getItem("tp.store") || "all", quietUntil: 0, pantry: {} };
 const storeLabel = (id) => (id == null ? "Any store" : ((L.data?.stores || []).find((s) => String(s.id) === String(id)) || {}).name || "Any store");
 const itemTitle = (it) => (it.food ? cap(it.food) : it.text);
 const itemSub = (it) => (it.food ? it.qty || (it.text && it.text.toLowerCase() !== it.food.toLowerCase() ? it.text : "") : it.qty || "");
@@ -790,8 +841,8 @@ function drawList(focusAdd) {
   const stores = d.stores, items = d.items;
   if (L.filter !== "all" && L.filter !== "none" && !stores.some((s) => String(s.id) === L.filter)) setStoreFilter("all");
   const inFilter = (it) => L.filter === "all" || (L.filter === "none" ? it.store_id == null : String(it.store_id) === L.filter);
-  const count = (f) => items.filter((it) => f === "all" || (f === "none" ? it.store_id == null : String(it.store_id) === f)).length;
-  const shown = items.filter(inFilter);
+  const count = (f) => items.filter((it) => !it.checked && (f === "all" || (f === "none" ? it.store_id == null : String(it.store_id) === f))).length;
+  const shown = items.filter(inFilter), toBuy = shown.filter((it) => !it.checked).length, anyLeft = items.some((it) => !it.checked);
   const addTo = L.filter !== "all" && L.filter !== "none" ? storeLabel(L.filter) : "";
 
   let html = `<div class="chips store-bar" id="st-bar" role="tablist">
@@ -801,7 +852,7 @@ function drawList(focusAdd) {
     <form class="quick-add" id="qa-form" autocomplete="off"><span class="qa-ic">${ic("plus")}</span>
       <input id="qa" name="qa" placeholder="${esc(addTo ? `Add to ${addTo}…` : "Add an item…")}" enterkeyhint="done" maxlength="200" aria-label="Add an item">
       <button type="submit" class="qa-go" aria-label="Add">${ic("check")}</button></form>
-    <div class="subtitle list-sub">${shown.length ? `${plural(shown.length, "item")} to buy · tick when it's in the cart` : items.length ? "Nothing for this store" : "All done 🎉"}</div>
+    <div class="subtitle list-sub">${listSubtitle(toBuy, anyLeft)}</div>
     <div class="toolbar"><button class="pill-btn" id="l-send">${ic("share")} Send</button><button class="pill-btn" id="l-print">${ic("print")} Print</button></div>`;
 
   // store → aisle grouping (stores in their saved order, "Any store" last)
@@ -818,7 +869,7 @@ function drawList(focusAdd) {
   if (!shown.length) html += `<div class="empty"><div class="em">🛒</div>${items.length ? "Nothing on the list for this store." : "Your list is empty.<br>Plan a meal and its ingredients land here, or type above."}</div>`;
   if (d.recently_checked.length) {
     html += `<details class="recent"><summary>Recently checked <span class="muted">${d.recently_checked.length}</span></summary><div class="group shop">${d.recently_checked.map((it) =>
-      `<button class="row done" data-uncheck="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🛒")}</span><div class="main"><div class="a">${esc(itemTitle(it))}</div><div class="b">Tap to put it back on the list</div></div><span class="check sq on">${ic("check")}</span></button>`).join("")}</div></details>`;
+      `<button class="row done" data-uncheck="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🛒")}</span><div class="main"><div class="a">${esc(itemTitle(it))}</div><div class="b">${it.have ? "Had it · " : ""}Tap to put it back on the list</div></div><span class="check sq on">${ic("check")}</span></button>`).join("")}</div></details>`;
   }
   box.innerHTML = html;
 
@@ -840,6 +891,14 @@ function drawList(focusAdd) {
 }
 function listRow(it) {
   const sub = itemSub(it), recs = (it.recipes || []).filter(Boolean);
+  if (it.checked) {
+    return `<div class="row li checked ${it.have ? "had" : ""}" data-id="${esc(it.id)}"><div class="li-in">
+      <span class="emo">${esc(it.emoji || "🛒")}</span>
+      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}</div>
+      ${it.have ? `<span class="have-tag">have</span>` : ""}
+      <button class="check sq on" data-check aria-label="Put ${esc(itemTitle(it))} back on the list" aria-pressed="true">${ic("check")}</button>
+    </div></div>`;
+  }
   return `<div class="row li" data-id="${esc(it.id)}">
     <div class="li-under" aria-hidden="true">${ic("check")} I have it</div>
     <div class="li-in">
@@ -856,6 +915,7 @@ function bindListRows(box) {
     if (Date.now() < L.quietUntil) return;
     const row = e.target.closest(".row.li"); if (!row) return;
     const it = findItem(row.dataset.id); if (!it) return;
+    if (it.checked) return uncheckItem(it, row);
     if (e.target.closest("[data-store]")) return storeMenu(e.target.closest("[data-store]"), it);
     if (e.target.closest("[data-have]")) return haveItem(it, row);
     if (e.target.closest("[data-check]")) return checkItem(it, row);
@@ -863,7 +923,7 @@ function bindListRows(box) {
   // touch: swipe left or long-press for "I have this"
   box.onpointerdown = (e) => {
     if (e.pointerType === "mouse") return;
-    const row = e.target.closest(".row.li"); if (!row || e.target.closest("button")) return;
+    const row = e.target.closest(".row.li"); if (!row || row.classList.contains("checked") || e.target.closest("button")) return;
     const inner = $(".li-in", row), x0 = e.clientX, y0 = e.clientY, pid = e.pointerId;
     let mode = null, dx = 0;
     const timer = setTimeout(() => { if (!mode) { mode = "press"; L.quietUntil = Date.now() + 600; try { navigator.vibrate?.(12); } catch (_) {} done(); haveItem(findItem(row.dataset.id), row); } }, 550);
@@ -893,46 +953,61 @@ function bindListRows(box) {
   };
   box.oncontextmenu = (e) => { if (e.target.closest(".row.li")) e.preventDefault(); };
 }
-// Take a row off the list in place (fade + collapse), keeping the data in sync.
-function dropRow(it, row) {
-  L.data.items = L.data.items.filter((x) => x !== it);
-  row.classList.add("leaving");
-  setTimeout(() => {
-    const g = row.parentElement; row.remove();
-    if (g && !g.children.length) { const lbl = g.previousElementSibling; if (lbl?.classList.contains("group-label")) lbl.remove(); g.remove(); }
-    const sub = $(".list-sub");
-    if (sub) { const n = $$("#lists .row.li").length; sub.textContent = n ? `${plural(n, "item")} to buy · tick when it's in the cart` : "All done 🎉"; }
-    $$("#st-bar [data-sf]").forEach((b) => { const k = b.dataset.sf, c = L.data.items.filter((x) => k === "all" || (k === "none" ? x.store_id == null : String(x.store_id) === k)).length; $(".n", b).textContent = c || ""; });
-  }, 420);
+// A ticked row stays where it is (struck through) for a few hours; tapping it again puts it back.
+const listSubtitle = (n, anyLeft) => (n ? `${plural(n, "item")} to buy · tick when it's in the cart` : anyLeft ? "Nothing for this store" : "All done 🎉");
+function refreshCounts() {
+  const sub = $(".list-sub");
+  const inFilter = (it) => L.filter === "all" || (L.filter === "none" ? it.store_id == null : String(it.store_id) === L.filter);
+  if (sub) sub.textContent = listSubtitle(L.data.items.filter((x) => !x.checked && inFilter(x)).length, L.data.items.some((x) => !x.checked));
+  $$("#st-bar [data-sf]").forEach((b) => { const k = b.dataset.sf, c = L.data.items.filter((x) => !x.checked && (k === "all" || (k === "none" ? x.store_id == null : String(x.store_id) === k))).length; $(".n", b).textContent = c || ""; });
+  const sh = $$(".store-h");
+  sh.forEach((h) => { const g = []; let el = h.nextElementSibling; while (el && !el.classList.contains("store-h") && !el.classList.contains("empty") && el.tagName !== "DETAILS") { g.push(el); el = el.nextElementSibling; } const n = g.reduce((t, e) => t + $$(".row.li:not(.checked)", e).length, 0); const sp = $("span", h); if (sp) sp.textContent = n; });
+}
+function redrawRow(it, row) {
+  const tmp = document.createElement("div");
+  tmp.innerHTML = listRow(it);
+  const fresh = tmp.firstElementChild;
+  row.replaceWith(fresh);
+  refreshCounts();
+  return fresh;
+}
+async function uncheckItem(it, row) {
+  if (!it || row.classList.contains("busy")) return;
+  row.classList.add("busy");
+  try {
+    const pid = L.pantry[it.id];
+    if (pid) await api("POST", `/api/lists/${enc(L.data.id)}/items/${enc(it.id)}/undo`, { pantry_item_id: pid });
+    else await api("PATCH", `/api/list/items/${enc(it.id)}`, { checked: false });
+    delete L.pantry[it.id];
+    Object.assign(it, { checked: false, have: false, checked_at: null });
+    redrawRow(it, row);
+  } catch (e) { row.classList.remove("busy"); fail(e); }
 }
 async function checkItem(it, row) {
-  if (!it || row.classList.contains("done")) return;
-  row.classList.add("done"); $(".check", row).classList.add("on");
+  if (!it) return;
+  if (it.checked) return uncheckItem(it, row);
+  if (row.classList.contains("busy")) return;
+  Object.assign(it, { checked: true, have: false, checked_at: new Date().toISOString() });
+  row = redrawRow(it, row);
+  row.classList.add("busy");
   try {
     const r = await api("PATCH", `/api/list/items/${enc(it.id)}`, { checked: true });
-    setTimeout(() => dropRow(it, row), 350);
-    L.data.recently_checked.unshift(it);
-    const undo = async () => {
-      try {
-        if (r && r.pantry_item) await api("POST", `/api/lists/${enc(L.data.id)}/items/${enc(it.id)}/undo`, { pantry_item_id: r.pantry_item.id });
-        else await api("PATCH", `/api/list/items/${enc(it.id)}`, { checked: false });
-        reloadList();
-      } catch (e) { fail(e); }
-    };
+    row.classList.remove("busy");
     const p = r && r.pantry_item;
-    toast(p ? `${p.name} → ${cap(p.location)}${p.expires_on ? ` · use by ${fmt(parseISO(p.expires_on), { month: "short", day: "numeric" })}` : ""}` : `Got ${itemTitle(it)}`, "Undo", undo);
-  } catch (e) { row.classList.remove("done"); $(".check", row).classList.remove("on"); fail(e); }
+    if (p) L.pantry[it.id] = p.id;
+    toast(p ? `${p.name} → ${cap(p.location)}` : `Got ${itemTitle(it)}`, "Undo", () => { const rw = $(`#lists .row.li[data-id="${CSS.escape(String(it.id))}"]`); if (rw) uncheckItem(it, rw); else reloadList(); });
+  } catch (e) { Object.assign(it, { checked: false, checked_at: null }); redrawRow(it, row); fail(e); }
 }
 async function haveItem(it, row) {
-  if (!it || row.classList.contains("done")) return;
-  row.classList.add("done", "had");
+  if (!it || it.checked || row.classList.contains("busy")) return;
+  Object.assign(it, { checked: true, have: true, checked_at: new Date().toISOString() });
+  row = redrawRow(it, row);
+  row.classList.add("busy");
   try {
     await api("POST", `/api/list/items/${enc(it.id)}/have`);
-    dropRow(it, row);
-    toast(`${itemTitle(it)} · you have it`, "Undo", async () => {
-      try { await api("PATCH", `/api/list/items/${enc(it.id)}`, { checked: false }); reloadList(); } catch (e) { fail(e); }
-    });
-  } catch (e) { row.classList.remove("done", "had"); $(".li-in", row).style.transform = ""; fail(e); }
+    row.classList.remove("busy");
+    toast(`Have ${itemTitle(it)}`, "Undo", () => { const rw = $(`#lists .row.li[data-id="${CSS.escape(String(it.id))}"]`); if (rw) uncheckItem(it, rw); else reloadList(); });
+  } catch (e) { Object.assign(it, { checked: false, have: false, checked_at: null }); redrawRow(it, row); fail(e); }
 }
 function storeMenu(anchor, it) {
   const opts = [...L.data.stores.map((s) => [String(s.id), s.name]), ["", "Any store"]];
@@ -1030,7 +1105,7 @@ async function renderPantry() {
       const [i, c] = locIcon[it.location] || locIcon.fridge;
       const left = Math.round(it.amount_left * 100);
       return `<button class="row" data-id="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🥫")}</span>
-        <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${it.opened_on ? "Opened" : "Sealed"}${left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
+        <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
   }
@@ -1039,6 +1114,10 @@ async function renderPantry() {
   $$("#pantry .row[data-id]").forEach((b) => (b.onclick = () => openPantryItem(items.find((i) => String(i.id) === b.dataset.id), renderPantry)));
 }
 
+const PANTRY_UNITS = [["", "count"], ["tsp", "tsp"], ["tbsp", "tbsp"], ["cup", "cup"], ["fl oz", "fl oz"], ["pint", "pint"],
+  ["quart", "quart"], ["gallon", "gallon"], ["ml", "ml"], ["l", "l"], ["oz", "oz"], ["lb", "lb"], ["g", "g"], ["kg", "kg"],
+  ["piece", "piece"], ["clove", "clove"], ["can", "can"], ["slice", "slice"], ["stick", "stick"], ["jar", "jar"], ["bag", "bag"],
+  ["box", "box"], ["package", "package"], ["bottle", "bottle"], ["loaf", "loaf"], ["dozen", "dozen"]];
 function openPantryItem(it, after) {
   if (!it) return;
   const act = async (body, msg) => {
@@ -1061,7 +1140,10 @@ function openPantryItem(it, after) {
         <button data-use="0.25">${ic("open")}¼</button><button data-use="0.5">${ic("open")}½</button>
         <button data-use="0.75">${ic("open")}¾</button><button data-use="1">${ic("check")}All</button>
       </div>
-      <div class="group"><div class="amount"><span class="muted">Left</span><input type="range" min="0" max="100" step="5" value="${left}" id="pi-left"><b id="pi-lv">${left}%</b></div></div>
+      <div class="group"><div class="amount"><span class="muted">Left</span><input type="range" min="0" max="100" step="5" value="${left}" id="pi-left"><b id="pi-lv">${it.qty != null ? esc(it.left_text.replace(/ left$/, "")) : `${left}%`}</b></div>
+        <div class="amount-edit"><span class="muted">Amount</span><input type="number" inputmode="decimal" min="0" step="any" id="pi-qty" placeholder="—" value="${it.qty != null ? esc(+(+it.qty).toFixed(3)) : ""}" aria-label="Amount left">
+          <select id="pi-unit" aria-label="Unit">${PANTRY_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (it.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          <button class="pill-btn" id="pi-amt">Save</button></div></div>
       ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and switches to the after-opening shelf life${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${esc(it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge)} days)` : ""}.</p>` : ""}
       <div class="group-label">Stored in</div>
       <div class="seg" id="pi-loc">${["fridge", "freezer", "pantry"].map((l) => `<button data-loc="${l}" class="${it.location === l ? "on" : ""}">${cap(l)}</button>`).join("")}</div>
@@ -1084,6 +1166,11 @@ function openPantryItem(it, after) {
     const slider = $("#pi-left");
     slider.oninput = () => ($("#pi-lv").textContent = slider.value + "%");
     slider.onchange = async () => { const r = await act({ action: "use", left: slider.value / 100 }); if (r) { if (r.status !== "active") return done(); draw(r); after && after(); } };
+    $("#pi-amt").onclick = async () => {
+      const q = $("#pi-qty").value.trim();
+      const r = await act({ action: "amount", qty: q === "" ? null : q, unit: $("#pi-unit").value }, q === "" ? "Amount cleared" : "Amount saved");
+      if (r) { draw(r); after && after(); }
+    };
     $$("#pi-loc [data-loc]").forEach((b) => (b.onclick = async () => { const r = await act({ action: "move", location: b.dataset.loc }, `Moved to ${b.dataset.loc}`); if (r) { draw(r); after && after(); } }));
     $("#pi-date").onchange = async (e) => { const r = await act({ action: "set_date", expires_on: e.target.value }, "Date saved"); if (r) { draw(r); after && after(); } };
     $("#pi-rule").onclick = () => pickRule(it, async (rule) => { const r = await act({ action: "rule", rule_id: rule ? rule.id : null }, rule ? "Shelf life updated" : null); draw(r || it); after && after(); });

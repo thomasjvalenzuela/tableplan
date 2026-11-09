@@ -65,7 +65,7 @@ class NativeListsTest(unittest.TestCase):
         self.assertEqual(len(items), 3)
         milk, onion, towels = items
         self.assertEqual(set(milk), {"id", "display", "note", "quantity", "unit", "food", "label", "checked",
-                                     "position", "recipeIds", "storeId", "checkedAt"})
+                                     "position", "recipeIds", "storeId", "checkedAt", "checkedHow"})
         self.assertEqual((milk["quantity"], milk["unit"]["name"], milk["food"], milk["label"]),
                          (3.0, "cup", {"name": "milk"}, {"name": "Dairy"}))
         self.assertEqual(milk["display"], "3 cups milk")
@@ -137,3 +137,70 @@ class NativeListsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreciseRemovalTest(unittest.TestCase):
+    """Removing a planned recipe takes back exactly what it added."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        lists.init(self.c)
+        self.lid = lists.create_list(self.c, "Groceries")
+
+    def tearDown(self):
+        self.c.close()
+
+    def by_food(self, food):
+        return [i for i in lists.get_list(self.c, self.lid)["listItems"] if (i["food"] or {}).get("name") == food]
+
+    def test_shared_garlic_subtracts_exactly_one_share(self):
+        lists.add_recipe_ingredients(self.c, self.lid, "r1", ["3 cloves garlic"], 1, parse_cloves, None)
+        lists.add_recipe_ingredients(self.c, self.lid, "r2", ["2 cloves garlic", "1 cup milk"], 2, parse_cloves, None)
+        g = self.by_food("garlic")
+        self.assertEqual(len(g), 1)
+        self.assertEqual(g[0]["quantity"], 7)
+        self.assertEqual(lists.remove_recipe_items(self.c, self.lid, "r2"), 1)   # milk goes, garlic stays
+        g = self.by_food("garlic")
+        self.assertEqual((g[0]["quantity"], g[0]["recipeIds"]), (3, ["r1"]))
+        self.assertEqual(lists.remove_recipe_items(self.c, self.lid, "r1"), 1)
+        self.assertEqual(lists.get_list(self.c, self.lid)["listItems"], [])
+
+    def test_manual_item_is_never_removed(self):
+        lists.add_items(self.c, self.lid, ["2 cloves garlic"], parse_cloves)
+        lists.add_recipe_ingredients(self.c, self.lid, "r1", ["3 cloves garlic"], 1, parse_cloves, None)
+        self.assertEqual(self.by_food("garlic")[0]["quantity"], 5)
+        lists.remove_recipe_items(self.c, self.lid, "r1")
+        g = self.by_food("garlic")
+        self.assertEqual((g[0]["quantity"], g[0]["recipeIds"]), (2, []))
+        # a typed line that a recipe merged into survives even when the recipe's share was everything
+        lists.add_items(self.c, self.lid, ["paper towels"], None)
+        lists.add_recipe_ingredients(self.c, self.lid, "r3", ["paper towels"], 1, None, None)
+        lists.remove_recipe_items(self.c, self.lid, "r3")
+        self.assertEqual(len(lists.get_list(self.c, self.lid)["listItems"]), 2)
+
+    def test_unparsed_and_checked_items(self):
+        lists.add_recipe_ingredients(self.c, self.lid, "r1", ["salt to taste", "1 cup milk"], 1, parse_cloves, None)
+        lists.add_recipe_ingredients(self.c, self.lid, "r2", ["salt to taste"], 1, parse_cloves, None)
+        milk = self.by_food("milk")[0]
+        lists.set_checked(self.c, self.lid, milk["id"], True)
+        self.assertEqual(lists.remove_recipe_items(self.c, self.lid, "r1"), 0)   # salt shared, milk bought
+        lists.remove_recipe_items(self.c, self.lid, "r2")
+        self.assertEqual([i["display"] for i in lists.get_list(self.c, self.lid)["listItems"]], ["1 cup milk"])
+
+    def test_legacy_items_without_contrib_fall_back_to_unlinking(self):
+        lists.add_recipe_ingredients(self.c, self.lid, "r1", ["2 cups milk"], 1, parse_cloves, None)
+        lists.add_recipe_ingredients(self.c, self.lid, "r2", ["1 cup milk"], 1, parse_cloves, None)
+        self.c.execute("UPDATE shopping_items SET contrib='{}'")
+        lists.remove_recipe_items(self.c, self.lid, "r1")
+        self.assertEqual(self.by_food("milk")[0]["quantity"], 3)
+        lists.remove_recipe_items(self.c, self.lid, "r2")
+        self.assertEqual(self.by_food("milk"), [])
+
+
+def parse_cloves(text):
+    m = re.match(r"^(\d+(?:\.\d+)?)\s+(cloves?|cups?)\s+(.+)$", text.strip())
+    if not m:
+        return None
+    unit = "clove" if m.group(2).startswith("clove") else "cup"
+    return {"quantity": float(m.group(1)), "unit": unit, "unit_plural": unit + "s", "food": m.group(3), "note": ""}

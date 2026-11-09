@@ -606,3 +606,31 @@ body.dnd{touch-action:none;overscroll-behavior:none}
 .mini.blue{background:var(--blue);color:#fff}
 a.row{color:var(--text);text-decoration:none}
 .bk-row .chev{color:var(--blue)}
+
+/* cooked: plan board pill, badge, past-day prompt */
+.cook-pill{flex:none;display:inline-flex;align-items:center;gap:4px;margin-left:6px;padding:4px 10px;border-radius:999px;border:0;background:rgba(52,199,89,.15);color:#1d8a39;font-size:12.5px;font-weight:700;cursor:pointer}
+.cook-pill:disabled{opacity:.5}
+@media (prefers-color-scheme:dark){.cook-pill{color:#5fe07f}}
+.bcard.cooked .thumb,.bcard.cooked .a{opacity:.55}
+.bcard .thumb{position:relative}
+.cooked-badge{position:absolute;right:-4px;bottom:-4px;width:20px;height:20px;border-radius:50%;background:var(--green);color:#fff;font-size:12px;font-weight:800;display:grid;place-items:center;box-shadow:0 0 0 2px var(--bg)}
+.past{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.past:empty{display:none}
+.past-h{font-size:13px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.04em;margin:0 2px}
+.past-row{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:12px;background:var(--card);box-shadow:var(--shadow)}
+.past-row .main{flex:1;min-width:0;display:flex;flex-direction:column}
+.past-row .main b{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.past-row .main span{font-size:13px;color:var(--sub)}
+.past-row .q{font-size:13.5px;color:var(--sub);flex:none}
+.past-row .cook-pill{margin:0;padding:6px 12px;font-size:14px}
+.skip-btn{flex:none;border:0;background:var(--fill);color:var(--text);border-radius:999px;padding:6px 12px;font-size:13.5px;font-weight:600}
+.amount-edit{display:flex;align-items:center;gap:8px;padding:0 16px 14px}
+.amount-edit input{width:84px;flex:none;font:inherit;font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
+.amount-edit select{flex:1;min-width:0;font:inherit;font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
+.amount-edit .pill-btn{box-shadow:none;background:var(--ink);color:var(--on-ink)}
+/* ticked items stay in place for a few hours, struck through */
+.row.li.checked .li-in{opacity:.55}
+.row.li.checked .main .a{text-decoration:line-through;color:var(--sub)}
+.row.li.checked .check.sq{background:var(--blue,#0A84FF);border-color:var(--blue,#0A84FF);color:#fff}
+.row.li.busy{pointer-events:none}
+.have-tag{flex:none;font-size:12px;font-weight:600;color:var(--sub);background:var(--fill);border-radius:999px;padding:3px 8px}

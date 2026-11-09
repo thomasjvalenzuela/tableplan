@@ -155,8 +155,10 @@ class PlannerListSync(Base):
         S.Handler.bought(None, S.ensure_list(), tortillas["id"], "bought", {"to_pantry": False})
         res = S.plan_delete(b)
         self.assertEqual(res["removed"], 2)   # chicken + cheese
-        # the shared onion keeps its merged quantity (per-recipe amounts aren't tracked), but only pasta needs it now
-        self.assertEqual(self.texts(), ["1 lb spaghetti", "2 cups milk", "5 onion, diced"])
+        # the shared onion loses exactly the tacos' share (2 + 2); only pasta's 1 is left. The bought tortillas
+        # stay checked, so they're still shown (struck through) for a few hours.
+        self.assertEqual(sorted(i["text"] for i in self.items() if not i["checked"]),
+                         ["1 lb spaghetti", "1 onion, diced", "2 cups milk"])
         self.assertEqual(next(i for i in self.items() if i["food"] == "onion")["recipes"], ["Test Pasta"])
         with S.db() as c:
             self.assertEqual(c.execute("SELECT checked FROM shopping_items WHERE id=?", (tortillas["id"],)).fetchone()[0], 1)
@@ -188,7 +190,11 @@ class PlannerListSync(Base):
         self.assertEqual(S.recipe_detail(self.tslug)["missing"], [])
         self.assertEqual(S.enrich_plan(S.get_plans(S.today(), S.today() + timedelta(days=2)))[0]["missing"], 0)
         self.assertEqual(S.recipe_have_all(self.tslug)["count"], 0)
-        self.assertEqual(len(S.ongoing_list()["recently_checked"]), 4)
+        data = S.ongoing_list()   # checked in the last 4 hours: shown in place, labelled "have"
+        self.assertEqual((len(data["recently_checked"]), data["count"]), (0, 0))
+        self.assertTrue(all(i["checked"] and i["have"] for i in data["items"]))
+        later = S.ongoing_list(now=datetime.now(S.timezone.utc) + timedelta(hours=5))
+        self.assertEqual((len(later["recently_checked"]), later["items"]), (4, []))
         with S.db() as c:
             self.assertEqual(c.execute("SELECT count(*) FROM pantry_items").fetchone()[0], 0)
 
@@ -275,9 +281,9 @@ class StoresAndList(Base):
                 S.list_add(bad)
         # list JSON shape
         data = S.ongoing_list()
-        self.assertEqual(set(data), {"id", "name", "items", "recently_checked", "stores"})
+        self.assertEqual(set(data), {"id", "name", "items", "recently_checked", "stores", "count"})
         self.assertEqual(set(data["items"][0]), {"id", "text", "name", "food", "qty", "emoji", "checked", "store_id",
-                                                 "aisle", "recipes"})
+                                                 "aisle", "recipes", "checked_at", "have"})
         self.assertEqual(data["stores"][0], {"id": aldi, "name": "Aldi"})
         # replace: ids kept, renamed, reordered; a removed store un-assigns its items and forgets its foods
         out = S.stores_replace([{"id": costco, "name": "Costco Wholesale"}, {"name": "Target"}])
@@ -319,22 +325,36 @@ class RecipeExport(Base):
         S._req.nonce = "testnonce"
 
     def test_print_sizes(self):
-        expected = {"card35": "5in 3in", "card46": "6in 4in", "card57": "7in 5in", "half": "5.5in 8.5in",
-                    "letter": "letter", "a4": "A4"}
-        for size, page in expected.items():
+        for size in ("letter", "a4"):
             out = S.print_recipe(self.slug, size, 4, "classic", True)
-            self.assertIn(f"@page{{size:{page};", out, size)
-            two_cols = "minmax(0,2fr) minmax(0,3fr)" in out
-            self.assertEqual(two_cols, size != "half", size)
-            self.assertIn('<script nonce="testnonce">', out)
+            self.assertIn(f"@page{{size:{S.PRINT_SIZES[size]['page']};", out, size)
+            self.assertIn("minmax(0,2fr) minmax(0,3fr)", out)
             self.assertIn(f"min={S.PRINT_SIZES[size]['min']}", out)
+        for size in ("card35", "card46", "card57", "half", "letter", "a4"):
+            out = S.print_recipe(self.slug, size, 4, "classic", True)
+            self.assertIn('<script nonce="testnonce">', out)
             self.assertNotIn(" onclick=", out)
-            self.assertIn("<li>2 lb chicken breast</li>", out)   # 2 servings -> 4
+            self.assertIn("2 lb chicken breast", out)   # 2 servings -> 4
             self.assertIn("TablePlan</span>", out)
             self.assertNotIn("<img", out)   # no photo on this recipe
-        for size in ("card35", "card46", "card57"):
-            self.assertEqual(S.PRINT_SIZES[size]["min"], 6.5)
         self.assertIn("<li>1 lb chicken breast</li>", S.print_recipe(self.slug, "letter", None))
+
+    def test_print_cards_on_letter_with_cut_lines(self):
+        dims = {"card35": ("5.0in", "3.0in", 3), "card46": ("6.0in", "4.0in", 2), "card57": ("7.0in", "5.0in", 2),
+                "half": ("8.0in", "5.25in", 2)}
+        for size, (w, h, per) in dims.items():
+            out = S.print_recipe(self.slug, size, 4, "classic", True)
+            self.assertIn("@page{size:letter;margin:0.25in}", out, size)
+            self.assertIn(f".card{{position:relative;width:{w};height:{h};border:1px dashed #999;break-inside:avoid", out)
+            self.assertIn("print-color-adjust:exact", out)
+            self.assertIn(f"per={per};", out)
+            self.assertIn("\u2702", out)   # scissors mark
+            self.assertIn('<div class="b ing">2 lb chicken breast</div>', out)
+            self.assertIn('<div class="b step"><span class="n">1.</span>', out)
+            self.assertIn("Prints on Letter paper with dashed lines to cut out", out)
+            self.assertIn("continued", out)
+            self.assertGreaterEqual(S.PRINT_SIZES[size]["min"], 8)
+        self.assertIn("@page{size:A4;", S.print_recipe(self.slug, "a4", None))
 
     def test_print_photo_steps_and_escaping(self):
         S.recipe_update(self.slug, {"description": "<b>bold</b>"})
@@ -353,7 +373,9 @@ class RecipeExport(Base):
             r["has_image"] = True
             return r
         with mock.patch.object(S, "recipe_detail", side_effect=with_image):
-            self.assertIn(f'src="/img/{self.rid}?size=full"', S.print_recipe(self.slug, "card46", None, "classic", True))
+            card = S.print_recipe(self.slug, "card46", None, "classic", True)
+            self.assertIn(f'src="/img/{self.rid}?size=full"', card)
+            self.assertIn(".photo{float:right;width:35%", card)
             self.assertNotIn("<img", S.print_recipe(self.slug, "card46", None, "classic", False))
 
     def test_text_markdown_json(self):
