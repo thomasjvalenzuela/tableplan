@@ -6201,8 +6201,9 @@ def notify_plan_runout(now=None):
 # ============================================================ the ongoing shopping list and stores
 
 def _qty_text(i):
-    return " ".join(x for x in (nice_qty(i.get("quantity")) if (i.get("food") or i.get("unit")) else "",
-                                ((i.get("unit") or {}).get("name") or "")) if x)
+    u = i.get("unit") or {}
+    unit = (u.get("pluralName") or u.get("name")) if (i.get("quantity") or 0) > 1 else u.get("name")
+    return " ".join(x for x in (nice_qty(i.get("quantity")) if (i.get("food") or i.get("unit")) else "", unit or "") if x)
 
 
 def _uses(i, entries):
@@ -7799,7 +7800,8 @@ class Handler(BaseHTTPRequestHandler):
         out["pantry_checkin"] = pantry_checkin_status()
         try:
             start = today()
-            out["week"] = get_plans(start, start + timedelta(days=6))
+            out["week"] = enrich_plan(get_plans(start, start + timedelta(days=6)))
+            out["plan_status"] = plan_status()
             lists = get_lists()
             out["lists"] = lists
             if lists:

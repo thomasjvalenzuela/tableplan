@@ -165,6 +165,16 @@ function drawSelBar() {
 // ------------------------------------------------------------------ RECIPE page
 const R = { rec: null, servings: 0, style: "classic", guide: null };
 function openRecipe(slug) { location.hash = "recipe/" + encodeURIComponent(slug); }
+// "Source: Serious Eats" (a link) or "Added by you"
+function sourceLine(rec) {
+  const u = safeUrl(rec.source_url);
+  if (u) {
+    let host = "";
+    try { host = new URL(u).hostname.replace(/^www\./, ""); } catch (_) {}
+    return `Source: <a ${extLink(u)}>${esc(host || "original recipe")}</a>`;
+  }
+  return "Added by you";
+}
 async function renderRecipe(slug) {
   state.tab = "recipes"; renderTabs();
   app.innerHTML = loading();
@@ -174,34 +184,40 @@ async function renderRecipe(slug) {
   R.rec = rec; R.servings = rec.servings || state.cfg.household?.people || 4; R.guide = null; R.showOrig = false;
   R.style = state.cfg.settings.recipe_style === "steps" ? "steps" : "classic";
   const img = recipeImg(rec, "full");
-  app.innerHTML = `${storageBar()}<div class="rd fade-in">
-    <div class="rd-hero" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}
-      <button class="round-btn back" id="rd-back" aria-label="Back">${ic("chevL")}</button>
-      <button class="round-btn imgbtn" id="rd-img" aria-label="Change photo">${ic("camera")}</button>
-      <button class="round-btn fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite">${rec.favorite ? "♥" : "♡"}</button>
+  const src = sourceLine(rec);
+  app.innerHTML = `${storageBar()}<div class="rd rd2 fade-in">
+    <div class="rd-band"><button class="round-btn back" id="rd-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="rd-menu" aria-label="More" aria-haspopup="menu">${ic("more")}</button></div>
+    <div class="rd-plate-row">
+      <button class="round-btn side" id="rd-share2" aria-label="Share">${ic("share")}</button>
+      <button class="rd-plate ${img ? "" : "ph"}" id="rd-img" ${img ? bgStyle(img) : ""} aria-label="Change photo">${img ? "" : `<span>${esc(rec.ingredients?.[0]?.emoji || "🍽️")}</span>`}</button>
+      <button class="round-btn side fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite" aria-pressed="${!!rec.favorite}">${rec.favorite ? "♥" : "♡"}</button>
     </div>
-    <div class="rd-body">
-      <h1>${esc(rec.name)}</h1>${(rec.categories || []).length ? `<div class="cat-pills">${rec.categories.map((c) => `<span class="cat-pill">${esc(c)}</span>`).join("")}</div>` : ""}
-      ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>` : ""}
-      ${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
-      <div class="stats">
-        <div class="stat">${ic("clock")}<small>Cooking time</small><b>${esc(rec.minutes || "—")} <span>${rec.minutes ? "mins" : ""}</span></b></div>
-        <div class="stat">${ic("chef")}<small>Difficulty</small><b>${esc(rec.difficulty)}</b></div>
-        <div class="stat">${ic("users")}<small>Servings</small><div class="stepper"><button data-s="-1" aria-label="Fewer">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More">+</button></div></div>
+    <div class="rd-head">
+      <h1>${esc(rec.name)}</h1>
+      ${src ? `<div class="rd-src">${src}</div>` : ""}
+      <div class="rd-meta">
+        ${rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
+        <span class="mp">${ic("chef")} ${esc(rec.difficulty)}</span>
+        <span class="mp stepper">${ic("users")}<button data-s="-1" aria-label="Fewer servings">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More servings">+</button></span>
       </div>
-      <div class="seg" id="rd-style" style="margin-top:16px"><button data-v="classic">Classic</button><button data-v="steps">Step-by-step</button></div>
+      ${(rec.categories || []).length ? `<div class="cat-pills">${rec.categories.map((c) => `<span class="cat-pill">${esc(c)}</span>`).join("")}</div>` : ""}
+      ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>` : ""}
+    </div>
+    <div class="rd-sheet"><div class="grabber" aria-hidden="true"></div>
+      ${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
+      <div class="seg" id="rd-style"><button data-v="classic">Classic</button><button data-v="steps">Step-by-step</button></div>
       <div id="rd-content"></div>
       <div class="toolbar" style="margin-top:18px">
         <button class="pill-btn" id="rd-plan">${ic("cal")} Plan it</button>
-        <button class="pill-btn" id="rd-missing">${ic("cart")} Add missing to list</button>
-        <button class="pill-btn" id="rd-share">${ic("share")} Share & export</button>
-        <button class="pill-btn" id="rd-edit">${ic("edit")} Edit</button>
         ${rec.cook_entry ? "" : `<button class="pill-btn" id="rd-cooked">${ic("check")} Mark as cooked</button>`}
-        ${extLink(rec.source_url) ? `<a class="pill-btn" ${extLink(rec.source_url)}>${ic("link")} Original</a>` : ""}
       </div>
       <div id="rd-miss"></div>
       <div class="cta-bar"><button class="btn" id="rd-cook">${ic("play")} Start cooking</button></div>
     </div></div>`;
+  $("#rd-share2").onclick = () => openRecipeExport();
+  $("#rd-menu").onclick = () => popover($("#rd-menu"), `<button data-a="edit">${ic("edit")} Edit</button><button data-a="missing">${ic("cart")} Add missing to list</button><button data-a="share">${ic("share")} Share & export</button>`, (el) => {
+    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ edit: () => { location.hash = "edit/" + encodeURIComponent(slug); }, missing: addMissing, share: openRecipeExport })[b.dataset.a](); }));
+  });
   $("#rd-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
   $("#rd-fav").onclick = async (e) => {
     const on = !R.rec.favorite, btn = e.currentTarget;
@@ -211,10 +227,8 @@ async function renderRecipe(slug) {
   $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); }));
   $$("#rd-style button").forEach((b) => (b.onclick = () => { R.style = b.dataset.v; drawContent(); }));
   $("#rd-cook").onclick = () => ((R.rec.missing || []).length ? showMissing() : startCook());
-  $("#rd-share").onclick = () => openRecipeExport();
   $("#rd-plan").onclick = () => planRecipe(rec);
-  $("#rd-missing").onclick = () => addMissing();
-  $("#rd-edit").onclick = () => { location.hash = "edit/" + encodeURIComponent(slug); };
+
   $("#rd-cooked").onclick = async (e) => {
     const btn = e.currentTarget; btn.disabled = true;
     const body = rec.cook_entry ? { plan_id: rec.cook_entry.id } : { servings: R.servings };
@@ -242,7 +256,7 @@ async function drawContent() {
     rec.ingredients.forEach((x) => {
       if (x.section && x.section !== sec) { sec = x.section; html += `</div><div class="group-label">${esc(sec)}</div><div class="group ing">`; }
       const l = ingLine(x, f);
-      html += `<div class="row">${ingPic(x)}<div class="main"><div class="a">${ingTitle(l)}</div>${l.amt ? `<div class="qty">${esc(l.amt)}</div>` : ""}</div><div class="tags">${pantryTag(x)}</div></div>`;
+      html += `<div class="row ing-row">${ingPic(x)}<div class="main"><div class="a">${esc(l.name)}</div>${l.note ? `<div class="note">${esc(l.note)}</div>` : ""}</div><div class="amt-col">${l.amt ? `<span class="amt">${esc(l.amt)}</span>` : ""}${pantryTag(x)}</div></div>`;
     });
     html += `</div><div class="section-h"><h2>Instructions</h2><span class="sh-actions">${rec.original ? `<button class="link-btn" id="rd-orig" aria-pressed="${!!R.showOrig}">${R.showOrig ? "Show reworded" : "Show original"}</button>` : ""}<button class="pill-btn sm" id="rd-reword">${ic("sparkle")} Reword with AI</button></span></div>`;
     if (R.showOrig && rec.original) {

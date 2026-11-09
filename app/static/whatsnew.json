@@ -1,5 +1,13 @@
 [
  {
+  "id": "fresh-look",
+  "date": "2026-11-09",
+  "icon": "sparkle",
+  "color": "indigo",
+  "title": "A fresh look",
+  "text": "Recipes open on a big plate photo with a cleaner ingredient list, and Home now shows just your list, your week and tonight's dinner."
+ },
+ {
   "id": "smart-list",
   "date": "2026-11-09",
   "icon": "cart",

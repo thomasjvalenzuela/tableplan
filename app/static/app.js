@@ -228,92 +228,110 @@ const loading = () => `<div class="spinner"></div>`;
 // ------------------------------------------------------------------ HOME
 async function renderHome() {
   app.innerHTML = topbar(`<button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
-    `<h1 class="title">TablePlan</h1><div class="subtitle">${fmt(new Date(), { weekday: "long", month: "long", day: "numeric" })}</div>${loading()}`;
+    `<h1 class="title">Today</h1><div class="subtitle">${esc(fmt(new Date(), { weekday: "long", month: "long", day: "numeric" }))}</div>${loading()}`;
   bindTopbar(); $("#btn-add").onclick = openAddRecipe;
-  let s;
-  try { s = state.summary = await api("GET", "/api/summary"); } catch (e) { app.querySelector(".spinner").outerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
-  if (state.tab !== "home") return;
-
+  let s, list = null;
+  try {
+    [s, list] = await Promise.all([api("GET", "/api/summary"), api("GET", "/api/list").catch(() => null)]);
+    state.summary = s;
+  } catch (e) { const sp = app.querySelector(".spinner"); if (sp) sp.outerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  if (state.tab !== "home" || !app.querySelector(".spinner")) return;
   const todayISO = isoDate(today());
-  const tonight = s.week.filter((e) => e.date === todayISO).sort((a, b) => (a.entry_type === "dinner" ? -1 : 1))[0];
-  const todayCount = s.week.filter((e) => e.date === todayISO).length;
-  const exp = s.expiring || [];
-  const expired = exp.filter((i) => i.days_left < 0).length;
+  const byDate = (iso) => s.week.filter((e) => e.date === iso).sort((a, b) => (a.entry_type === "dinner" ? -1 : b.entry_type === "dinner" ? 1 : order(a.entry_type) - order(b.entry_type)));
+  const tonightAll = byDate(todayISO), tonight = tonightAll[0];
 
-  const chips = [
-    tonight ? [cap(tonight.entry_type) + " tonight", entryName(tonight), "dish", "bg-orange", "meals"] : ["Tonight", "Nothing planned", "dish", "bg-gray", "meals"],
-    [exp.length ? `${exp.length} expiring` : "Pantry", exp.length ? (expired ? `${expired} past date` : "Use soon") : `${s.pantry_count} items`, "clock", exp.length ? "bg-red" : "bg-green", "pantry"],
-    ["Shopping", `${s.list_count} to buy`, "cart", "bg-blue", "list"],
-    ["Recipes", `${s.recipe_count} saved`, "book", "bg-purple", "recipes"],
-  ];
-
-  let html = `<div class="chips fade-in">${chips.map(([a, b, i, c, t]) =>
-    `<button class="chip" data-go="${t}"><span class="dot ${c}">${ic(i)}</span><span>${esc(a)}<small>${esc(b)}</small></span></button>`).join("")}</div>`;
-  if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie" style="width:100%;text-align:left">${esc(s.error)}</button>`;
+  let html = "";
+  if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie">${esc(s.error)}</button>`;
   html += zoomNudge();
-  if (s.pantry_checkin?.due) html += `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Time for an inventory check-in</b><small>${s.pantry_checkin.last ? `Last checked ${esc(s.pantry_checkin.days_since)} days ago.` : "Takes a minute."} Confirm what's still in the fridge and pantry so plans and lists stay accurate.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+  html += homeContextCard(s, tonight);
 
-  // Tonight hero
-  html += `<div class="section-h"><h2>Tonight</h2></div>`;
-  if (tonight && tonight.recipe) {
-    const img = imgUrl(tonight.recipe, "full");
-    html += `<button class="tile hero wide ${img ? "" : "noimg"}" id="hero" ${img ? bgStyle(img) : ""}>
-      <div class="shade"></div><div class="hero-txt"><div class="t-sub">${esc(cap(tonight.entry_type))}${todayCount > 1 ? ` · +${esc(todayCount - 1)} more` : ""}</div><div class="t-title">${esc(entryName(tonight))}</div></div></button>`;
-  } else {
-    html += `<div class="grid"><button class="tile wide dim" id="plan-now"><span class="ic bg-orange">${ic("sparkle")}</span>
-      <span><div class="t-title">Plan this week</div><div class="t-sub">Pick meals from your recipes in one tap</div></span></button></div>`;
-  }
+  // 1. Shopping: the next few things to buy, soonest meal first
+  const toBuy = ((list && list.items) || []).filter((i) => !i.checked);
+  const soonest = (i) => (i.uses && i.uses.length ? i.uses[0].date : "9999");
+  const top = toBuy.slice().sort((a, b) => soonest(a).localeCompare(soonest(b))).slice(0, 5);
+  const showStores = ((list && list.stores) || []).length && toBuy.some((i) => i.store_id != null);
+  html += `<section class="home-card shop-w" aria-label="Shopping list"><div class="hc-h"><h2>Shopping list <span>· ${esc(plural(toBuy.length, "item"))} to buy</span></h2><button class="link-btn" data-go="list">View all ›</button></div>
+    ${top.length ? `<div class="shop-rows">${top.map((i) => `<div class="shop-row" data-sid="${esc(i.id)}"><button class="check sq" data-buy="${esc(i.id)}" aria-label="Got ${esc(itemTitle(i))}">${ic("check")}</button>
+      <div class="main"><div class="a">${esc(itemTitle(i))}</div><div class="b">${esc([itemSub(i), showStores ? storeName(list, i.store_id) : ""].filter(Boolean).join(" · "))}</div></div>
+      ${i.uses && i.uses.length ? `<span class="for-tag">for ${esc(wkShort(i.uses[0].date))}</span>` : ""}</div>`).join("")}</div>`
+      : `<div class="all-set">You're all set for this week ✓</div>`}</section>`;
 
-  // This week strip
-  html += `<div class="section-h"><h2>This Week</h2><button data-go="meals">See all</button></div><div class="strip">`;
+  // 2. This week: today + 6 days, dinner first
+  html += `<section class="home-week" aria-label="This week"><div class="hc-h"><h2>This week</h2><button class="link-btn" data-go="meals">Plan ›</button></div><div class="wk">`;
   for (let i = 0; i < 7; i++) {
-    const d = addDays(today(), i), iso = isoDate(d);
-    const all = s.week.filter((x) => x.date === iso), e = all.sort((a, b) => (a.entry_type === "dinner" ? -1 : b.entry_type === "dinner" ? 1 : 0))[0];
-    if (e) {
-      const img = imgUrl(e.recipe);
-      html += `<button class="day-card" data-entry="${esc(e.id)}"><div class="img ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</div>
-        <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">${esc(entryName(e))}</div>${all.length > 1 ? `<div class="more-n">+${esc(all.length - 1)} more</div>` : ""}</div></button>`;
-    } else {
-      html += `<button class="day-card blank" data-plan-day="${esc(iso)}"><div class="img ph" style="background:rgba(255,255,255,.12)">${ic("plus")}</div>
-        <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">Not planned</div></div></button>`;
-    }
+    const iso = isoDate(addDays(today(), i)), all = byDate(iso), e = all[0];
+    const img = e ? imgUrl(e.recipe) : null;
+    html += e ? `<button class="wk-day ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}"><span class="wk-d">${esc(i === 0 ? "Today" : wkShort(iso))}</span><span class="wk-n">${esc(parseISO(iso).getDate())}</span>
+        <span class="wk-plate ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}${e.cooked ? `<span class="wk-ok" aria-label="cooked">✓</span>` : +e.missing ? `<span class="wk-dot" aria-label="Missing ${esc(e.missing)}"></span>` : ""}</span>
+        <span class="wk-name">${esc(entryName(e))}</span>${all.length > 1 ? `<span class="wk-more">+${esc(all.length - 1)} more</span>` : ""}</button>`
+      : `<button class="wk-day empty" data-plan-day="${esc(iso)}"><span class="wk-d">${esc(i === 0 ? "Today" : wkShort(iso))}</span><span class="wk-n">${esc(parseISO(iso).getDate())}</span><span class="wk-plate ph">${ic("plus")}</span><span class="wk-name muted">Add</span></button>`;
   }
-  html += `</div>`;
+  html += `</div></section>`;
 
-  // Use soon
-  html += `<div class="section-h"><h2>Use Soon</h2><button data-go="pantry">Pantry</button></div>`;
-  if (exp.length) {
-    html += `<div class="grid">${exp.slice(0, 6).map((it) => {
-      const [i, c] = locIcon[it.location] || locIcon.fridge;
-      return `<button class="tile" data-item="${esc(it.id)}"><span class="ic ${it.days_left <= 0 ? "bg-red" : "bg-orange"}">${ic(i)}</span>
-        <span style="min-width:0"><div class="t-title">${esc(it.name)}</div><div class="t-sub">${esc(relExpiry(it))}</div></span></button>`;
-    }).join("")}</div>`;
-  } else {
-    html += `<div class="grid"><div class="tile dim wide"><span class="ic bg-green">${ic("leaf")}</span><span><div class="t-title">Nothing expiring soon</div><div class="t-sub">${esc(s.pantry_count)} items tracked</div></span></div></div>`;
+  // 3. Tonight: only when something is planned today
+  if (tonight && tonight.recipe) {
+    const img = imgUrl(tonight.recipe, "full"), miss = +tonight.missing || 0;
+    html += `<section class="tonight" aria-label="Tonight"><div class="tn-band"><h2>Tonight</h2><span>${esc(fmt(new Date(), { weekday: "long", month: "short", day: "numeric" }))}${tonightAll.length > 1 ? ` · +${esc(tonightAll.length - 1)} more` : ""}</span></div>
+      <button class="tn-plate ${img ? "" : "ph"}" id="tn-open" ${img ? bgStyle(img) : ""} aria-label="Open ${esc(entryName(tonight))}">${img ? "" : "🍽️"}</button>
+      <div class="tn-name">${esc(entryName(tonight))}</div>
+      <div class="tn-acts">${tonight.cooked ? `<span class="pill ok">Cooked ✓</span>` : miss ? `<button class="btn sec small" id="tn-miss">${ic("cart")} Missing ${esc(miss)}</button>` : `<button class="btn small" id="tn-cook">${ic("play")} Start cooking</button>`}</div></section>`;
   }
 
-  // Quick actions
-  html += `<div class="section-h"><h2>Quick Actions</h2></div><div class="grid">
-    <button class="tile" id="qa-import"><span class="ic bg-purple">${ic("camera")}</span><span><div class="t-title">Add Recipe</div><div class="t-sub">Screenshot or link</div></span></button>
-    <button class="tile" id="qa-plan"><span class="ic bg-orange">${ic("sparkle")}</span><span><div class="t-title">Plan My Meals</div><div class="t-sub">Week or month</div></span></button>
-    <button class="tile" id="qa-list"><span class="ic bg-blue">${ic("mail")}</span><span><div class="t-title">Send List</div><div class="t-sub">Telegram, email or print</div></span></button>
-    <button class="tile" id="qa-pantry"><span class="ic bg-green">${ic("scan")}</span><span><div class="t-title">Stock Up</div><div class="t-sub">Barcode or type it in</div></span></button>
-  </div>`;
-
-  app.querySelector(".spinner").outerHTML = html;
+  app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
-  $("#home-ci") && ($("#home-ci").onclick = () => openCheckin(renderHome));
-  $("#hero") && ($("#hero").onclick = () => openEntry(tonight));
   $("#fix-mealie") && ($("#fix-mealie").onclick = () => openSetupSection("mealie", "Recipe library", reloadCfg));
-  $("#home-up") && ($("#home-up").onclick = () => openUpdateHelp());
-  $("#plan-now") && ($("#plan-now").onclick = () => planSequential());
-  $$("[data-entry]").forEach((b) => (b.onclick = () => openEntry(s.week.find((e) => String(e.id) === b.dataset.entry))));
-  $$("[data-plan-day]").forEach((b) => (b.onclick = () => openPicker(b.dataset.planDay, "dinner")));
-  $$("[data-item]").forEach((b) => (b.onclick = () => openPantryItem(exp.find((i) => String(i.id) === b.dataset.item), renderHome)));
-  $("#qa-import").onclick = openAddRecipe;
-  $("#qa-plan").onclick = () => openGenerate();
-  $("#qa-list").onclick = async () => { const l = s.lists[0]; if (!l) return toast("No shopping list yet"); openShare("list", { id: l.id, name: l.name }); };
-  $("#qa-pantry").onclick = () => startStockUp(renderHome);
+  $$(".wk-day[data-entry]").forEach((b) => (b.onclick = () => { const e = s.week.find((x) => String(x.id) === b.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else openEntry(e); }));
+  $$("[data-plan-day]").forEach((b) => (b.onclick = () => openPicker(b.dataset.planDay, "dinner", null, { seq: true })));
+  $$("[data-buy]").forEach((b) => (b.onclick = async () => {
+    const row = b.closest(".shop-row"); row.classList.add("done"); b.classList.add("on");
+    try {
+      const r = await api("PATCH", `/api/list/items/${enc(b.dataset.buy)}`, { checked: true });
+      toast(`Got ${row.querySelector(".a").textContent}`, "Undo", async () => {
+        try {
+          if (r && r.pantry_item) await api("POST", `/api/lists/${enc(list.id)}/items/${enc(b.dataset.buy)}/undo`, { pantry_item_id: r.pantry_item.id });
+          else await api("PATCH", `/api/list/items/${enc(b.dataset.buy)}`, { checked: false });
+          renderHome();
+        } catch (x) { fail(x); }
+      });
+    } catch (e) { row.classList.remove("done"); b.classList.remove("on"); fail(e); }
+  }));
+  const open = () => tonight?.recipe?.slug && openRecipe(tonight.recipe.slug);
+  $("#tn-open") && ($("#tn-open").onclick = open);
+  $("#tn-cook") && ($("#tn-cook").onclick = open);
+  $("#tn-miss") && ($("#tn-miss").onclick = open);
+  bindContextCard(s);
+}
+const storeName = (list, id) => (id == null ? "" : ((list.stores || []).find((x) => String(x.id) === String(id)) || {}).name || "");
+// At most one nudge on Home, most useful first: missing ingredients > plan running out > check-in > stock your kitchen
+function homeContextCard(s, tonight) {
+  const tomorrow = isoDate(addDays(today(), 1));
+  const soon = [tonight, s.week.find((e) => e.date === tomorrow && e.entry_type === "dinner")].find((e) => e && !e.cooked && +e.missing);
+  if (soon) {
+    const when = soon.date === isoDate(today()) ? "Tonight's" : "Tomorrow's";
+    return `<button class="nudge" id="ctx-missing" data-slug="${esc(soon.recipe?.slug || "")}"><span class="ic bg-orange">${ic("cart")}</span><span><b>${esc(when)} ${esc(soon.entry_type)} is missing ${esc(plural(+soon.missing, "item"))}</b><small>${esc(entryName(soon))}: check your shopping list before you go.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+  }
+  const st = s.plan_status;
+  if (st && st.reminder_days && st.days_left <= st.reminder_days) {
+    return `<button class="nudge" id="ctx-plan"><span class="ic bg-orange">${ic("cal")}</span><span><b>${st.days_left ? `Your plan runs out in ${esc(plural(st.days_left, "day"))}` : "Nothing planned yet"}</b><small>Pick the next meals, one day at a time.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+  }
+  if (s.pantry_checkin?.due) {
+    return `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Time for an inventory check-in</b><small>${s.pantry_checkin.last ? `Last checked ${esc(s.pantry_checkin.days_since)} days ago. ` : ""}Confirm what's still there so plans and lists stay accurate.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+  }
+  let hidden = 0;
+  try { hidden = +localStorage.getItem("tp.stockCardHidden") || 0; } catch (_) {}
+  if ((s.pantry_count || 0) < 10 && Date.now() - hidden > 30 * 864e5) {
+    return `<div class="nudge stock-card" id="ctx-stock"><span class="ic bg-blue">${ic("scan")}</span><span><b>Stock your kitchen</b><small>Scan what you have so recipes and lists know what's at home.</small>
+      <span class="stock-btns">${[["pantry", "Pantry"], ["fridge", "Fridge"], ["freezer", "Freezer"]].map(([k, l]) => `<button class="pill-btn" data-stock="${k}">${ic("scan")} ${l}</button>`).join("")}</span></span>
+      <button class="x" id="ctx-stock-x" aria-label="Hide for now">${ic("x")}</button></div>`;
+  }
+  return "";
+}
+function bindContextCard(s) {
+  $("#ctx-missing") && ($("#ctx-missing").onclick = (e) => { const slug = e.currentTarget.dataset.slug; if (slug) openRecipe(slug); else go("list"); });
+  $("#ctx-plan") && ($("#ctx-plan").onclick = () => planSequential());
+  $("#home-ci") && ($("#home-ci").onclick = () => openCheckin(renderHome));
+  $$("[data-stock]").forEach((b) => (b.onclick = () => { SS.loc = b.dataset.stock; try { localStorage.setItem("tp.scanLoc", SS.loc); } catch (_) {} startStockUp(renderHome); }));
+  $("#ctx-stock-x") && ($("#ctx-stock-x").onclick = () => { try { localStorage.setItem("tp.stockCardHidden", String(Date.now())); } catch (_) {} $("#ctx-stock")?.remove(); });
 }
 const entryName = (e) => (e.recipe && e.recipe.name) || e.title || "Note";
 function relExpiry(it) {
@@ -1013,7 +1031,7 @@ function drawList(focusAdd) {
       <input id="qa" name="qa" placeholder="${esc(addTo ? `Add to ${addTo}…` : "Add an item…")}" enterkeyhint="done" maxlength="200" aria-label="Add an item">
       <button type="submit" class="qa-go" aria-label="Add">${ic("check")}</button></form>
     <div class="subtitle list-sub">${listSubtitle(toBuy, anyLeft)}</div>
-    <div class="toolbar"><button class="pill-btn" id="l-trip">${ic("cart")} Log a grocery trip</button><button class="pill-btn" id="l-send">${ic("share")} Send</button><button class="pill-btn" id="l-print">${ic("print")} Print</button></div>`;
+    <div class="toolbar"><button class="pill-btn" id="l-trip">${ic("cart")} Log a grocery trip</button></div>`;
 
   // store → aisle grouping (stores in their saved order, "Any store" last)
   const order = [...stores.map((s) => String(s.id)), "none"];
@@ -1035,9 +1053,7 @@ function drawList(focusAdd) {
 
   $$("#st-bar [data-sf]").forEach((b) => (b.onclick = () => { setStoreFilter(b.dataset.sf); drawList(); }));
   $("#st-add").onclick = () => addStoreInline();
-  $("#l-send").onclick = () => sendIt({ kind: "list", id: d.id });
   $("#l-trip").onclick = () => openTrip(() => reloadList());
-  $("#l-print").onclick = () => printIt(`/print/list/${enc(d.id)}`);
   $("#qa-form").onsubmit = (e) => { e.preventDefault(); quickAdd(); };
   $("#qa").onpaste = (e) => {
     const t = e.clipboardData?.getData("text") || "";
@@ -1281,16 +1297,16 @@ function slotHtml(it) {
 }
 async function renderPantry() {
   const view = invView();
-  app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="round-btn" id="btn-share" aria-label="Share">${ic("share")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
+  app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="round-btn" id="p-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
     `<h1 class="title">Inventory</h1>
-    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button><button class="pill-btn" id="p-trip">${ic("cart")} Log a grocery trip</button><button class="pill-btn" id="p-ci">${ic("check")} Check-in</button></div>
+    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button></div>
     <div id="pantry">${loading()}</div>`;
   bindTopbar();
   $("#p-scan").onclick = () => startStockUp(renderPantry);
-  $("#p-ci").onclick = () => openCheckin(renderPantry);
-  $("#p-trip").onclick = () => openTrip(renderPantry);
+  $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Check-in</button><button data-a="share">${ic("share")} Share or print</button>`, (el) => {
+    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ trip: () => openTrip(renderPantry), ci: () => openCheckin(renderPantry), share: () => openShare("pantry", {}) })[b.dataset.a](); }));
+  });
   $("#btn-addp").onclick = () => openAddPantry(renderPantry);
-  $("#btn-share").onclick = () => openShare("pantry", {});
   $$("#inv-view [data-v]").forEach((b) => (b.onclick = () => { try { localStorage.setItem("tp.invView", b.dataset.v); } catch (_) {} renderPantry(); }));
   let items;
   try { items = (await api("GET", "/api/pantry")).items; } catch (e) { if ($("#pantry")) $("#pantry").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
