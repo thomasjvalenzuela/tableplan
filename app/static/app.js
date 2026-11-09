@@ -1608,6 +1608,8 @@ async function openSettings() {
       <p class="hint">Auto-plan runs at 8 AM on that day, fills empty days for the following week, and keeps anything you've already planned. Plans and alerts go to every notification channel you've set up.</p>
 
 
+      <div class="group-label">Recipes</div>
+      <div class="group"><button class="row" id="st-cats"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Categories</div><div class="b">${esc((s.categories || []).slice(0, 4).join(", "))}${(s.categories || []).length > 4 ? "…" : ""}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Shopping</div>
       <div class="group"><button class="row" id="st-stores"><span class="ic bg-teal" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("store")}</span><div class="main"><div class="a">Stores</div><div class="b" id="st-stores-b">Rename, reorder or remove the stores on your list</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Pantry</div>
@@ -1616,6 +1618,9 @@ async function openSettings() {
       </div>
       <p class="hint">Weekly is recommended: a quick “still have it?” review keeps use-by dates and shopping lists honest.</p>
       <div class="group-label">AI</div>
+      <div class="group">
+        <div class="field"><label>Polish imported recipes<small class="lh">Rewrites steps so they're clear and complete. Never changes amounts. About 1¢ per recipe.</small></label><label class="toggle"><input type="checkbox" id="st-polish" ${s.polish_imports !== false ? "checked" : ""}><span></span></label></div>
+      </div>
       <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${esc(s.ai_budget)}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Import</div>
       <div class="group"><button class="row" id="st-share"><span class="ic bg-pink" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;background:#E1306C">${ic("share")}</span><div class="main"><div class="a">Share to TablePlan from your phone</div><div class="b">Send Instagram, TikTok and recipe links straight in</div></div><span class="chev">${ic("chevR")}</span></button></div>
@@ -1652,6 +1657,8 @@ async function openSettings() {
     $("#st-hz").onchange = async (e) => { await save({ plan_horizon_days: +e.target.value }); if (state.tab === "meals") replan(); };
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $("#st-stores").onclick = () => storesManager(draw);
+    $("#st-cats").onclick = () => categoriesManager(draw);
+    $("#st-polish").onchange = (e) => { save({ polish_imports: e.target.checked }); if (e.target.checked && !c.ai_key) toast("Polishing needs an OpenAI key", "Add key", () => openSetupSection("ai", "AI recipe import", reloadCfg)); };
     $("#st-backups").onclick = () => backupsView(draw);
     api("GET", "/api/stores").then((ss) => { const b = $("#st-stores-b"); if (b && Array.isArray(ss) && ss.length) b.textContent = ss.map((x) => x.name).join(", "); }).catch(() => {});
     $("#st-ai").onclick = () => openAiSpending();
@@ -1716,6 +1723,53 @@ async function storesManager(back) {
       if (!v) return;
       if (stores.some((x) => x.name.toLowerCase() === v.toLowerCase())) return toast(`${v} is already a store`);
       commit([...stores, { name: v }], `Added ${v}`).then(() => $("#sm-new")?.focus());
+    });
+  };
+  draw();
+}
+
+// ---------- Settings → Categories (add, rename everywhere, delete with Undo, reorder; every change saves right away)
+function categoriesManager(back) {
+  const cats = () => state.cfg.settings.categories || [];
+  const setCats = (list) => { state.cfg.settings.categories = list; };
+  const run = async (fn, msg, undo) => {
+    try { const r = await fn(); if (r && r.categories) setCats(r.categories); if (msg) toast(msg, undo ? "Undo" : null, async () => { try { const u = await undo(r); if (u && u.categories) setCats(u.categories); draw(); } catch (x) { fail(x); } }); }
+    catch (e) { fail(e); }
+    draw();
+  };
+  const order = (list) => run(async () => ({ categories: (await api("PUT", "/api/settings", { categories: list })).categories }));
+  const draw = () => {
+    if (!sheetBody()) return;
+    const list = cats();
+    sheetBody().innerHTML = `<div class="btn-row" style="margin-bottom:12px"><button class="btn sec small" id="cm-back">${ic("chevL")} Settings</button></div>
+      <div class="group-label" style="margin-top:4px">Categories</div>
+      <div class="group" id="cm-list">${list.map((c, i) => `<div class="field store-row" data-i="${i}">
+        <input class="full" type="text" value="${esc(c)}" maxlength="30" aria-label="Category name" data-name>
+        <button class="mini" data-up ${i ? "" : "disabled"} aria-label="Move ${esc(c)} up">${ic("chevU")}</button>
+        <button class="mini" data-down ${i < list.length - 1 ? "" : "disabled"} aria-label="Move ${esc(c)} down">${ic("chevD")}</button>
+        <button class="mini red" data-del aria-label="Delete ${esc(c)}">${ic("trash")}</button></div>`).join("") || `<div class="row flush muted">No categories yet.</div>`}</div>
+      ${list.length < 30 ? `<form class="group" id="cm-add-f" style="margin-top:12px"><div class="field"><input class="full" type="text" id="cm-new" maxlength="30" placeholder="Add a category, e.g. Pasta"><button class="mini blue" type="submit" aria-label="Add category">${ic("plus")}</button></div></form>` : ""}
+      <p class="hint">Categories become filters on the Recipes tab and in the plan picker. Renaming one updates every recipe that uses it. Up to 30.</p>`;
+    $("#cm-back").onclick = back;
+    $$("#cm-list [data-i]").forEach((row) => {
+      const i = +row.dataset.i, name = list[i], inp = $("[data-name]", row);
+      inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } if (e.key === "Escape") { inp.value = name; inp.blur(); } };
+      inp.onchange = () => {
+        const v = inp.value.trim().replace(/\s+/g, " ").slice(0, 30);
+        if (!v || v === name) { inp.value = name; return; }
+        run(() => api("POST", "/api/categories/rename", { from: name, to: v }), `Renamed to ${v}`);
+      };
+      const swap = (j) => { const n = list.slice(); [n[i], n[j]] = [n[j], n[i]]; order(n); };
+      $("[data-up]", row).onclick = () => swap(i - 1);
+      $("[data-down]", row).onclick = () => swap(i + 1);
+      $("[data-del]", row).onclick = () => run(() => api("POST", "/api/categories/delete", { name }), `Deleted ${name}`, (r) => api("POST", "/api/categories/undo-delete", r.undo));
+    });
+    $("#cm-add-f") && ($("#cm-add-f").onsubmit = (e) => {
+      e.preventDefault();
+      const v = $("#cm-new").value.trim().replace(/\s+/g, " ").slice(0, 30);
+      if (!v) return;
+      if (list.some((x) => x.toLowerCase() === v.toLowerCase())) return toast(`${v} is already a category`);
+      order([...list, v]).then(() => { toast(`Added ${v}`); $("#cm-new")?.focus(); });
     });
   };
   draw();

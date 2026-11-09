@@ -678,3 +678,11 @@ a.row{color:var(--text);text-decoration:none}
 body.selecting #app{padding-bottom:calc(170px + var(--safe-b))}
 @media (min-width:1024px){.sel-bar{left:var(--sidebar);bottom:0}}
 body.selecting .toast{bottom:calc(176px + var(--safe-b))}
+.section-h .sh-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.pill-btn.sm{padding:6px 12px;font-size:13.5px}
+.pill-btn.sm svg{width:15px;height:15px}
+.orig-box{border-left:3px solid var(--sep);padding-left:10px}
+.orig-list{margin:0 0 10px;padding-left:20px;color:var(--text);font-size:15px;line-height:1.5}
+.ed-cats{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 4px}
+.link-btn.inline{padding:0 2px;font-size:inherit;border:0;background:none;cursor:pointer}
+.section-h .pill-btn{color:var(--text)}

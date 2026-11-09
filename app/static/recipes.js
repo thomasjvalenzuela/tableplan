@@ -163,7 +163,7 @@ async function renderRecipe(slug) {
   let rec;
   try { rec = await api("GET", `/api/recipe/${encodeURIComponent(slug)}`); }
   catch (e) { app.innerHTML = `${topbar(`<button class="round-btn left" id="rd-err-back">${ic("chevL")}</button>`)}<div class="banner">${esc(e.message)}</div>`; bindTopbar(); $("#rd-err-back").onclick = () => go("recipes"); return; }
-  R.rec = rec; R.servings = rec.servings || state.cfg.household?.people || 4; R.guide = null;
+  R.rec = rec; R.servings = rec.servings || state.cfg.household?.people || 4; R.guide = null; R.showOrig = false;
   R.style = state.cfg.settings.recipe_style === "steps" ? "steps" : "classic";
   const img = recipeImg(rec, "full");
   app.innerHTML = `${storageBar()}<div class="rd fade-in">
@@ -236,9 +236,25 @@ async function drawContent() {
       const l = ingLine(x, f);
       html += `<div class="row">${ingPic(x)}<div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="qty">${esc(l.amt)}</div>` : ""}</div><div class="tags">${pantryTag(x)}</div></div>`;
     });
-    html += `</div><div class="section-h"><h2>Instructions</h2></div>`;
-    rec.steps.forEach((s, n) => { html += `<div class="step-card">${s.title ? `<div class="num">${esc(s.title)}</div>` : `<div class="num">Step ${n + 1}</div>`}<div class="txt">${esc(s.text)}</div></div>`; });
+    html += `</div><div class="section-h"><h2>Instructions</h2><span class="sh-actions">${rec.original ? `<button class="link-btn" id="rd-orig" aria-pressed="${!!R.showOrig}">${R.showOrig ? "Show reworded" : "Show original"}</button>` : ""}<button class="pill-btn sm" id="rd-reword">${ic("sparkle")} Reword with AI</button></span></div>`;
+    if (R.showOrig && rec.original) {
+      html += `<div class="orig-box"><div class="group-label">Original ingredients</div><ul class="orig-list">${rec.original.ingredients.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
+        <div class="group-label">Original steps</div>${rec.original.steps.map((t, n) => `<div class="step-card"><div class="num">Step ${n + 1}</div><div class="txt">${esc(t)}</div></div>`).join("")}</div>`;
+    } else rec.steps.forEach((s, n) => { html += `<div class="step-card">${s.title ? `<div class="num">${esc(s.title)}</div>` : `<div class="num">Step ${n + 1}</div>`}<div class="txt">${esc(s.text)}</div></div>`; });
     box.innerHTML = html;
+    $("#rd-orig") && ($("#rd-orig").onclick = () => { R.showOrig = !R.showOrig; drawContent(); });
+    $("#rd-reword").onclick = async (e) => {
+      if (!state.cfg.ai_key) return openSetupSection("ai", "AI recipe import", reloadCfg);
+      const btn = e.currentTarget; btn.disabled = true; btn.textContent = "Rewording…";
+      const slug = rec.slug;
+      try {
+        const r = await api("POST", `/api/recipe/${encodeURIComponent(slug)}/polish`);
+        R.rec = { ...R.rec, ...r }; R.guide = null; R.showOrig = false; drawContent();
+        toast("Reworded · Show original", "Undo", async () => {
+          try { const u = await api("POST", `/api/recipe/${encodeURIComponent(slug)}/restore-original`); R.rec = { ...R.rec, ...u }; R.guide = null; drawContent(); toast("Original text restored"); } catch (x) { fail(x); }
+        });
+      } catch (x) { fail(x); btn.disabled = false; btn.innerHTML = `${ic("sparkle")} Reword with AI`; }
+    };
   } else {
     if (!R.guide) {
       box.innerHTML = state.cfg.ai_key ? `<div class="importing"><div class="pot">✨</div><div class="stage">Arranging the steps for your kitchen…</div><div class="muted small">First time only, about 10–20 seconds. After that it's instant.</div></div>` : loading();
@@ -357,7 +373,7 @@ function showMissing() {
 }
 
 // ---------- Share & export: print/PDF in several sizes, send, copy, download
-const PRINT_SIZES = [["card35", "Index 3×5"], ["card46", "Index 4×6"], ["card57", "Card 5×7"], ["half", "Half letter"], ["letter", "Letter"], ["a4", "A4"]];
+const PRINT_SIZES = [["card35", "Index card 3×5"], ["card46", "Index card 4×6"], ["card57", "Card 5×7"], ["half", "Half page"], ["letter", "Full page"], ["a4", "A4"]];
 function recipeExportUrls(slug, o) {
   const s = enc(o.servings || "");
   return {
@@ -367,6 +383,7 @@ function recipeExportUrls(slug, o) {
     json: `/export/recipe/${enc(slug)}.json?servings=${s}`,
   };
 }
+const cutHint = (size) => (size === "a4" ? "Prints on A4 paper." : size === "letter" ? "Prints on Letter paper." : "Prints on Letter paper with dashed lines to cut out.");
 function openRecipeExport() {
   const rec = R.rec, slug = rec.slug;
   const saved = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } };
@@ -391,6 +408,7 @@ function openRecipeExport() {
     </div>
     <div style="height:12px"></div>
     <button class="btn" id="ex-print" data-url="${esc(u.print)}">${ic("print")} Open print view</button>
+    <p class="hint" id="ex-cut">${esc(cutHint(o.size))}</p>
     <p class="hint">Choose “Save as PDF” in the print dialog to keep a PDF copy.</p>
     <div class="group-label">Share</div>
     <div class="share-grid" id="ex-share">${share.map(([i, l], n) => `<button data-n="${n}">${ic(i)} ${esc(l)}</button>`).join("")}</div>
@@ -401,7 +419,7 @@ function openRecipeExport() {
       <a href="${esc(safeUrl(u.json))}" download data-k="json">${ic("down")} Recipe file (JSON)</a>
     </div>`, {
     onMount() {
-      const sync = () => { $("#ex-print").dataset.url = recipeExportUrls(slug, o).print; };
+      const sync = () => { $("#ex-print").dataset.url = recipeExportUrls(slug, o).print; $("#ex-cut").textContent = cutHint(o.size); };
       $$("#ex-size [data-size]").forEach((b) => (b.onclick = () => {
         o.size = b.dataset.size; try { localStorage.setItem("tp.printSize", o.size); } catch (_) {}
         $$("#ex-size .filter").forEach((x) => x.classList.toggle("on", x === b)); sync();
@@ -754,6 +772,8 @@ async function renderRecipeEditor(slug) {
     <h1 class="title">Edit recipe</h1>
     <div class="group"><div class="field"><input class="full" id="ed-name" value="${esc(rec.name)}" placeholder="Recipe name"></div>
       <div class="field"><textarea class="full-area" id="ed-desc" rows="2" placeholder="Short description (optional)">${esc(rec.description)}</textarea></div></div>
+    ${(state.cfg.settings.categories || []).length ? `<div class="group-label">Categories</div>
+    <div class="ed-cats" id="ed-cats" role="group" aria-label="Categories">${state.cfg.settings.categories.map((c) => `<button type="button" class="filter sm ${(rec.categories || []).includes(c) ? "on" : ""}" data-cat="${esc(c)}" aria-pressed="${(rec.categories || []).includes(c)}">${esc(c)}</button>`).join("")}</div>` : ""}
     <div class="group-label">Details</div>
     <div class="group">
       <div class="field"><label>Servings</label><input type="number" id="ed-serv" min="0" step="0.5" value="${esc(rec.servings || "")}"></div>
@@ -766,15 +786,24 @@ async function renderRecipeEditor(slug) {
     <p class="hint">One ingredient per line, amount first (“2 cups flour”), so it scales. Start a line with # for a heading, like “# Sauce”.</p>
     <div class="group-label">Instructions</div>
     <div class="group"><textarea class="full-area" id="ed-steps" rows="${Math.min(20, (+rec.steps.length || 0) * 3 + 3)}" placeholder="Leave a blank line between steps">${esc(stepText)}</textarea></div>
-    <p class="hint">Leave a blank line between steps.</p>
+    <p class="hint">Leave a blank line between steps.${rec.original ? ` <button type="button" class="link-btn inline" id="ed-orig">Restore original text</button>` : ""}</p>
     <div style="height:18px"></div><button class="btn red" id="ed-del">${ic("trash")} Delete recipe</button><div style="height:30px"></div>`;
   const back = () => (history.length > 1 ? history.back() : openRecipe(slug));
   $("#ed-x").onclick = back;
+  $$("#ed-cats [data-cat]").forEach((b) => (b.onclick = () => { const on = !b.classList.contains("on"); b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); }));
+  $("#ed-orig") && ($("#ed-orig").onclick = () => {
+    const o = rec.original;
+    $("#ed-ing").value = (o.ingredients || []).join("\n");
+    $("#ed-steps").value = (o.steps || []).join("\n\n");
+    if (o.description) $("#ed-desc").value = o.description;
+    toast("Original text restored. Save to keep it.");
+  });
   $("#ed-save").onclick = async (e) => {
     const btn = e.currentTarget; btn.disabled = true;
     const body = { name: $("#ed-name").value, description: $("#ed-desc").value, servings: $("#ed-serv").value,
       prep_minutes: $("#ed-prep").value, cook_minutes: $("#ed-cook").value, total_minutes: $("#ed-total").value,
       ingredients: $("#ed-ing").value.split("\n"), steps: $("#ed-steps").value.split(/\n\s*\n/) };
+    if ($("#ed-cats")) body.categories = $$("#ed-cats [data-cat].on").map((b) => b.dataset.cat);
     try { const r = await api("PUT", `/api/recipe/${encodeURIComponent(slug)}`, body); toast("Saved"); rstate.list = null; location.replace("#recipe/" + encodeURIComponent(r.slug)); }
     catch (x) { fail(x); btn.disabled = false; }
   };
