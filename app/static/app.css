@@ -1140,3 +1140,16 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .badge2.blue{background:var(--pale,#DDF5E9);color:var(--forest,#176B50)}
 :root[data-theme="dark"] .badge2.blue{background:#18392D;color:#32CC95}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .badge2.blue{background:#18392D;color:#32CC95}}
+
+/* ---------------------------------------------------------------- how long it takes */
+.mp.eta-chip{font:inherit;cursor:pointer;color:inherit}
+.eta-big{display:flex;flex-direction:column;gap:4px;margin:4px 2px 10px}
+.eta-big b{font-family:var(--serif);font-weight:800;font-size:26px;color:var(--title)}
+.eta-big span{color:var(--sub);font-size:14.5px;line-height:1.4}
+.eta-parts{padding:4px 0}
+.eta-row{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:10px 14px;border-top:.5px solid var(--sep)}
+.eta-row:first-child{border-top:0}
+.eta-row small{grid-column:1/-1;color:var(--sub);font-size:13px}
+.eat-form{display:flex;gap:8px;align-items:center;padding:6px 8px}
+.eat-form input{font:inherit;padding:6px 8px;border-radius:10px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
+.start-by{font-weight:600;color:var(--title)}

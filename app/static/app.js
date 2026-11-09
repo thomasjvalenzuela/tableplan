@@ -124,6 +124,8 @@ function toast(msg, actionLabel, action) {
   toastTimer = setTimeout(() => t.classList.remove("on"), actionLabel ? 6000 : 3200);
 }
 const fail = (e) => toast(e.message || String(e));
+// "17:40" → "5:40" (the board is compact; AM/PM only when it's not the evening)
+const clock12 = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(t || ""); if (!m) return t || ""; const h = +m[1]; return `${((h + 11) % 12) + 1}:${m[2]}${h < 12 ? " AM" : ""}`; };
 
 function openSheet(title, html, { onMount, wide } = {}) {
   closeSheet(true);
@@ -443,7 +445,7 @@ async function drawBoard() {
     return `<div class="bcard ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}" data-type="${esc(e.entry_type)}" tabindex="0" role="button" aria-label="${esc(cap(e.entry_type))}: ${esc(entryName(e))}, ${esc(dayLong(iso))}${e.cooked ? ", cooked" : ""}. Open recipe">
       <div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}${e.cooked ? `<span class="cooked-badge" aria-hidden="true">✓</span>` : ""}</div>
       <div class="main">${showType ? `<div class="mtype">${esc(cap(e.entry_type))}</div>` : ""}<div class="a">${esc(entryName(e))}</div>
-        <div class="b">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} min</span>` : ""}${miss ? `<span class="pill soon miss-chip">Missing ${esc(miss)}</span>` : ""}${e.cooked ? `<span class="pill ok">Cooked</span>` : r.slug ? `<button class="cook-pill" data-cook="${esc(e.id)}" aria-label="Mark ${esc(entryName(e))} as cooked">✓ Cook</button>` : ""}</div></div>
+        <div class="b">${e.start_by && !e.cooked && iso >= isoDate(today()) ? `${ic("clock")}<span class="start-by" title="Start by ${esc(clock12(e.start_by))} to eat at ${esc(clock12(e.eat_at))}">Start ${esc(clock12(e.start_by))}</span>` : r.eta ? `${ic("clock")}<span>${esc(r.eta.label)}</span>` : r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} min</span>` : ""}${miss ? `<span class="pill soon miss-chip">Missing ${esc(miss)}</span>` : ""}${e.cooked ? `<span class="pill ok">Cooked</span>` : r.slug ? `<button class="cook-pill" data-cook="${esc(e.id)}" aria-label="Mark ${esc(entryName(e))} as cooked">✓ Cook</button>` : ""}</div></div>
       <button class="bmore" data-more="${esc(e.id)}" aria-label="More options for ${esc(entryName(e))}">${ic("more")}</button></div>`;
   };
   let html = "";
@@ -684,6 +686,7 @@ function entryMenu(anchor, e) {
   if (!e) return;
   const main = () => `<button data-act="open" ${e.recipe?.slug ? "" : "disabled"}>${ic("book")} Open recipe</button>
     <button data-act="swap">${ic("shuffle")} Swap</button><button data-act="move">${ic("cal")} Move to…</button>
+    <button data-act="eat">${ic("clock")} Eat at ${esc(e.eat_at ? clock12(e.eat_at) : "…")}</button>
     <button data-act="rm" class="red">${ic("trash")} Remove</button>`;
   popover(anchor, main(), (el, p) => {
     const bind = () => {
@@ -692,6 +695,14 @@ function entryMenu(anchor, e) {
         if (a === "open") { closePop(); openRecipe(e.recipe.slug); }
         if (a === "swap") { closePop(); openPicker(e.date, e.entry_type, e); }
         if (a === "rm") { closePop(); removeEntry(e); }
+        if (a === "eat") {
+          el.innerHTML = `<div class="pop-h">When do you want to eat ${esc(entryName(e))}?</div>
+            <form class="eat-form"><input type="time" id="eat-t" value="${esc(e.eat_at || "18:30")}" step="300" aria-label="Eat at"><button class="btn small" type="submit">Save</button></form>
+            ${e.eat_at_custom ? `<button data-reset-eat>Use my usual ${esc(e.entry_type)} time</button>` : ""}`;
+          const save = async (t) => { closePop(); try { await api("PUT", `/api/plan/${enc(e.id)}/eat-at`, { eat_at: t }); renderMeals(); } catch (x) { fail(x); } };
+          $(".eat-form", el).onsubmit = (ev) => { ev.preventDefault(); save($("#eat-t", el).value || null); };
+          $("[data-reset-eat]", el) && ($("[data-reset-eat]", el).onclick = () => save(null));
+        }
         if (a === "move") {
           const H = horizon(), plan = state.plan?.entries || [];
           el.innerHTML = `<div class="pop-h">Move ${esc(entryName(e))} to</div><div class="pop-scroll">${Array.from({ length: H }, (_, i) => isoDate(addDays(today(), i))).filter((d) => d !== e.date).map((d) => {
@@ -1750,12 +1761,14 @@ async function openSettings() {
       <div class="group">
         <div class="field"><label>Recipe style</label><select id="st-style"><option value="classic" ${s.recipe_style !== "steps" ? "selected" : ""}>Classic</option><option value="steps" ${s.recipe_style === "steps" ? "selected" : ""}>Step-by-step</option></select></div>
         <div class="field"><label>Stovetop</label><select id="st-stove">${["gas", "electric", "induction"].map((v) => `<option value="${v}" ${s.stove === v ? "selected" : ""}>${cap(v)}</option>`).join("")}</select></div>
-        <div class="field"><label>Oven</label><select id="st-oven">${[["conventional", "Conventional"], ["convection", "Convection / fan"]].map(([v, l]) => `<option value="${v}" ${s.oven === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div class="field"><label>Oven</label><select id="st-oven">${[["conventional", "Conventional"], ["convection", "Convection / fan"], ["air_fryer", "Air fryer"], ["toaster_oven", "Toaster oven"]].map(([v, l]) => `<option value="${v}" ${s.oven === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
         <div class="field"><label>Temperatures</label><select id="st-tu"><option value="F" ${s.temp_unit !== "C" ? "selected" : ""}>°F</option><option value="C" ${s.temp_unit === "C" ? "selected" : ""}>°C</option></select></div>
       </div>
       <p class="hint"><b>Classic</b> lists ingredients, then instructions. <b>Step-by-step</b> puts each ingredient inside the step that uses it, adds preheating at the right moment, and gives you timers.</p>
       <div class="group-label">Planning</div>
       <div class="group">
+        ${[["breakfast", "Breakfast"], ["lunch", "Lunch"], ["dinner", "Dinner"]].map(([k, l]) => `<div class="field"><label for="st-eat-${k}">${l} at${k === "dinner" ? '<small class="lh">The plan shows when to start cooking so it’s ready on time.</small>' : ""}</label><input type="time" step="300" id="st-eat-${k}" data-eat="${k}" value="${esc((s.eat_times || {})[k] || "")}"></div>`).join("")}
+        <div class="field"><label>Tell me when to start cooking<small class="lh">A message at the start time for today’s planned meals.</small></label><label class="toggle"><input type="checkbox" id="st-startrem" ${s.start_reminder ? "checked" : ""}><span></span></label></div>
         <div class="field"><label>Plan ahead<small class="lh">How many days the Plan board shows and keeps filled.</small></label><select id="st-hz">${[7, 14, 21, 28].map((v) => `<option value="${v}" ${(+s.plan_horizon_days || 14) === v ? "selected" : ""}>${v} days</option>`).join("")}</select></div>
         <div class="field"><label>Remind me before the plan runs out<small class="lh">A message when only this many planned days are left.</small></label><select id="st-rem">${[[0, "Off"], [1, "1 day"], [2, "2 days"], [3, "3 days"], [5, "5 days"], [7, "7 days"]].map(([v, l]) => `<option value="${v}" ${(s.plan_reminder_days ?? 3) === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       </div>
@@ -1828,6 +1841,8 @@ async function openSettings() {
     $("#st-ci").onchange = (e) => save({ pantry_check_days: +e.target.value });
     $("#st-hz").onchange = async (e) => { await save({ plan_horizon_days: +e.target.value }); if (state.tab === "meals") replan(); };
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
+    $$("[data-eat]").forEach((i) => (i.onchange = () => { const et = { ...(s.eat_times || {}) }; if (i.value) et[i.dataset.eat] = i.value; else delete et[i.dataset.eat]; save({ eat_times: et }); }));
+    $("#st-startrem").onchange = (e) => { save({ start_reminder: e.target.checked }); if (e.target.checked && !anyChannel()) toast("Set up Notifications so reminders can reach you", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg)); };
     $("#st-stores").onclick = () => storesManager(draw);
     $("#st-theme").onchange = (e) => { setTheme(e.target.value); save({ theme: e.target.value }); };
     bindDanger();

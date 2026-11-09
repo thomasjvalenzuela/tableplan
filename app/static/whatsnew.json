@@ -1,5 +1,13 @@
 [
  {
+  "id": "how-long",
+  "date": "2026-11-12",
+  "icon": "clock",
+  "color": "green",
+  "title": "How long it really takes",
+  "text": "Every recipe shows a start-to-finish time and how much of it is hands-on. Tap it for the breakdown. Your plan says when to start cooking to eat on time, and TablePlan learns your pace from cook mode."
+ },
+ {
   "id": "cook-timers",
   "date": "2026-11-12",
   "icon": "clock",

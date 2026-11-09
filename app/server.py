@@ -29,6 +29,7 @@ import json
 import mimetypes
 import os
 import random
+import statistics
 import re
 import smtplib
 import sqlite3
@@ -112,7 +113,9 @@ DEFAULT_SETTINGS = {
     "expiry_alert_hour": 8,
     "recipe_style": "classic",        # classic | steps
     "stove": "electric",              # gas | electric | induction
-    "oven": "conventional",           # conventional | convection
+    "oven": "conventional",           # conventional | convection | air_fryer | toaster_oven
+    "eat_times": {"breakfast": "08:00", "lunch": "12:30", "dinner": "18:30"},   # when we usually eat, per meal
+    "start_reminder": False,          # message me when it's time to start cooking
     "temp_unit": "F",                 # F | C
     "ai_budget": 0,                   # monthly USD; 0 = no alert
     "pantry_check_days": 7,           # remind to review the pantry every N days (0 = off)
@@ -195,6 +198,11 @@ CREATE TABLE IF NOT EXISTS recipe_cache (
   id TEXT PRIMARY KEY, updated TEXT, foods TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS cook_times (
+  id INTEGER PRIMARY KEY, recipe_id TEXT NOT NULL, actual_min REAL NOT NULL, estimate_min REAL NOT NULL, at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_cook_times_recipe ON cook_times(recipe_id);
+CREATE TABLE IF NOT EXISTS plan_eat_at (entry_id TEXT PRIMARY KEY, eat_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS guided_cache (
   recipe_id TEXT, profile TEXT, updated TEXT, source TEXT, data TEXT, created_at TEXT,
   PRIMARY KEY (recipe_id, profile)
@@ -635,6 +643,19 @@ def whatsnew_ids():
         return []
 
 
+def _v_eat_times(v):
+    if not isinstance(v, dict) or len(v) > 10:
+        raise ValueError("must map meal types to times")
+    out = {}
+    for k, t in v.items():
+        if k not in ENTRY_ORDER:
+            raise ValueError(f"has an unknown meal type {str(k)[:20]}")
+        if not (isinstance(t, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t)):
+            raise ValueError("times look like 18:30")
+        out[k] = t
+    return out
+
+
 def _v_categories(v):
     if not isinstance(v, list) or len(v) > MAX_CATEGORIES:
         raise ValueError(f"must be a list of at most {MAX_CATEGORIES} names")
@@ -683,7 +704,9 @@ SETTINGS_VALIDATORS = {
     "expiry_alert_hour": _v_int(0, 23),
     "recipe_style": _v_enum("classic", "steps"),
     "stove": _v_enum("gas", "electric", "induction"),
-    "oven": _v_enum("conventional", "convection"),
+    "oven": _v_enum("conventional", "convection", "air_fryer", "toaster_oven"),
+    "eat_times": _v_eat_times,
+    "start_reminder": _v_bool,
     "temp_unit": _v_enum("F", "C"),
     "ai_budget": _v_num(0, 100_000),
     "pantry_check_days": _v_int(0, 365),
@@ -1602,6 +1625,7 @@ from native import units as n_units  # noqa: E402
 from native import foods as n_foods  # noqa: E402
 from native import plu as n_plu  # noqa: E402
 from native import timers as n_timers  # noqa: E402
+from native import eta as n_eta  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -2055,6 +2079,104 @@ def native_api(method, path, body=None, multipart=None):
 
 
 
+# ============================================================ how long a recipe takes (estimate, learned from real cooks)
+
+def _eta_stated(r):
+    sec = lambda k: round(int(r.get(k) or 0) / 60) or None   # noqa: E731
+    return {"prep": sec("prepTimeSeconds"), "cook": sec("performTimeSeconds"), "total": sec("totalTimeSeconds")}
+
+
+def eta_base(r, oven=None, c=None, store=True):
+    """The estimate for a raw recipe (as stored), cached in extras.eta until the recipe or the oven setting changes."""
+    oven = oven or get_settings().get("oven") or "conventional"
+    extras = r.get("extras") if isinstance(r.get("extras"), dict) else {}
+    cached = extras.get("eta")
+    stamp = [r.get("dateUpdated") or "", oven, 1]
+    if isinstance(cached, dict) and cached.get("stamp") == stamp:
+        return cached
+    lines = [_ing_line(g) for g in r.get("recipeIngredient") or [] if _ing_line(g)]
+    steps = [(st.get("text") or "").strip() for st in r.get("recipeInstructions") or [] if (st.get("text") or "").strip()]
+    if not lines and not steps:
+        return None
+    eta = {**n_eta.estimate(lines, steps, oven, _eta_stated(r)), "stamp": stamp}
+    if store and NATIVE and r.get("id"):
+        try:
+            own = c is None
+            cx = db() if own else None
+            conn = cx.__enter__() if own else c
+            row = conn.execute("SELECT data FROM recipes WHERE id=?", (r["id"],)).fetchone()
+            if row:   # written in place: saving an estimate isn't an edit (dateUpdated stays)
+                data = json.loads(row["data"])
+                if (data.get("dateUpdated") or "") == stamp[0]:
+                    ex = data.get("extras") if isinstance(data.get("extras"), dict) else {}
+                    data["extras"] = {**ex, "eta": eta}
+                    conn.execute("UPDATE recipes SET data=? WHERE id=?", (json.dumps(data), r["id"]))
+            if own:
+                cx.__exit__(None, None, None)
+        except sqlite3.Error as e:
+            log("estimate not stored:", e)
+    return eta
+
+
+_speed = {"at": 0, "f": 1.0}
+
+
+def household_speed():
+    if time.time() - _speed["at"] > 600:
+        with db() as c:
+            ratios = [r["actual_min"] / r["estimate_min"] for r in c.execute(
+                "SELECT actual_min, estimate_min FROM cook_times WHERE estimate_min > 0 ORDER BY id DESC LIMIT 200")]
+        _speed.update(at=time.time(), f=n_eta.speed_factor(ratios))
+    return _speed["f"]
+
+
+def eta_view(recipe_id, base):
+    """What to show: the estimate, the recipe's own times, and what this household usually takes."""
+    if not base:
+        return None
+    with db() as c:
+        mine = [r["actual_min"] for r in c.execute("SELECT actual_min FROM cook_times WHERE recipe_id=? ORDER BY id DESC LIMIT 10",
+                                                     (recipe_id,))]
+    v = {k: base.get(k) for k in ("total", "active", "passive", "approx", "long", "parts", "stated", "based_on")}
+    speed = household_speed()
+    if len(mine) >= 2:
+        usual = round(statistics.median(mine))
+        v.update(usual=usual, shown=usual, basis="you")
+    else:
+        shown = base["total"] if base.get("based_on") == "recipe" else round(base["total"] * speed)
+        v.update(shown=max(1, shown), speed=round(speed, 2) if abs(speed - 1) > 0.04 else None, basis=base.get("based_on"))
+    v["active_shown"] = min(v["shown"], round(base["active"] * (speed if len(mine) < 2 and base.get("based_on") != "recipe" else 1)))
+    v["label"] = n_eta.label({"shown": v["shown"], "active": v["active_shown"], "long": base.get("long")})
+    return v
+
+
+def record_cook_time(recipe_id, minutes, base):
+    """Remember how long a cook actually took (cook mode start to Done), unless it's far off the estimate."""
+    try:
+        minutes = float(minutes)
+    except (TypeError, ValueError):
+        return False
+    if not base or not n_eta.keep_session(minutes, base["total"]):
+        return False
+    with db() as c:
+        c.execute("INSERT INTO cook_times(recipe_id, actual_min, estimate_min, at) VALUES (?,?,?,?)",
+                  (recipe_id, round(minutes, 1), base["total"], datetime.now().isoformat(timespec="seconds")))
+    _speed["at"] = 0
+    return True
+
+
+def start_by(eat_at, minutes, day):
+    """The clock time to start cooking to eat at eat_at ("18:30") on day, in the server's time zone. Rounded down to 5 min."""
+    try:
+        h, m = (int(x) for x in eat_at.split(":"))
+    except (ValueError, AttributeError):
+        return None
+    eat = datetime(day.year, day.month, day.day, h, m)
+    st = eat - timedelta(minutes=int(minutes or 0))
+    st -= timedelta(minutes=st.minute % 5)
+    return st
+
+
 def recipe_pool(refresh=False):
     with _recipe_lock:
         if refresh or time.time() - _recipe_cache["at"] > 120:
@@ -2078,6 +2200,20 @@ def recipe_pool(refresh=False):
                     "favorite": r["id"] in favs,
                 })
             if NATIVE:
+                oven = get_settings().get("oven") or "conventional"
+                raw = {r["id"]: r for r in data.get("items", [])}
+                with db() as c:
+                    for it in items:
+                        r = raw.get(it["id"]) or {}
+                        ex = r.get("extras") if isinstance(r.get("extras"), dict) else {}
+                        base = ex.get("eta") if isinstance(ex.get("eta"), dict) and ex["eta"].get("stamp") == [r.get("dateUpdated") or "", oven, 1] else None
+                        if base is None:
+                            full = n_recipes.get(c, it["id"])
+                            base = eta_base(full, oven, c) if full else None
+                        if base:
+                            v = eta_view(it["id"], base)
+                            it["eta"] = {k: v[k] for k in ("shown", "active_shown", "label", "long", "approx", "basis")}
+                            it["eta_min"] = v["shown"]
                 rated = diary_ratings()
                 for it in items:
                     if it["id"] in rated:
@@ -2257,6 +2393,9 @@ def _pick(pool, d, day_index, no_repeat, used, used_this_plan, boost, exclude=()
             w *= 1 + 2.5 * boost[r["id"]]
         if r["id"] in used_this_plan:
             w *= 0.3
+        mins = r.get("eta_min") or r.get("minutes")
+        if mins and d.weekday() < 4:   # busy weekdays: quick meals come up more, long ones less
+            w *= 1.3 if mins <= 35 else 0.6 if mins > 75 else 1.0
         weights.append(w)
     return random.choices(candidates, weights=weights, k=1)[0]
 
@@ -4059,6 +4198,7 @@ def recipe_detail(slug):
         "link": recipe_link(r.get("slug")), "updated": r.get("dateUpdated") or r.get("updatedAt") or "",
         "unparsed": 0, "total_minutes": round(int(r.get("totalTimeSeconds") or 0) / 60) or None,
         "missing": recipe_missing(r["id"]), "cook_entry": cook_entry_for(r["id"]),
+        "eta": eta_view(r["id"], eta_base(r)),
         "original": _original(r),
     }
 
@@ -6077,13 +6217,37 @@ def enrich_plan(entries):
     except ApiError:
         pool = {}
     counts = missing_counts()
+    eat_times = get_settings().get("eat_times") or {}
+    with db() as c:
+        own = {r["entry_id"]: r["eat_at"] for r in c.execute("SELECT * FROM plan_eat_at")}
     for e in entries:
         r = e.get("recipe")
         if r:
-            r["minutes"] = (pool.get(r.get("id")) or {}).get("minutes")
+            p = pool.get(r.get("id")) or {}
+            r["minutes"] = p.get("minutes")
+            r["eta"] = p.get("eta")
             r.setdefault("image_v", "")
         e["missing"] = counts.get(str(e.get("id")), 0) if r else 0
+        e["eat_at"] = own.get(str(e.get("id"))) or eat_times.get(e.get("entry_type"))
+        e["eat_at_custom"] = str(e.get("id")) in own
+        mins = ((r or {}).get("eta") or {}).get("shown") or (r or {}).get("minutes")
+        st = start_by(e["eat_at"], mins, parse_date(e.get("date"))) if e["eat_at"] and mins and parse_date(e.get("date")) else None
+        e["start_by"] = st.strftime("%H:%M") if st else None
     return entries
+
+
+def plan_eat_at(entry_id, b):
+    """PUT /api/plan/{id}/eat-at {eat_at: "19:00" | null}: this meal's own eat time (null: back to the usual)."""
+    t = (b or {}).get("eat_at")
+    with db() as c:
+        if t in (None, ""):
+            c.execute("DELETE FROM plan_eat_at WHERE entry_id=?", (str(entry_id),))
+        else:
+            if not (isinstance(t, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t)):
+                raise ApiError(400, "Times look like 18:30.")
+            c.execute("INSERT INTO plan_eat_at(entry_id, eat_at) VALUES (?,?) ON CONFLICT(entry_id) DO UPDATE SET eat_at=excluded.eat_at",
+                      (str(entry_id), t))
+    return {"ok": True}
 
 
 def plan_entry(entry_id, day):
@@ -6212,7 +6376,8 @@ def plan_arrange(b):
     if not dates:
         return {"assignments": [], "ai": False, "dropped": len(recs), "empty_days": 0}
     pool = {r["id"]: r for r in recipe_pool()}
-    info = [{"id": r["id"], "name": r.get("name") or "", "minutes": (pool.get(r["id"]) or {}).get("minutes") or 0,
+    info = [{"id": r["id"], "name": r.get("name") or "",
+             "minutes": (pool.get(r["id"]) or {}).get("eta_min") or (pool.get(r["id"]) or {}).get("minutes") or 0,
              "rating": (pool.get(r["id"]) or {}).get("rating") or 0,
              "ingredients": [_ing_line(g) for g in r.get("recipeIngredient") or []][:25]} for r in recs]
     n_empty = len(dates)
@@ -6389,8 +6554,10 @@ def recipe_cooked(slug, b):
                                                    token, now)).lastrowid
         if NATIVE:
             sync_plan_list(c)   # the meal's allocations are spent; the rest of the plan re-claims what's left
+    timed = record_cook_time(rec["id"], b.get("cook_minutes"), eta_base(rec, store=False)) if b.get("cook_minutes") is not None else False
     return {"ok": True, "deducted": deducted, "unknown": sorted(set(unknown), key=str.lower),
-            "finished": sorted(set(finished), key=str.lower), "undo_token": token, "plan_id": plan_id, "diary_id": did}
+            "finished": sorted(set(finished), key=str.lower), "undo_token": token, "plan_id": plan_id, "diary_id": did,
+            "timed": timed}
 
 
 # ============================================================ cooking diary (cooked meals, ratings, notes, photos)
@@ -7556,6 +7723,23 @@ def notify_update():
         log("update notice not sent:", e.message)
 
 
+def notify_start_cooking(now):
+    for e in enrich_plan(get_plans(now.date(), now.date())):
+        if e.get("cooked") or e.get("skipped") or not e.get("start_by") or not e.get("recipe"):
+            continue
+        st = start_by(e["eat_at"], ((e["recipe"].get("eta") or {}).get("shown") or e["recipe"].get("minutes")), now.date())
+        if not st or not (st <= now < st + timedelta(minutes=20)):
+            continue
+        flag = f"start_nudge_{e['id']}_{iso(now.date())}"
+        if get_internal(flag):
+            continue
+        set_internal(flag, True)
+        name = e["recipe"].get("name") or "dinner"
+        deliver({"subject": f"🍳 Time to start {name}",
+                 "text": f"Start {name} now to eat at {e['eat_at']}. It takes about {e['recipe']['eta']['label'].lstrip('≈ ') if e['recipe'].get('eta') else str(e['recipe'].get('minutes')) + ' min'}.",
+                 "html": email_wrap(f"<p>Start <b>{html.escape(name)}</b> now to eat at {html.escape(e['eat_at'])}.</p>"), "files": []})
+
+
 def scheduler():
     while True:
         try:
@@ -7592,6 +7776,12 @@ def scheduler():
                     log("nightly backup saved")
                 except Exception as e:
                     log("nightly backup failed:", e)
+            # "Time to start cooking" (opt-in): today's planned meals, at their start-by time
+            if s.get("start_reminder") and any(channels_ready().values()):
+                try:
+                    notify_start_cooking(now)
+                except ApiError as e:
+                    log("start-cooking reminder not sent:", e.message)
             # "Your meal plan runs out" reminder (once per run-out)
             try:
                 notify_plan_runout(now)
@@ -8262,6 +8452,9 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.fullmatch(r"/api/plan/(\d{1,15})", path)
         if m == "DELETE" and mm:
             return self.send(200, plan_delete(int(mm.group(1))))
+        mm = re.fullmatch(r"/api/plan/(\d{1,15})/eat-at", path)
+        if m == "PUT" and mm:
+            return self.send(200, plan_eat_at(int(mm.group(1)), self.body()))
         mm = re.fullmatch(r"/api/plan/(\d{1,15})/skip", path)
         if m == "POST" and mm:
             return self.send(200, plan_skip(int(mm.group(1)), self.body().get("skipped", True) is not False))

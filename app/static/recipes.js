@@ -59,7 +59,7 @@ async function renderRecipes() {
 function drawRecipeChips() {
   const cats = (state.cfg?.settings?.categories || []).filter((c) => rstate.list.some((r) => (r.categories || []).includes(c)));
   const uncat = rstate.list.some((r) => !(r.categories || []).length) && cats.length;
-  const chips = [["all", "All"], ["fav", "♥ Favorites"], ...cats.map((c) => ["cat:" + c, c]), ...(uncat ? [["none", "Uncategorized"]] : [])];
+  const chips = [["all", "All"], ["fav", "♥ Favorites"], ["quick", "Under 30 min"], ...cats.map((c) => ["cat:" + c, c]), ...(uncat ? [["none", "Uncategorized"]] : [])];
   if (!chips.some(([k]) => k === rstate.filter)) rstate.filter = "all";
   $("#rchips").innerHTML = chips.map(([k, l]) => `<button class="filter ${rstate.filter === k ? "on" : ""}" data-f="${esc(k)}">${esc(l)}</button>`).join("");
   $$("#rchips [data-f]").forEach((b) => (b.onclick = () => { rstate.filter = b.dataset.f; $$("#rchips .filter").forEach((x) => x.classList.toggle("on", x === b)); drawRecipeList(); }));
@@ -75,7 +75,7 @@ function drawRecipeList() {
   if (!box || !rstate.list) return;
   const q = rstate.q.trim().toLowerCase(), f = rstate.filter;
   const list = rstate.shown = rstate.list.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.tags.some((x) => x.toLowerCase().includes(q))) &&
-    (f === "all" || (f === "fav" ? r.favorite : f === "none" ? !(r.categories || []).length : f.startsWith("cat:") ? (r.categories || []).includes(f.slice(4)) : true)));
+    (f === "all" || (f === "fav" ? r.favorite : f === "quick" ? +(r.eta_min || r.minutes || 999) <= 30 : f === "none" ? !(r.categories || []).length : f.startsWith("cat:") ? (r.categories || []).includes(f.slice(4)) : true)));
   drawSelBar();
   if (!rstate.list.length) {
     box.innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>`;
@@ -85,7 +85,7 @@ function drawRecipeList() {
   const sel = rstate.sel;
   const mark = (r) => (sel ? `<span class="selc ${sel.has(r.slug) ? "on" : ""}" aria-hidden="true">${sel.has(r.slug) ? ic("check") : ""}</span>` : "");
   const pressed = (r) => (sel ? `aria-pressed="${sel.has(r.slug)}"` : "");
-  const meta = (r) => `<div class="meta">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : ""}${r.minutes && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span class="heart-s">♥</span>' : ""}</div>`;
+  const meta = (r) => `<div class="meta">${r.eta ? `${ic("clock")}<span>${esc(r.eta.label)}</span>` : r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : ""}${(r.eta || r.minutes) && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span class="heart-s">♥</span>' : ""}</div>`;
   box.innerHTML = `<div class="group recipe-list ${sel ? "selecting" : ""}">${list.map((r, i) => {
     const img = recipeImg(r);
     return `<button class="row ${sel && sel.has(r.slug) ? "sel" : ""}" data-slug="${esc(r.slug)}" data-i="${i}" ${pressed(r)}>${mark(r)}<div class="thumb" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
@@ -328,7 +328,7 @@ async function renderRecipe(slug) {
       <h1>${esc(rec.name)}</h1>
       ${src ? `<div class="rd-src">${src}</div>` : ""}
       <div class="rd-meta">
-        ${rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
+        ${rec.eta ? `<button class="mp eta-chip" id="rd-eta" aria-label="How long it takes: ${esc(rec.eta.label)}. Show the breakdown">${ic("clock")} ${esc(rec.eta.label)}</button>` : rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
         <span class="mp">${ic("chef")} ${esc(rec.difficulty)}</span>
         <span class="mp stepper">${ic("users")}<button data-s="-1" aria-label="Fewer servings">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More servings">+</button></span>
       </div>
@@ -359,6 +359,7 @@ async function renderRecipe(slug) {
   if ($("#how")) bindHowWasIt(state.justCooked.diary_id, () => renderRecipe(slug));
   if (state.diaryFocus) { state.diaryFocus = false; setTimeout(() => $("#rd-diary")?.scrollIntoView({ block: "start" }), 50); }
   $("#rd-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
+  $("#rd-eta") && ($("#rd-eta").onclick = () => openEta(rec));
   $("#rd-fav").onclick = async (e) => {
     const on = !R.rec.favorite, btn = e.currentTarget;
     try { await api("POST", `/api/recipe/${encodeURIComponent(slug)}/favorite`, { favorite: on }); R.rec.favorite = on; btn.classList.toggle("on", on); btn.textContent = on ? "♥" : "♡"; } catch (x) { fail(x); }
@@ -745,7 +746,7 @@ function drawCook() {
     e.currentTarget.disabled = true;
     const rec = R.rec, ce = rec && rec.cook_entry;
     if (!rec) { endCook(true); return toast("Enjoy your meal! 🍽️"); }
-    const body = { servings: R.servings };
+    const body = { servings: R.servings, cook_minutes: Math.round((Date.now() - (C.startedAt || Date.now())) / 6000) / 10 };
     if (ce && ce.today) body.plan_id = ce.id;
     let r;
     try { r = await markCooked(rec.slug, body); } catch (x) { endCook(true); return fail(x); }
@@ -1420,4 +1421,21 @@ async function renderRecipeEditor(slug) {
       $("#dd-yes").onclick = async () => { try { await api("DELETE", `/api/recipe/${encodeURIComponent(slug)}`); closeSheet(true); toast("Recipe deleted"); go("recipes"); } catch (x) { fail(x); } };
     },
   });
+}
+
+// ------------------------------------------------------------------ how long it takes (breakdown)
+function openEta(rec) {
+  const e = rec.eta; if (!e) return;
+  const row = (l, v, note) => `<div class="eta-row"><span>${esc(l)}</span><b>${esc(v)}</b>${note ? `<small>${esc(note)}</small>` : ""}</div>`;
+  const parts = (e.parts || []).map((p) => p.k === "preheat" ? row("Preheat", `${p.min} min`, p.overlaps ? "overlaps your prep" : `adds ${p.adds} min after prep`)
+    : p.k === "overlap" ? row(p.label, `${p.min} min`, "hands-on steps done while something cooks")
+    : row(p.label, `${p.min} min`, p.active === false ? "you can step away" : "")).join("");
+  const st = e.stated || {};
+  const says = st.total || st.prep || st.cook ? `Recipe says ${[st.total ? `${st.total} min total` : "", st.prep ? `${st.prep} prep` : "", st.cook ? `${st.cook} cook` : ""].filter(Boolean).join(" · ")}` : "";
+  openSheet("How long it takes", `<div class="eta-big"><b>${esc(e.label)}</b>
+      <span>${e.basis === "you" ? `Usually takes you about ${esc(e.usual)} min (from your last cooks)` : e.basis === "recipe" ? "Using the recipe's own total time" : "Estimated from the steps"}${e.approx ? " · approximate: some steps say “until …” without a time" : ""}</span></div>
+    ${says ? `<p class="hint">${esc(says)}</p>` : ""}
+    <div class="group eta-parts">${parts}</div>
+    ${(e.long || []).length ? `<p class="hint">Plus ${esc(e.long.join(", ").toLowerCase())} of waiting (marinating, chilling or rising), not counted above.</p>` : ""}
+    <p class="hint">Estimated: prep counts about a minute per ingredient plus knife work, the oven preheats while you prep, and stated times start at the low end.${e.speed ? ` Adjusted for your kitchen: you usually take ${Math.round(e.speed * 100)}% of the estimate.` : ""} Cooking in cook mode teaches TablePlan how long things really take you.</p>`);
 }
