@@ -120,6 +120,8 @@ DEFAULT_SETTINGS = {
     "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
     "polish_imports": True,           # AI rewrites imported steps clearly (never amounts); needs an OpenAI key
     "whatsnew_seen": [],              # ids from static/whatsnew.json already shown (on any device)
+    "staples": ["Table salt", "Kosher salt", "Black pepper", "Water", "Olive oil", "Vegetable oil", "Cooking spray",
+                "Granulated sugar", "All-purpose flour", "Baking soda", "Baking powder"],   # "always have": never on the list
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
                    "Drink"],          # recipe categories, in display order
 }
@@ -579,6 +581,21 @@ def _v_ids(max_items):
     return f
 
 
+def _v_names(v, max_items, max_len):
+    if not isinstance(v, list) or len(v) > max_items:
+        raise ValueError(f"must be a list of at most {max_items} names")
+    out = []
+    for x in v:
+        if not isinstance(x, str):
+            raise ValueError("names must be text")
+        x = " ".join(x.split())
+        if not 1 <= len(x) <= max_len:
+            raise ValueError(f"names must be 1-{max_len} characters")
+        if x.lower() not in (y.lower() for y in out):
+            out.append(x)
+    return out
+
+
 def whatsnew_ids():
     try:
         with open(os.path.join(STATIC_DIR, "whatsnew.json"), encoding="utf-8") as f:
@@ -645,6 +662,7 @@ SETTINGS_VALIDATORS = {
     "polish_imports": _v_bool,
     "categories": _v_categories,
     "whatsnew_seen": _v_ids(500),
+    "staples": lambda v: _v_names(v, 100, 40),
 }
 
 
@@ -1312,10 +1330,25 @@ def pantry_json(c, row):
         "days_left": (exp - t).days if exp else None, "status": row["status"], "emoji": food_emoji(row["name"]),
         "qty": row["qty"], "unit": row["unit"] or "", "left_text": pantry_left_text(row),
         "product": row["product"] or "", "upc": row["upc"] or "", "food_id": row["food_id"],
+        **_reserved(c, row),
         "image": f"/img/pantry/{row['id']}?v={urllib.parse.quote(row['image'])}" if row["image"] else None,
         "rule": {"id": rule["id"], "name": rule["name"], "source": rule["source"],
                  **{f: rule[f] for f in RULE_FIELDS}, "tips": rule["tips"]} if rule else None,
     }
+
+
+def _reserved(c, row):
+    """What planned meals have set aside from this item: reserved [{qty_text, date, recipe}] and the free amount."""
+    res = []
+    for a in c.execute("SELECT a.qty, a.unit, m.date, r.name FROM allocations a JOIN meal_plans m ON m.id=a.plan_entry_id "
+                       "LEFT JOIN recipes r ON r.id=m.recipe_id WHERE a.pantry_item_id=? ORDER BY m.date", (row["id"],)):
+        res.append({"qty_text": n_units.fmt(a["qty"], a["unit"]) if a["qty"] else "", "date": a["date"], "recipe": a["name"] or ""})
+    free = None
+    if row["qty"] is not None:
+        used = sum(float(a["qty"] or 0) for a in c.execute("SELECT qty FROM allocations WHERE pantry_item_id=?", (row["id"],)))
+        left = max(0.0, row["qty"] - used)
+        free = (n_units.fmt(left, row["unit"]) if left > 1e-9 else "none") if used else None
+    return {"reserved": res, "free_text": free}
 
 
 def pantry_left_text(row):
@@ -1810,6 +1843,7 @@ def native_api(method, path, body=None, multipart=None):
                     for lst in n_lists.list_lists(c):
                         n_lists.remove_recipe_items(c, lst["id"], gone["id"])
                 c.execute("DELETE FROM meal_plans WHERE recipe_id NOT IN (SELECT id FROM recipes) AND recipe_id IS NOT NULL")
+                sync_plan_list(c)
                 return {}
         # ---- favorites / user
         if p == "/api/users/self":
@@ -5251,7 +5285,7 @@ def plan_preview(start, end):
             p = pantry.get(k)
             if p:
                 f["pantry"] = {"amount_left": p["amount_left"], "days_left": p["days_left"], "location": p["location"]}
-            f["staple"] = fname.lower() in STAPLES
+            f["staple"] = is_staple(fname)
     items = sorted(foods.values(), key=lambda f: (not f["pantry"], not f["staple"], f["name"].lower()))
     for f in items:   # suggest "have it" when the pantry has a decent amount that won't expire first, or it's a staple
         pf = f["pantry"]
@@ -5383,24 +5417,45 @@ def _drop_entry_items(c, list_id, entry):
     return n_lists.remove_recipe_items(c, list_id, rid)
 
 
-def staple_keys():
+def staple_names():
     try:
-        names = get_settings().get("staples") or DEFAULT_STAPLES
+        return get_settings().get("staples") or list(DEFAULT_STAPLES)
     except Exception:
-        names = DEFAULT_STAPLES
-    return {food_key(clean_food(n)) for n in names} | {food_key(n) for n in names}
+        return list(DEFAULT_STAPLES)
 
 
-def is_staple(food, keys=None):
-    keys = staple_keys() if keys is None else keys
-    return bool(food) and (food_key(clean_food(food)) in keys or food_key(food) in keys)
+def staple_keys(c=None):
+    """Keys for "always have" foods: canonical food ids ("f:12") plus plain word keys as a fallback."""
+    names = staple_names()
+    keys = {food_key(clean_food(n)) for n in names} | {food_key(n) for n in names}
+    if c is not None:
+        for n in names:
+            fid = n_foods.lookup(c, n)
+            if fid is not None:
+                keys.add(f"f:{fid}")
+    return keys
 
 
-def _ing_key(food):
+def is_staple(food, keys=None, c=None):
+    keys = staple_keys(c) if keys is None else keys
+    if not food:
+        return False
+    if c is not None:
+        fid = n_foods.lookup(c, food)
+        if fid is not None and f"f:{fid}" in keys:
+            return True
+    return food_key(clean_food(food)) in keys or food_key(food) in keys
+
+
+def _ing_key(food, c=None):
+    if c is not None:
+        fid = _food_id(c, food)
+        if fid is not None:
+            return f"f:{fid}"
     return food_key(clean_food(food)) or food_key(food)
 
 
-def _recipe_needs(rec, scale, skeys):
+def _recipe_needs(rec, scale, skeys, c=None):
     """[{key, food, qty|None, unit, amount_text, note, line}] for one planned meal (staples left out)."""
     out = []
     for ing in rec.get("recipeIngredient") or []:
@@ -5410,15 +5465,17 @@ def _recipe_needs(rec, scale, skeys):
         p = parse_ing_text(line)
         if not p:
             key = food_key(line)
+            fid = n_foods.lookup(c, line) if c is not None else None
+            key = f"f:{fid}" if fid is not None else key
             if key and key not in skeys:
                 out.append({"key": key, "food": None, "qty": None, "unit": "", "amount_text": "", "note": line, "line": line})
             continue
         for q in split_foods(p):
             food = q["food"].strip()
-            if is_staple(food, skeys):
+            if is_staple(food, skeys, c):
                 continue
             amt = q.get("amount_text") or ""
-            out.append({"key": _ing_key(food), "food": food, "qty": None if amt else float(q["quantity"]) * float(scale or 1),
+            out.append({"key": _ing_key(food, c), "food": food, "qty": None if amt else float(q["quantity"]) * float(scale or 1),
                         "unit": "" if amt else n_units.normalize(q["unit"]), "amount_text": amt, "note": q.get("note") or "",
                         "line": line})
     return out
@@ -5476,7 +5533,34 @@ def _entry_part(contrib):
 
 
 def _row_key(r):
+    fid = r["food_id"] if "food_id" in r.keys() else None
+    if fid is not None:
+        return f"f:{fid}"
     return _ing_key(r["food"]) if r["food"] else food_key(r["note"] or r["text"])
+
+
+def _alloc_migrate(c, start, end, lid):
+    """One time: list lines that older versions added per recipe become per-meal contributions (the sync rebuilds them)."""
+    if c.execute("SELECT 1 FROM settings WHERE key='alloc_migrated'").fetchone():
+        return
+    planned = {r[0] for r in c.execute("SELECT DISTINCT recipe_id FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL",
+                                        (start, end))}
+    for r in c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0", (lid,)).fetchall():
+        cm = _contrib_map(r)
+        legacy = {k: v for k, v in cm.items() if not isinstance(v, dict) and k in planned}
+        rids = json.loads(r["recipe_ids"] or "[]")
+        if not legacy and not (not cm and set(rids) & planned and not r["manual"]):
+            continue
+        rest = {k: v for k, v in cm.items() if k not in legacy}
+        q = r["quantity"]
+        if q is not None and legacy:
+            q = q - sum(float(v or 0) for v in legacy.values())
+        if not r["manual"] and not rest:
+            c.execute("DELETE FROM shopping_items WHERE id=?", (r["id"],))
+        else:
+            c.execute("UPDATE shopping_items SET contrib=?, quantity=?, recipe_ids=? WHERE id=?",
+                      (json.dumps(rest), q if (q or 0) > 0 else None, json.dumps([x for x in rids if x not in planned]), r["id"]))
+    c.execute("INSERT INTO settings(key, value) VALUES ('alloc_migrated', 'true')")
 
 
 def sync_plan_list(c, now=None):
@@ -5484,7 +5568,8 @@ def sync_plan_list(c, now=None):
     t = (now or today())
     start, end = iso(t), iso(t + timedelta(days=PLAN_LOOKAHEAD_DAYS))
     lid = n_lists.single_list(c)
-    skeys = staple_keys()
+    skeys = staple_keys(c)
+    _alloc_migrate(c, start, end, lid)
     entries = [e for e in c.execute(
         "SELECT * FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL AND cooked_at IS NULL "
         "AND skipped_at IS NULL ORDER BY date, " + n_plans._ORDER_SQL + ", id", (start, end)).fetchall()]
@@ -5495,7 +5580,8 @@ def sync_plan_list(c, now=None):
                        "ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id", (start,)):
         if r["qty"] is not None and r["qty"] <= 0:
             continue
-        for k in {food_key(clean_food(r["name"])), food_key(r["name"])}:
+        keys = {f"f:{r['food_id']}"} if r["food_id"] is not None else {food_key(clean_food(r["name"])), food_key(r["name"])}
+        for k in keys:
             if k:
                 stock.setdefault(k, []).append(r)
         free[r["id"]] = r["qty"]
@@ -5526,7 +5612,7 @@ def sync_plan_list(c, now=None):
         if not rec:
             continue
         names[str(e["id"])] = rec.get("name") or ""
-        for n in _recipe_needs(rec, e["scale"], skeys):
+        for n in _recipe_needs(rec, e["scale"], skeys, c):
             k, eid = n["key"], str(e["id"])
             need = n["qty"]
             if (e["recipe_id"], k) in legacy:
@@ -5600,9 +5686,10 @@ def sync_plan_list(c, now=None):
             texts = list(dict.fromkeys(n["amount_text"] or n["note"] or "" for _, n, _ in needs if (n["amount_text"] or n["note"])))
             contrib = {str(e["id"]): {"qty": None, "unit": "", "text": n["amount_text"]} for e, n, _ in needs}
             if st:
-                touched.add(st["row"]["id"]); st["new"] = contrib; st["note"] = "; ".join(texts) if first["food"] else None
+                touched.add(st["row"]["id"]); st["new"] = contrib
+                st["note"] = "; ".join(texts) if first["food"] and st["row"]["food"] and not st["row"]["manual"] else None
             else:
-                iid = _new_list_item(c, lid, first["food"], "", "" if first["food"] else first["line"])
+                iid = _new_list_item(c, lid, first["food"], "", "" if first["food"] else first["line"], grp[0])
                 row = c.execute("SELECT * FROM shopping_items WHERE id=?", (iid,)).fetchone()
                 state[iid] = st = {"row": row, "base": None, "rest": {}, "new": contrib, "total": None, "unit": "",
                                    "note": "; ".join(texts) if first["food"] else None, "created": True}
@@ -5621,9 +5708,10 @@ def sync_plan_list(c, now=None):
             contrib[str(e["id"])] = {"qty": prev + v, "unit": item_unit}
         notes = list(dict.fromkeys(n["note"] for _, n, _ in needs if n["note"]))
         if st:
-            touched.add(st["row"]["id"]); st["new"] = contrib; st["unit"] = item_unit; st["note"] = None
+            touched.add(st["row"]["id"]); st["new"] = contrib; st["unit"] = item_unit
+            st["note"] = None if (st["base"] or st["row"]["manual"]) else ", ".join(notes)
         else:
-            iid = _new_list_item(c, lid, first["food"], item_unit, ", ".join(notes))
+            iid = _new_list_item(c, lid, first["food"], item_unit, ", ".join(notes), grp[0])
             row = c.execute("SELECT * FROM shopping_items WHERE id=?", (iid,)).fetchone()
             state[iid] = {"row": row, "base": None, "rest": {}, "new": contrib, "unit": item_unit, "note": None, "created": True}
             touched.add(iid)
@@ -5641,27 +5729,32 @@ def sync_plan_list(c, now=None):
             planned = sum(float(v.get("qty") or 0) for v in ent_new.values())
             q = (st["base"] or 0) + planned
             unit = st["unit"] or None
-            c.execute("UPDATE shopping_items SET quantity=?, unit=?, unit_plural=?, contrib=?, recipe_ids=? WHERE id=?",
-                      (q or None, unit, n_units._PLURAL.get(unit or "", unit) if unit else None, json.dumps(cm), json.dumps(rids), iid))
+            c.execute("UPDATE shopping_items SET quantity=?, unit=?, unit_plural=?, contrib=?, recipe_ids=?, note=coalesce(?, note) "
+                      "WHERE id=?", (q or None, unit, n_units._PLURAL.get(unit or "", unit) if unit else None, json.dumps(cm),
+                                     json.dumps(rids), st.get("note"), iid))
         else:
             sets, vals = ["contrib=?", "recipe_ids=?"], [json.dumps(cm), json.dumps(rids)]
             if st.get("note") is not None:
                 sets.append("note=?"); vals.append(st["note"])
             if r["food"] and not r["manual"] and not st["rest"] and ent_new:
                 sets.append("quantity=?"); vals.append(None)
+            elif st["base"] is not None and _entry_part(_contrib_map(r)) and not ent_new:   # meals gone: back to what was typed
+                sets.append("quantity=?"); vals.append(st["base"] if st["base"] > 1e-9 else None)
             c.execute(f"UPDATE shopping_items SET {', '.join(sets)} WHERE id=?", (*vals, iid))
     return {"removed": removed, "names": names}
 
 
-def _new_list_item(c, lid, food, unit, note):
+def _new_list_item(c, lid, food, unit, note, key=None):
     """Insert a planned line (quantity is filled in by the sync)."""
     iid = str(uuid.uuid4())
     pos = c.execute("SELECT coalesce(max(position), -1) + 1 FROM shopping_items WHERE list_id=?", (lid,)).fetchone()[0]
     text = food or note
+    fid = int(key[2:]) if key and key.startswith("f:") else None
+    store = (n_lists.store_for(c, n_lists.food_store_key(fid)) if fid is not None else None) or n_lists.store_for(c, food_key(text))
     c.execute("INSERT INTO shopping_items (id, list_id, text, food, quantity, unit, unit_plural, note, label, checked, position, "
-              "recipe_ids, created_at, store_id, contrib, manual) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,0)",
+              "recipe_ids, created_at, store_id, contrib, manual, food_id) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,0,?)",
               (iid, lid, text, food or None, None, unit or None, n_units._PLURAL.get(unit, unit) if unit else None, note or "",
-               aisle_for(text) or None, pos, "[]", n_lists._now(), n_lists.store_for(c, food_key(text)), "{}"))
+               aisle_for(text) or None, pos, "[]", n_lists._now(), store, "{}", fid))
     return iid
 
 
@@ -5685,7 +5778,7 @@ def missing_counts():
     if not NATIVE:
         return {}
     with db() as c:
-        return n_lists.missing_counts(c, n_lists.single_list(c))
+        return entry_missing_counts(c, n_lists.single_list(c))
 
 
 def enrich_plan(entries):
@@ -5700,7 +5793,7 @@ def enrich_plan(entries):
         if r:
             r["minutes"] = (pool.get(r.get("id")) or {}).get("minutes")
             r.setdefault("image_v", "")
-        e["missing"] = counts.get((r or {}).get("id"), 0) if r else 0
+        e["missing"] = counts.get(str(e.get("id")), 0) if r else 0
     return entries
 
 
@@ -5709,7 +5802,8 @@ def plan_entry(entry_id, day):
 
 
 def plan_assign(b):
-    """Put a recipe on a day (alongside what's there, or in place of replace_id) and add its ingredients to the list."""
+    """Put a recipe on a day (alongside what's there, or in place of replace_id). The list is re-synced: pantry stock
+    nobody else has claimed covers what it can, and only the shortfall goes on the list."""
     require_native()
     d = _strict_date(b.get("date"))
     et = _entry_type_arg(b.get("entry_type"))
@@ -5721,39 +5815,26 @@ def plan_assign(b):
     if not rec:
         raise ApiError(404, "Recipe not found")
     rid = rec["id"]
-    # Everything that reads through other connections happens before the write transaction.
     scale = household_scale(rid)
-    have = _pantry_have_keys()
-    lines, skipped = [], []
-    for ing in rec.get("recipeIngredient") or []:
-        line = _ing_line(ing)
-        if not line:
-            continue
-        fname, _ = ing_food(ing)
-        if fname and food_key(fname) in have:
-            skipped.append(fname)
-            continue
-        lines.append(line)
     replace_id = _int_id(b["replace_id"]) if b.get("replace_id") not in (None, "") else None
-    added, replaced = [], 0
     with db() as c:
-        lid = n_lists.single_list(c)
         existing = n_plans.entries_on(c, iso(d), et)
         same = next((x for x in existing if x["recipe_id"] == rid and x["id"] != replace_id), None)
         if same:   # the same recipe in the same slot already: nothing to do
-            eid, skipped = same["id"], []
-        else:
-            if replace_id is not None:   # an explicit swap replaces that one entry; otherwise entries add up
-                old = n_plans.get_entry(c, replace_id)
-                if not old:
-                    raise ApiError(404, "Plan entry not found")
-                n_plans.delete_entry(c, replace_id)
-                replaced += _drop_entry_items(c, lid, old)
-            eid = n_plans.add_entry(c, iso(d), et, rid, scale=scale)
-            added = n_lists.add_recipe_ingredients(c, lid, rid, lines, scale, parse_ing_text, aisle_for, food_key,
-                                                   resolve=_food_id)
-    return {"entry": plan_entry(eid, d), "added": len(set(added)),
-            "skipped": sorted(set(skipped), key=str.lower), "replaced_removed": replaced}
+            return {"entry": plan_entry(same["id"], d), "added": 0, "skipped": [], "replaced_removed": 0}
+        if replace_id is not None:   # an explicit swap replaces that one entry; otherwise entries add up
+            if not n_plans.get_entry(c, replace_id):
+                raise ApiError(404, "Plan entry not found")
+            n_plans.delete_entry(c, replace_id)
+        eid = n_plans.add_entry(c, iso(d), et, rid, scale=scale)
+        res = sync_plan_list(c)
+        lid = n_lists.single_list(c)
+        added = sum(1 for r in c.execute("SELECT contrib FROM shopping_items WHERE list_id=? AND checked=0", (lid,))
+                    if str(eid) in _entry_part(_contrib_map(r)))
+        skipped = sorted({r["name"] for r in c.execute(
+            "SELECT p.name FROM allocations a JOIN pantry_items p ON p.id=a.pantry_item_id WHERE a.plan_entry_id=?", (eid,))},
+            key=str.lower)
+    return {"entry": plan_entry(eid, d), "added": added, "skipped": skipped, "replaced_removed": res["removed"]}
 
 
 def plan_move(b):
@@ -5776,6 +5857,7 @@ def plan_move(b):
             n_plans.update_entry(c, sw, date=e["date"])
             swapped = sw
         n_plans.update_entry(c, eid, date=iso(d))
+        sync_plan_list(c)   # earlier meals get first claim on the pantry
     return {"ok": True, "swapped_with": swapped}
 
 
@@ -5788,7 +5870,7 @@ def plan_delete(eid):
         if not e:
             raise ApiError(404, "Plan entry not found")
         n_plans.delete_entry(c, eid)
-        removed = _drop_entry_items(c, n_lists.single_list(c), e)
+        removed = sync_plan_list(c)["removed"]
     undo = {"date": e["date"], "recipe_id": e["recipe_id"], "entry_type": e["entry_type"]} if e["recipe_id"] else None
     return {"ok": True, "removed": removed, "undo": undo}
 
@@ -5882,6 +5964,7 @@ def plan_skip(eid, skipped=True):
     with db() as c:
         if not n_plans.set_skipped(c, eid, skipped):
             raise ApiError(404, "Plan entry not found")
+        sync_plan_list(c)
     return {"ok": True}
 
 
@@ -5904,7 +5987,7 @@ def _pantry_by_key(c):
     return out
 
 
-def _cook_needs(rec, factor):
+def _cook_needs(rec, factor, skeys=None, c=None):
     """[(food name, quantity or None, unit)] for a recipe's non-staple ingredients, scaled by factor."""
     out = []
     for ing in rec.get("recipeIngredient") or []:
@@ -5920,7 +6003,7 @@ def _cook_needs(rec, factor):
             else:
                 name, q, unit = clean_food(line), None, ""
             key = food_key(name)
-            if not key or name.lower() in STAPLES or key in _STAPLE_KEYS:
+            if not key or is_staple(name, skeys, c):
                 continue
             out.append((name, q, unit))
     return out
@@ -5963,9 +6046,13 @@ def recipe_cooked(slug, b):
             factor = float(entry["scale"]) if entry else 1.0
         pantry = _pantry_by_key(c)
         snap = {}
-        for name, need, unit in _cook_needs(rec, factor):
+        for name, need, unit in _cook_needs(rec, factor, staple_keys(c), c):
             fid = n_foods.lookup(c, name)
             ids = (pantry.get(f"f:{fid}") if fid is not None else None) or pantry.get(food_key(name)) or []
+            if plan_id is not None and fid is not None:   # what was set aside for this meal goes first
+                mine = [r[0] for r in c.execute("SELECT pantry_item_id FROM allocations WHERE plan_entry_id=? AND food_key=?",
+                                                (plan_id, f"f:{fid}"))]
+                ids = mine + [i for i in ids if i not in mine]
             row = next((r for r in (pantry_row(c, i) for i in ids) if r and r["status"] == "active"), None)
             if not row:
                 continue
@@ -6007,6 +6094,8 @@ def recipe_cooked(slug, b):
                       (now, "cooked-plan", json.dumps({"token": token, "plan_id": plan_id, "before": prev})))
         c.execute("INSERT INTO pantry_events(item_id, at, action, detail) VALUES (NULL,?,?,?)",
                   (now, "cooked-recipe", json.dumps({"token": token, "recipe_id": rec["id"]})))
+        if NATIVE:
+            sync_plan_list(c)   # the meal's allocations are spent; the rest of the plan re-claims what's left
     return {"ok": True, "deducted": deducted, "unknown": sorted(set(unknown), key=str.lower),
             "finished": sorted(set(finished), key=str.lower), "undo_token": token, "plan_id": plan_id}
 
@@ -6038,6 +6127,7 @@ def cooked_undo(b):
                 except KeyError:
                     pass
             c.execute("UPDATE pantry_events SET action=action || ' (undone)' WHERE id=?", (r["id"],))
+        sync_plan_list(c)
     return {"ok": True, "restored": restored}
 
 
@@ -6115,13 +6205,32 @@ def _qty_text(i):
                                 ((i.get("unit") or {}).get("name") or "")) if x)
 
 
-def list_item_json(i, names):
+def _uses(i, entries):
+    """Per-meal breakdown of a list item: [{entry_id, date, recipe_name, qty_text}], soonest first."""
+    out = []
+    for k, v in (i.get("contrib") or {}).items():
+        e = entries.get(str(k)) if isinstance(v, dict) else None
+        if not e:
+            continue
+        q = v.get("qty")
+        out.append({"entry_id": e["id"], "date": e["date"], "recipe_name": e["name"],
+                    "qty_text": n_units.fmt(q, v.get("unit") or "") if q else (v.get("text") or "")})
+    return sorted(out, key=lambda u: (u["date"], u["entry_id"]))
+
+
+def _plan_names(c):
+    return {str(r["id"]): {"id": r["id"], "date": r["date"], "name": r["name"] or ""} for r in c.execute(
+        "SELECT m.id, m.date, r.name FROM meal_plans m LEFT JOIN recipes r ON r.id=m.recipe_id WHERE m.date>=?", (iso(today()),))}
+
+
+def list_item_json(i, names, entries=None):
     food = (i.get("food") or {}).get("name") or ""
     return {"id": i["id"], "text": item_text(i), "name": item_name(i), "food": food, "qty": _qty_text(i),
             "emoji": food_emoji(food or i.get("note") or i.get("display")), "checked": bool(i.get("checked")),
             "checked_at": i.get("checkedAt"), "have": i.get("checkedHow") == "have",
             "store_id": i.get("storeId"), "aisle": ((i.get("label") or {}).get("name") or "Other"),
-            "recipes": [names[r] for r in i.get("recipeIds") or [] if r in names]}
+            "recipes": [names[r] for r in i.get("recipeIds") or [] if r in names],
+            "uses": _uses(i, entries) if entries else [], "manual": bool(i.get("manual"))}
 
 
 def _recipe_names(c):
@@ -6143,9 +6252,10 @@ def ongoing_list(now=None):
         recent = n_lists.recently_checked(c, lid, 20, before=cut)
         stores = n_lists.list_stores(c)
         names = _recipe_names(c)
+        plans = _plan_names(c)
     order = {s["id"]: i for i, s in enumerate(stores)}
-    unchecked = [list_item_json(i, names) for i in sl["listItems"] if not i["checked"]]
-    items = unchecked + [list_item_json(i, names) for i in fresh]
+    unchecked = [list_item_json(i, names, plans) for i in sl["listItems"] if not i["checked"]]
+    items = unchecked + [list_item_json(i, names, plans) for i in fresh]
     items.sort(key=lambda x: (order.get(x["store_id"], len(order)), x["aisle"] == "Other", x["aisle"].lower()))
     return {"id": lid, "name": sl["name"], "items": items, "count": len(unchecked),
             "recently_checked": [list_item_json(i, names) for i in recent],
@@ -6204,6 +6314,53 @@ def recipe_missing(recipe_id):
         return n_lists.unchecked_for_recipe(c, n_lists.single_list(c), recipe_id)
 
 
+def staples_add(b):
+    """"Always have": the food never goes on the list again; matching unchecked items are removed everywhere."""
+    require_native()
+    raw = " ".join(_s(b.get("name"), 60).split())
+    if not raw:
+        raise ApiError(400, "Which food?")
+    with db() as c:
+        fid = _food_id(c, raw)
+        f = n_foods.get(c, fid) if fid else None
+        name = f["name"] if f else raw
+        lid = n_lists.single_list(c)
+        removed = []
+        for r in c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0", (lid,)).fetchall():
+            if (fid is not None and r["food_id"] == fid) or (r["food"] and food_key(clean_food(r["food"])) == food_key(clean_food(raw))):
+                if r["manual"]:
+                    removed.append(r["text"] or n_lists._display(r))
+                c.execute("DELETE FROM shopping_items WHERE id=?", (r["id"],))
+    names = staple_names()
+    if name.lower() not in (x.lower() for x in names):
+        save_settings({"staples": names + [name]})
+    return {"ok": True, "name": name, "restore": removed, "staples": staple_names()}
+
+
+def staples_remove(b):
+    require_native()
+    name = " ".join(_s(b.get("name"), 60).split())
+    save_settings({"staples": [x for x in staple_names() if x.lower() != name.lower()]})
+    restore = [t for t in (b.get("restore") or []) if isinstance(t, str) and t.strip()][:50]
+    if restore:
+        list_add({"items": restore})
+    return {"ok": True, "staples": staple_names()}
+
+
+def _have_to_pantry(c, item_ids):
+    """"I have this": the food is at home, so it goes in the inventory (amount unknown) and covers every planned meal
+    that needs it until it's used up or tossed. Nothing is added when the inventory already has that food."""
+    for iid in item_ids:
+        r = c.execute("SELECT * FROM shopping_items WHERE id=?", (iid,)).fetchone()
+        if not r or not r["food"]:
+            continue
+        fid = r["food_id"] if r["food_id"] is not None else _food_id(c, r["food"])
+        if fid is None or c.execute("SELECT 1 FROM pantry_items WHERE food_id=? AND status='active'", (fid,)).fetchone():
+            continue
+        f = n_foods.get(c, fid)
+        add_pantry_item(c, f["name"] if f else r["food"], None, None, "", iid, None, None, fid)
+
+
 def recipe_have_all(slug):
     require_native()
     with db() as c:
@@ -6211,7 +6368,9 @@ def recipe_have_all(slug):
         if not rec:
             raise ApiError(404, "Recipe not found")
         lid = n_lists.single_list(c)
-        n = n_lists.mark_have(c, [x["id"] for x in n_lists.unchecked_for_recipe(c, lid, rec["id"])])
+        ids = [x["id"] for x in n_lists.unchecked_for_recipe(c, lid, rec["id"])]
+        n = n_lists.mark_have(c, ids)
+        _have_to_pantry(c, ids)
     return {"ok": True, "count": n}
 
 
@@ -6906,6 +7065,12 @@ class Handler(BaseHTTPRequestHandler):
         return f"tp_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
 
     def send(self, code, body, ctype="application/json; charset=utf-8", headers=None):
+        if getattr(self, "_sync_after", False) and code < 300:
+            self._sync_after = False
+            try:
+                sync_list()   # inventory or recipes changed: re-allocate and refresh the planned part of the list
+            except Exception as e:
+                log("list sync failed:", e)
         if isinstance(body, (dict, list)):
             body = json.dumps(body, default=str)
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -7111,6 +7276,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- routes
     def route(self, method, path, q):
         m = method
+        self._sync_after = NATIVE and m != "GET" and bool(SYNC_PATHS.fullmatch(path))
 
         # static
         if m == "GET" and (path == "/" or path.startswith("/static/") or path in ("/manifest.webmanifest", "/sw.js")):
@@ -7373,6 +7539,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, foods_merge(self.body()))
         if m == "POST" and path == "/api/foods/unmerge":
             return self.send(200, foods_unmerge(self.body()))
+        if m == "POST" and path == "/api/staples/add":
+            return self.send(200, staples_add(self.body()))
+        if m == "POST" and path == "/api/staples/remove":
+            return self.send(200, staples_remove(self.body()))
         if m == "POST" and path == "/api/recipes/bulk":
             return self.send(200, recipes_bulk(self.body()))
         if m == "POST" and path == "/api/categories/rename":
@@ -7446,6 +7616,7 @@ class Handler(BaseHTTPRequestHandler):
             if mm.group(2):
                 with db() as c:
                     n_lists.mark_have(c, [item_id])
+                    _have_to_pantry(c, [item_id])
                 return self.send(200, {"ok": True})
             return self.send(200, self.patch_item(it, self.body()))
         if path == "/api/stores":
@@ -7733,6 +7904,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, data, ctype, {"Cache-Control": "no-cache"})
 
 
+# Changes to inventory or recipes that can change what the planned meals still need from the store.
+SYNC_PATHS = re.compile(r"/api/pantry(/\d+)?|/api/list/items/[A-Za-z0-9-]{1,64}(/have)?|/api/lists/[^/]+/items/[^/]+/(bought|undo)"
+                        r"|/api/scan(/.*)?|/api/trip/.*|/api/recipe/[^/]+(/have-all|/polish|/restore-original)?|/api/plan/(save|generate)"
+                        r"|/api/recipes/bulk|/api/staples/.*")
 VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js")
 
 

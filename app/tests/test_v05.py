@@ -114,7 +114,7 @@ class PlannerListSync(Base):
     def test_assign_replaces_existing_entry_and_its_items(self):
         first = S.plan_assign({"date": day(1), "recipe_id": self.tid})["entry"]["id"]
         res = S.plan_assign({"date": day(1), "recipe_id": self.pid, "replace_id": first})
-        self.assertEqual(res["replaced_removed"], 4)   # the old recipe's items go before the new ones are added
+        self.assertEqual(res["replaced_removed"], 3)   # the old recipe's items go; the onion is reused for the new one
         plan = S.get_plans(S.today(), S.today() + timedelta(days=3))
         self.assertEqual([(p["date"], p["recipe"]["id"]) for p in plan], [(day(1), self.pid)])
         onion = next(i for i in self.items() if i["food"] == "onion")
@@ -158,7 +158,7 @@ class PlannerListSync(Base):
         # the shared onion loses exactly the tacos' share (2 + 2); only pasta's 1 is left. The bought tortillas
         # stay checked, so they're still shown (struck through) for a few hours.
         self.assertEqual(sorted(i["text"] for i in self.items() if not i["checked"]),
-                         ["1 lb spaghetti", "1 onion, diced", "2 cups milk"])
+                         ["1 lb spaghetti", "1 onion", "2 cups milk"])
         self.assertEqual(next(i for i in self.items() if i["food"] == "onion")["recipes"], ["Test Pasta"])
         with S.db() as c:
             self.assertEqual(c.execute("SELECT checked FROM shopping_items WHERE id=?", (tortillas["id"],)).fetchone()[0], 1)
@@ -181,10 +181,11 @@ class PlannerListSync(Base):
         detail = S.recipe_detail(self.tslug)
         self.assertEqual(sorted(m["text"] for m in detail["missing"]),
                          ["16 tortillas", "2 lb chicken breast", "2 onion, diced", "4 cups shredded cheddar cheese"])
-        # "have" one item: checked, no pantry entry
+        # "have" one item: checked; the food is now in the inventory (amount unknown)
         with S.db() as c:
             self.assertEqual(n_lists.mark_have(c, [detail["missing"][0]["id"]]), 1)
-            self.assertEqual(c.execute("SELECT count(*) FROM pantry_items").fetchone()[0], 0)
+            S._have_to_pantry(c, [detail["missing"][0]["id"]])
+            self.assertEqual(c.execute("SELECT count(*) FROM pantry_items").fetchone()[0], 1)
         self.assertEqual(len(S.recipe_detail(self.tslug)["missing"]), 3)
         self.assertEqual(S.recipe_have_all(self.tslug), {"ok": True, "count": 3})
         self.assertEqual(S.recipe_detail(self.tslug)["missing"], [])
@@ -196,7 +197,7 @@ class PlannerListSync(Base):
         later = S.ongoing_list(now=datetime.now(S.timezone.utc) + timedelta(hours=5))
         self.assertEqual((len(later["recently_checked"]), later["items"]), (4, []))
         with S.db() as c:
-            self.assertEqual(c.execute("SELECT count(*) FROM pantry_items").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM pantry_items").fetchone()[0], 4)
 
     def test_plan_status(self):
         st = S.plan_status()
@@ -283,7 +284,7 @@ class StoresAndList(Base):
         data = S.ongoing_list()
         self.assertEqual(set(data), {"id", "name", "items", "recently_checked", "stores", "count"})
         self.assertEqual(set(data["items"][0]), {"id", "text", "name", "food", "qty", "emoji", "checked", "store_id",
-                                                 "aisle", "recipes", "checked_at", "have"})
+                                                 "aisle", "recipes", "checked_at", "have", "uses", "manual"})
         self.assertEqual(data["stores"][0], {"id": aldi, "name": "Aldi"})
         # replace: ids kept, renamed, reordered; a removed store un-assigns its items and forgets its foods
         out = S.stores_replace([{"id": costco, "name": "Costco Wholesale"}, {"name": "Target"}])

@@ -272,3 +272,99 @@ class SeveralPerDay(unittest.TestCase):
         self.assertEqual((dates[a], dates[c_]), (day(2), day(1)))
         with self.assertRaises(S.ApiError):   # swapping needs a meal of the same type on that day
             S.plan_move({"id": a, "date": day(1), "swap_with": b})
+
+
+class Allocation(unittest.TestCase):
+    """Pantry stock is claimed meal by meal in date order; only the shortfall goes on the list."""
+
+    def setUp(self):
+        with S.db() as c:
+            for t in ("meal_plans", "shopping_items", "pantry_items", "allocations"):
+                c.execute(f"DELETE FROM {t}")
+        S._recipe_cache["at"] = 0
+        S.save_settings({"staples": S.DEFAULT_SETTINGS["staples"]})
+        self.tue = new_recipe(f"Milanese {id(self)}", 2, ["1 tbsp salted butter", "chili flakes to taste"])[1]
+        self.thu = new_recipe(f"Pad Thai {id(self)}", 2, ["2 tbsp salted butter", "chili flakes to taste", "1 tsp salt"])[1]
+
+    def butter(self):
+        return [i for i in S.ongoing_list()["items"] if "butter" in i["text"].lower() and not i["checked"]]
+
+    def plan_both(self):
+        a = S.plan_assign({"date": day(1), "recipe_id": self.tue})["entry"]["id"]
+        b = S.plan_assign({"date": day(3), "recipe_id": self.thu})["entry"]["id"]
+        return a, b
+
+    def test_amounts_add_up_with_tags_and_text_amounts_once(self):
+        self.plan_both()
+        b = self.butter()
+        self.assertEqual([i["text"] for i in b], ["3 tbsp salted butter"])
+        self.assertEqual([u["qty_text"] for u in b[0]["uses"]], ["1 tbsp", "2 tbsp"])
+        self.assertEqual([u["date"] for u in b[0]["uses"]], [day(1), day(3)])
+        flakes = [i for i in S.ongoing_list()["items"] if "chili" in i["text"].lower()]
+        self.assertEqual(len(flakes), 1)
+        self.assertEqual(len(flakes[0]["uses"]), 2)
+        self.assertFalse(any("salt" == (i["food"] or "").lower() for i in S.ongoing_list()["items"]))   # a staple
+
+    def test_pantry_covers_earliest_meal_first_and_moves_shift_it(self):
+        with S.db() as c:
+            S.add_pantry_item(c, "salted butter", "fridge", None, "", None, 2, "tbsp")
+        a, b = self.plan_both()
+        items = self.butter()
+        self.assertEqual([i["text"] for i in items], ["1 tbsp salted butter"])
+        self.assertEqual([u["entry_id"] for u in items[0]["uses"]], [b])
+        plan = {e["id"]: e for e in S.enrich_plan(S.get_plans(S.today(), S.today() + timedelta(days=4)))}
+        self.assertEqual(plan[a]["missing"], 1)    # only the chili flakes
+        S.plan_move({"id": b, "date": day(0)})     # Pad Thai now comes first and claims the butter
+        items = self.butter()
+        self.assertEqual([(i["text"], [u["entry_id"] for u in i["uses"]]) for i in items], [("1 tbsp salted butter", [a])])
+
+    def test_cooking_spends_the_allocation_and_delete_frees_it(self):
+        with S.db() as c:
+            pid = S.add_pantry_item(c, "salted butter", "fridge", None, "", None, 2, "tbsp")
+        a, b = self.plan_both()
+        S.recipe_cooked(S.recipe_detail(self.tue)["slug"] if False else self._slug(self.tue), {"plan_id": a})
+        with S.db() as c:
+            self.assertAlmostEqual(S.pantry_row(c, pid)["qty"], 1.0)
+        self.assertEqual([i["text"] for i in self.butter()], ["1 tbsp salted butter"])
+        S.plan_delete(b)
+        self.assertEqual(self.butter(), [])
+        with S.db() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM allocations").fetchone()[0], 0)
+
+    def _slug(self, rid):
+        with S.db() as c:
+            return S.n_recipes.get(c, rid)["slug"]
+
+    def test_units_convert_when_merging(self):
+        r3 = new_recipe(f"Cake {id(self)}", 2, ["1/4 cup salted butter"])[1]
+        S.plan_assign({"date": day(1), "recipe_id": self.tue})
+        S.plan_assign({"date": day(2), "recipe_id": r3})
+        self.assertEqual([i["text"] for i in self.butter()], ["5 tbsp salted butter"])
+
+    def test_unknown_amount_covers_every_meal_and_have_this(self):
+        a, b = self.plan_both()
+        item = self.butter()[0]
+        with S.db() as c:
+            S.n_lists.mark_have(c, [item["id"]])
+            S._have_to_pantry(c, [item["id"]])
+            S.sync_plan_list(c)
+        self.assertEqual(self.butter(), [])
+        r3 = new_recipe(f"Toast {id(self)}", 2, ["1 tbsp salted butter"])[1]
+        S.plan_assign({"date": day(4), "recipe_id": r3})          # a later meal doesn't ask again
+        self.assertEqual(self.butter(), [])
+
+    def test_always_have(self):
+        self.plan_both()
+        S.list_add({"items": ["chili flakes"]})
+        out = S.staples_add({"name": "chili flakes"})
+        self.assertEqual(out["name"], "Chili flake")
+        self.assertFalse(any("chili" in i["text"].lower() for i in S.ongoing_list()["items"]))
+        with S.db() as c:
+            S.sync_plan_list(c)
+        self.assertFalse(any("chili" in i["text"].lower() for i in S.ongoing_list()["items"]))
+        S.staples_remove({"name": out["name"], "restore": out["restore"]})
+        with S.db() as c:
+            S.sync_plan_list(c)
+        self.assertTrue(any("chili" in i["text"].lower() for i in S.ongoing_list()["items"]))
+        with self.assertRaises(S.ApiError):
+            S.save_settings({"staples": ["x" * 41]})

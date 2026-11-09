@@ -337,11 +337,15 @@ function drawCookReady() {
   btn.className = "btn sec miss-btn"; btn.innerHTML = `${ic("cart")} Missing ${miss.length} ingredient${miss.length === 1 ? "" : "s"}`;
   box.innerHTML = `<div class="miss-card" id="miss-card">
     <div class="miss-h"><b>Still on your shopping list</b><span>Tick anything you already have.</span></div>
-    <div class="group">${miss.map((m) => `<button class="row flush miss-row" data-mid="${esc(m.id)}"><span class="check sq">${ic("check")}</span><div class="main"><div class="a">${esc(m.text)}</div></div></button>`).join("")}</div>
+    <div class="group">${miss.map((m) => `<div class="row flush miss-row"><button class="miss-main" data-mid="${esc(m.id)}"><span class="check sq">${ic("check")}</span><span class="main"><span class="a">${esc(m.text)}</span></span></button>${m.food ? `<button class="link-btn sm" data-always="${esc(m.food)}">Always have</button>` : ""}</div>`).join("")}</div>
     <div class="miss-acts"><button class="btn small" id="miss-all">${ic("check")} I have them all</button><button class="link-btn" id="miss-anyway">Cook anyway</button></div></div>`;
-  $$("#rd-miss [data-mid]").forEach((b) => (b.onclick = async () => {
+  $$("#rd-miss [data-always]").forEach((b) => (b.onclick = () => alwaysHave(b.dataset.always, async () => {
+    try { const r = await api("GET", `/api/recipe/${encodeURIComponent(R.rec.slug)}`); R.rec.missing = r.missing; drawCookReady(); } catch (_) {}
+  })));
+  $$("#rd-miss [data-mid]").forEach((btn2) => (btn2.onclick = async () => {
+    const b = btn2.closest(".miss-row");
     if (b.classList.contains("done")) return;
-    const id = b.dataset.mid, m = miss.find((x) => String(x.id) === id);
+    const id = btn2.dataset.mid, m = miss.find((x) => String(x.id) === id);
     b.classList.add("done"); $(".check", b).classList.add("on");
     try {
       await api("POST", `/api/list/items/${enc(id)}/have`);

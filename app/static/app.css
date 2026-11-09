@@ -768,3 +768,16 @@ body.scanning .toast{bottom:calc(60vh + 10px)}
 .tr-qty{width:72px}
 .tr-price{display:inline-flex;align-items:center;gap:2px;margin-left:auto;color:var(--sub)}
 .tr-price input{width:80px}
+/* list: which meals need an item; always have */
+.uses-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.use-tag{font-size:11.5px;padding:2px 8px;border-radius:999px;background:var(--fill);color:var(--sub);white-space:nowrap}
+.use-tag b{color:var(--text);font-weight:600}
+.use-more{border:0;background:none;color:var(--blue);font-size:12px;padding:2px 4px;cursor:pointer}
+.use-rest{display:contents}
+.use-rest[hidden]{display:none}
+.pop-sep{height:1px;background:var(--sep);margin:4px 0}
+.miss-row{display:flex;align-items:center;gap:6px}
+.miss-row .miss-main{flex:1;display:flex;align-items:center;gap:12px;border:0;background:none;text-align:left;color:var(--text);font:inherit;padding:0;min-width:0}
+.link-btn.sm{font-size:13px;padding:4px 6px;border:0;background:none;cursor:pointer;flex:none}
+.reserve{font-size:13px;color:var(--sub);padding:0 16px 10px}
+.reserve b{color:var(--text)}

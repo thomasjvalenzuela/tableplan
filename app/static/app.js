@@ -1050,6 +1050,13 @@ function drawList(focusAdd) {
   }));
   bindListRows(box);
 }
+// Which planned meals need this item: "Tue · Chicken Milanese 1 tbsp" tags (two, then "+N more" expands)
+function usesHtml(it, recs) {
+  const u = it.uses || [];
+  if (!u.length) return recs && recs.length && !it.manual ? `<div class="r">${esc(recs.join(" · "))}</div>` : "";
+  const tag = (x) => `<span class="use-tag">${esc(wkShort(x.date))} · ${esc(x.recipe_name)}${x.qty_text ? ` <b>${esc(x.qty_text)}</b>` : ""}</span>`;
+  return `<div class="uses-tags">${u.slice(0, 2).map(tag).join("")}${u.length > 2 ? `<button class="use-more" data-uses-more aria-expanded="false">+${esc(u.length - 2)} more</button><span class="use-rest" hidden>${u.slice(2).map(tag).join("")}</span>` : ""}</div>`;
+}
 function listRow(it) {
   const sub = itemSub(it), recs = (it.recipes || []).filter(Boolean);
   if (it.checked) {
@@ -1064,7 +1071,7 @@ function listRow(it) {
     <div class="li-under" aria-hidden="true">${ic("check")} I have it</div>
     <div class="li-in">
       <span class="emo">${esc(it.emoji || "🛒")}</span>
-      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${recs.length ? `<div class="r">${esc(recs.join(" · "))}</div>` : ""}</div>
+      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${usesHtml(it, recs)}</div>
       <button class="have-btn" data-have title="I already have this">Have</button>
       <button class="store-chip ${it.store_id == null ? "none" : ""}" data-store aria-haspopup="menu" aria-label="Store: ${esc(storeLabel(it.store_id))}">${esc(storeLabel(it.store_id))}</button>
       <button class="check sq" data-check aria-label="Got ${esc(itemTitle(it))}">${ic("check")}</button>
@@ -1076,6 +1083,8 @@ function bindListRows(box) {
     if (Date.now() < L.quietUntil) return;
     const row = e.target.closest(".row.li"); if (!row) return;
     const it = findItem(row.dataset.id); if (!it) return;
+    const more = e.target.closest("[data-uses-more]");
+    if (more) { e.stopPropagation(); more.nextElementSibling.hidden = false; more.remove(); return; }
     if (it.checked) return uncheckItem(it, row);
     if (e.target.closest("[data-store]")) return storeMenu(e.target.closest("[data-store]"), it);
     if (e.target.closest("[data-have]")) return haveItem(it, row);
@@ -1170,11 +1179,24 @@ async function haveItem(it, row) {
     toast(`Have ${itemTitle(it)}`, "Undo", () => { const rw = $(`#lists .row.li[data-id="${CSS.escape(String(it.id))}"]`); if (rw) uncheckItem(it, rw); else reloadList(); });
   } catch (e) { Object.assign(it, { checked: false, have: false, checked_at: null }); redrawRow(it, row); fail(e); }
 }
+// "Always have": never put this food on the list again (salt, oil…); removes it everywhere now, with Undo
+async function alwaysHave(name, after) {
+  try {
+    const r = await api("POST", "/api/staples/add", { name });
+    if (state.cfg?.settings) state.cfg.settings.staples = r.staples;
+    toast(`${r.name} won't be added again`, "Undo", async () => {
+      try { const u = await api("POST", "/api/staples/remove", { name: r.name, restore: r.restore }); if (state.cfg?.settings) state.cfg.settings.staples = u.staples; after && after(); } catch (x) { fail(x); }
+    });
+    after && after();
+  } catch (e) { fail(e); }
+}
 function storeMenu(anchor, it) {
   const opts = [...L.data.stores.map((s) => [String(s.id), s.name]), ["", "Any store"]];
   const cur = it.store_id == null ? "" : String(it.store_id);
   popover(anchor, `<div class="pop-h">Buy ${esc(itemTitle(it))} at</div>${opts.map(([k, l]) =>
-    `<button data-st="${esc(k)}" role="menuitemradio" aria-checked="${k === cur}" class="${k === cur ? "cur" : ""}">${esc(l)}${k === cur ? ic("check") : ""}</button>`).join("")}`, (el) => {
+    `<button data-st="${esc(k)}" role="menuitemradio" aria-checked="${k === cur}" class="${k === cur ? "cur" : ""}">${esc(l)}${k === cur ? ic("check") : ""}</button>`).join("")}
+    ${it.food ? `<div class="pop-sep"></div><button data-always>${ic("check")} Always have ${esc(itemTitle(it).toLowerCase())}</button>` : ""}`, (el) => {
+    $("[data-always]", el) && ($("[data-always]", el).onclick = () => { closePop(); alwaysHave(it.food, () => reloadList()); });
     $$("[data-st]", el).forEach((b) => (b.onclick = async () => {
       closePop();
       const sid = b.dataset.st === "" ? null : b.dataset.st;
@@ -1324,6 +1346,7 @@ function openPantryItem(it, after) {
         <div><small>Opened</small><b>${it.opened_on ? esc(fmt(parseISO(it.opened_on), { month: "short", day: "numeric" })) : "—"}</b></div>
         <div><small>Use by</small><b>${it.expires_on ? esc(fmt(parseISO(it.expires_on), { month: "short", day: "numeric" })) : "—"}</b></div>
       </div></div>
+      ${(it.reserved || []).length ? `<div class="group"><div class="reserve" style="padding-top:12px">${it.reserved.map((r) => `Reserved: <b>${esc(r.qty_text || "some")}</b> for ${esc(wkShort(r.date))} · ${esc(r.recipe)}`).join("<br>")}${it.free_text ? `<br>Free: <b>${esc(it.free_text)}</b>` : ""}</div></div>` : ""}
       <div class="group-label">How much did you use?</div>
       <div class="big-actions">
         <button data-use="0.25">${ic("open")}¼</button><button data-use="0.5">${ic("open")}½</button>
@@ -1664,6 +1687,7 @@ async function openSettings() {
       <div class="group-label">Shopping</div>
       <div class="group"><button class="row" id="st-stores"><span class="ic bg-teal" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("store")}</span><div class="main"><div class="a">Stores</div><div class="b" id="st-stores-b">Rename, reorder or remove the stores on your list</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Inventory</div>
+      <div class="group"><button class="row" id="st-staples"><div class="main"><div class="a">Always have</div><div class="b">${esc((s.staples || []).slice(0, 4).join(", "))}${(s.staples || []).length > 4 ? "…" : ""}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group">
         <div class="field"><label>Check-in reminder</label><select id="st-ci">${[[0, "Off"], [7, "Weekly"], [14, "Every 2 weeks"], [30, "Monthly"]].map(([v, l]) => `<option value="${v}" ${+s.pantry_check_days === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       </div>
@@ -1710,6 +1734,7 @@ async function openSettings() {
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $("#st-stores").onclick = () => storesManager(draw);
     $("#st-cats").onclick = () => categoriesManager(draw);
+    $("#st-staples").onclick = () => staplesManager(draw);
     $("#st-foods") && ($("#st-foods").onclick = () => foodsManager(draw));
     $("#st-polish").onchange = (e) => { save({ polish_imports: e.target.checked }); if (e.target.checked && !c.ai_key) toast("Polishing needs an OpenAI key", "Add key", () => openSetupSection("ai", "AI recipe import", reloadCfg)); };
     $("#st-backups").onclick = () => backupsView(draw);
@@ -1857,6 +1882,26 @@ function foodsManager(back) {
     }));
   };
   shell(); load();
+}
+
+// ---------- Settings → Inventory → Always have (basics that never go on the list or count as missing)
+function staplesManager(back) {
+  const draw = () => {
+    if (!sheetBody()) return;
+    const list = state.cfg.settings.staples || [];
+    sheetBody().innerHTML = `<div class="btn-row" style="margin-bottom:12px"><button class="btn sec small" id="sp-back">${ic("chevL")} Settings</button></div>
+      <div class="group-label" style="margin-top:4px">Always have</div>
+      <div class="group" id="sp-list">${list.map((n, i) => `<div class="field store-row"><span class="full">${esc(n)}</span><button class="mini red" data-del="${i}" aria-label="Remove ${esc(n)}">${ic("trash")}</button></div>`).join("") || `<div class="row flush muted">Nothing yet.</div>`}</div>
+      <form class="group" id="sp-add" style="margin-top:12px"><div class="field"><input class="full" id="sp-new" maxlength="40" placeholder="Add a food, e.g. Soy sauce"><button class="mini blue" type="submit" aria-label="Add">${ic("plus")}</button></div></form>
+      <p class="hint">These never go on your shopping list, never count as missing, and aren't taken out of your inventory when you cook.</p>`;
+    $("#sp-back").onclick = back;
+    $$("#sp-list [data-del]").forEach((b) => (b.onclick = async () => {
+      const name = list[+b.dataset.del];
+      try { const r = await api("POST", "/api/staples/remove", { name }); state.cfg.settings.staples = r.staples; toast(`${name} removed`); draw(); } catch (e) { fail(e); }
+    }));
+    $("#sp-add").onsubmit = (e) => { e.preventDefault(); const v = $("#sp-new").value.trim(); if (v) alwaysHave(v, draw); };
+  };
+  draw();
 }
 
 // ---------- Settings → Categories (add, rename everywhere, delete with Undo, reorder; every change saves right away)

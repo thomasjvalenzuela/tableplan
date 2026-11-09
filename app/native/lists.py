@@ -87,6 +87,8 @@ def _item(r):
         "unit": {"name": r["unit"], "pluralName": r["unit_plural"] or None} if r["unit"] else None,
         "food": {"name": r["food"]} if r["food"] else None,
         "foodId": r["food_id"] if "food_id" in r.keys() else None,
+        "contrib": _contrib(r) if "contrib" in r.keys() else {},
+        "manual": bool(r["manual"]) if "manual" in r.keys() else False,
         "label": {"name": r["label"]} if r["label"] else None,
         "checked": bool(r["checked"]), "position": r["position"],
         "recipeIds": json.loads(r["recipe_ids"] or "[]"),
@@ -276,7 +278,7 @@ def _linked(c, list_id, recipe_id):
 
 def unchecked_for_recipe(c, list_id, recipe_id):
     """Unchecked items still needed for a recipe, as [{id, text}]."""
-    return [{"id": r["id"], "text": _display(r)} for r in _linked(c, list_id, str(recipe_id))]
+    return [{"id": r["id"], "text": _display(r), "food": r["food"]} for r in _linked(c, list_id, str(recipe_id))]
 
 
 def missing_counts(c, list_id):

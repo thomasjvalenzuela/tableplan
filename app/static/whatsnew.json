@@ -1,5 +1,21 @@
 [
  {
+  "id": "smart-list",
+  "date": "2026-11-09",
+  "icon": "cart",
+  "color": "green",
+  "title": "A list that knows what you have",
+  "text": "What's already in your inventory is set aside for your next meals, so the list only shows what you still need, tagged with the meals that need it."
+ },
+ {
+  "id": "always-have",
+  "date": "2026-11-09",
+  "icon": "check",
+  "color": "teal",
+  "title": "Always have",
+  "text": "Mark basics like salt or oil as “Always have” and they'll never land on your list again."
+ },
+ {
   "id": "grocery-trip",
   "date": "2026-11-09",
   "icon": "cart",
