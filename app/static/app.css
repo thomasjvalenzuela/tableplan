@@ -940,3 +940,14 @@ h1.title{font-family:var(--serif);font-weight:700;letter-spacing:-.01em}
 .ck-finish .ck-cheers{font-size:56px}
 .ck-finish h2{font-family:var(--serif);margin:0}
 .ck-finish .how{text-align:left}
+/* inventory select mode */
+.slot.sel,#pantry .row.sel{background:var(--fill);box-shadow:inset 0 0 0 2px var(--accent)}
+.slot .selc{position:absolute;top:6px;right:6px;z-index:2;background:var(--card)}
+.slot .selc.on{background:var(--blue);border-color:var(--blue)}
+#pantry .row .selc{margin-right:2px}
+.ib-acts{gap:6px;margin-top:8px}
+.ib-group{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.ib-date{display:inline-flex;align-items:center;gap:6px}
+.ib-date input{font:inherit;font-size:12.5px;border:0;background:none;color:var(--text);padding:0}
+.chip-s.danger{background:rgba(255,59,48,.14);color:var(--red)}
+.chip-s:disabled{opacity:.45}

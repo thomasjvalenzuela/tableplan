@@ -1416,6 +1416,50 @@ def _reserved(c, row):
     return {"reserved": res, "free_text": free}
 
 
+def pantry_bulk(b):
+    """POST /api/pantry/bulk {ids, action, location?, expires_on?}: one change for many inventory items.
+    delete is soft (status 'deleted', so Undo can restore it); purge removes deleted rows for good."""
+    ids = b.get("ids")
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 1000:
+        raise ApiError(400, "Pick at least one item.")
+    ids = [_int_id(x, "item") for x in ids]
+    action = b.get("action")
+    if action not in ("delete", "restore", "purge", "move", "used", "set_date"):
+        raise ApiError(400, "Unknown action.")
+    n = 0
+    t = iso(today())
+    with db() as c:
+        for pid in ids:
+            r = pantry_row(c, pid)
+            if not r:
+                continue
+            if action == "delete" and r["status"] != "deleted":
+                c.execute("UPDATE pantry_items SET status='deleted', finished_on=? WHERE id=?", (t, pid))
+                event(c, pid, "deleted", r["status"])
+            elif action == "restore" and r["status"] == "deleted":
+                prev = c.execute("SELECT detail FROM pantry_events WHERE item_id=? AND action='deleted' ORDER BY id DESC LIMIT 1",
+                                 (pid,)).fetchone()
+                status = prev["detail"] if prev and prev["detail"] in ("active", "used", "tossed") else "active"
+                c.execute("UPDATE pantry_items SET status=?, finished_on=CASE WHEN ?='active' THEN NULL ELSE finished_on END WHERE id=?",
+                          (status, status, pid))
+                event(c, pid, "restored")
+            elif action == "purge" and r["status"] == "deleted":
+                c.execute("DELETE FROM pantry_items WHERE id=?", (pid,))
+            elif action == "move" and r["status"] == "active":
+                apply_pantry_action(c, pid, {"action": "move", "location": b.get("location")})
+            elif action == "used" and r["status"] == "active":
+                apply_pantry_action(c, pid, {"action": "use", "left": 0})
+            elif action == "set_date" and r["status"] == "active":
+                apply_pantry_action(c, pid, {"action": "set_date", "expires_on": b.get("expires_on"), "source": b.get("source")})
+            else:
+                continue
+            n += 1
+        # anything deleted more than a day ago (Undo is long over) is purged for good
+        old = iso(today() - timedelta(days=1))
+        c.execute("DELETE FROM pantry_items WHERE status='deleted' AND finished_on<?", (old,))
+    return {"ok": True, "changed": n}
+
+
 def pantry_left_text(row):
     """'1 cup left' when the amount is known, else '50% left'."""
     if row["qty"] is not None:
@@ -8063,6 +8107,11 @@ class Handler(BaseHTTPRequestHandler):
                 sync_list()
                 with db() as c:   # what the item has reserved after the sync
                     out = pantry_json(c, pantry_row(c, out["id"]))
+            return self.send(200, out)
+        if m == "POST" and path == "/api/pantry/bulk":
+            out = pantry_bulk(self.body())
+            self._sync_after = False
+            sync_list()
             return self.send(200, out)
         mm = re.fullmatch(r"/api/pantry/(\d+)", path)
         if mm and m in ("PATCH", "POST"):

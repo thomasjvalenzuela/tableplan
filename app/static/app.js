@@ -1300,19 +1300,25 @@ function durability(it) {
   const color = exp || left <= 0.25 ? "var(--red)" : left <= 0.5 || (it.days_left != null && it.days_left <= 3) ? "var(--orange)" : "var(--green)";
   return `<span class="dura" aria-hidden="true"><i style="width:${Math.round(left * 100)}%;background:${color}"></i></span>`;
 }
+const INV = { sel: null };   // Select mode on Inventory: a Set of item ids
+const invMark = (it) => (INV.sel ? `<span class="selc ${INV.sel.has(it.id) ? "on" : ""}" aria-hidden="true">${INV.sel.has(it.id) ? ic("check") : ""}</span>` : "");
 function slotHtml(it) {
-  const st = stackText(it);
-  return `<button class="slot" data-id="${esc(it.id)}" aria-label="${esc(it.name)}${st ? `, ${esc(st)}` : ""}${it.days_left != null ? `, ${esc(relExpiry(it))}` : ""}">
+  const st = stackText(it), on = INV.sel && INV.sel.has(it.id);
+  return `<button class="slot ${on ? "sel" : ""}" data-id="${esc(it.id)}" ${INV.sel ? `aria-pressed="${!!on}"` : ""} aria-label="${esc(it.name)}${st ? `, ${esc(st)}` : ""}${it.days_left != null ? `, ${esc(relExpiry(it))}` : ""}">${invMark(it)}
     ${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span class="slot-emo">${esc(it.emoji || "🥫")}</span>`}
     ${st ? `<b class="stack">${esc(st)}</b>` : ""}${durability(it)}<span class="slot-name">${esc(it.name)}</span></button>`;
 }
 async function renderPantry() {
   const view = invView();
-  app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="round-btn" id="p-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
+  if (!state.invKeepSel) INV.sel = null;
+  state.invKeepSel = false;
+  document.body.classList.toggle("selecting", !!INV.sel);
+  app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="text-btn" id="p-select">${INV.sel ? "Cancel" : "Select"}</button><button class="round-btn" id="p-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
     `<h1 class="title">Inventory</h1>
     <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button></div>
-    <div id="pantry">${loading()}</div>`;
+    <div id="pantry">${loading()}</div><div class="sel-bar" id="inv-bar" hidden></div>`;
   bindTopbar();
+  $("#p-select").onclick = () => { INV.sel = INV.sel ? null : new Set(); state.invKeepSel = true; renderPantry(); };
   $("#p-scan").onclick = () => startStockUp(renderPantry);
   $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Check-in</button><button data-a="share">${ic("share")} Share or print</button>`, (el) => {
     $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ trip: () => openTrip(renderPantry), ci: () => openCheckin(renderPantry), share: () => openShare("pantry", {}) })[b.dataset.a](); }));
@@ -1342,14 +1348,54 @@ async function renderPantry() {
   } else {
     html += `<div class="group" style="margin-top:12px">${shown.map((it) => {
       const left = Math.round(it.amount_left * 100);
-      return `<button class="row" data-id="${esc(it.id)}">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
+      return `<button class="row ${INV.sel && INV.sel.has(it.id) ? "sel" : ""}" data-id="${esc(it.id)}" ${INV.sel ? `aria-pressed="${INV.sel.has(it.id)}"` : ""}>${invMark(it)}${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
         <div class="main"><div class="a">${esc(it.name)}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
   }
   $("#pantry").innerHTML = html;
   $$("[data-f]").forEach((b) => (b.onclick = () => { state.pantryFilter = b.dataset.f; renderPantry(); }));
-  $$("#pantry [data-id]").forEach((b) => (b.onclick = () => openPantryItem(items.find((i) => String(i.id) === b.dataset.id), renderPantry)));
+  $$("#pantry [data-id]").forEach((b) => (b.onclick = () => {
+    const it = items.find((i) => String(i.id) === b.dataset.id);
+    if (!INV.sel) return openPantryItem(it, renderPantry);
+    INV.sel.has(it.id) ? INV.sel.delete(it.id) : INV.sel.add(it.id);
+    state.invKeepSel = true; renderPantry();
+  }));
+  drawInvBar(shown);
+}
+// Select mode bar: move, mark used up, set a date, delete (with Undo; deleted items are purged once Undo is gone)
+function drawInvBar(shown) {
+  const bar = $("#inv-bar"); if (!bar) return;
+  if (!INV.sel) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const n = INV.sel.size, ids = [...INV.sel];
+  const bulk = async (body, msg) => {
+    try { await api("POST", "/api/pantry/bulk", { ids, ...body }); if (msg) toast(msg); INV.sel = new Set(); state.invKeepSel = true; renderPantry(); }
+    catch (e) { fail(e); }
+  };
+  bar.innerHTML = `<div class="sel-row"><b>${esc(n)} selected</b><button class="text-btn" id="ib-all">Select all</button><span class="grow"></span><button class="text-btn strong" id="ib-done">Done</button></div>
+    <div class="sel-row ib-acts">
+      <span class="ib-group"><span class="muted small">Move to</span>${[["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([k, l]) => `<button class="chip-s" data-mv="${k}" ${n ? "" : "disabled"}>${l}</button>`).join("")}</span>
+      <button class="chip-s" id="ib-used" ${n ? "" : "disabled"}>Used up</button>
+      <label class="chip-s ib-date">Exp <input type="date" id="ib-date" ${n ? "" : "disabled"} aria-label="Use-by date for the selected items"></label>
+      <button class="chip-s danger" id="ib-del" ${n ? "" : "disabled"}>Delete</button></div>`;
+  $("#ib-all").onclick = () => { shown.forEach((i) => INV.sel.add(i.id)); state.invKeepSel = true; renderPantry(); };
+  $("#ib-done").onclick = () => { INV.sel = null; renderPantry(); };
+  $$("[data-mv]", bar).forEach((b) => (b.onclick = () => bulk({ action: "move", location: b.dataset.mv }, `Moved ${plural(n, "item")} to ${b.textContent}`)));
+  $("#ib-used").onclick = () => bulk({ action: "used" }, `${plural(n, "item")} marked used up`);
+  $("#ib-date").onchange = (e) => e.target.value && bulk({ action: "set_date", expires_on: e.target.value, source: "package" }, `Use-by date set for ${plural(n, "item")}`);
+  $("#ib-del").onclick = async () => {
+    try {
+      await api("POST", "/api/pantry/bulk", { ids, action: "delete" });
+      let undone = false;
+      toast(`Deleted ${plural(n, "item")}`, "Undo", async () => {
+        undone = true;
+        try { await api("POST", "/api/pantry/bulk", { ids, action: "restore" }); state.invKeepSel = false; renderPantry(); } catch (x) { fail(x); }
+      });
+      setTimeout(() => { if (!undone) api("POST", "/api/pantry/bulk", { ids, action: "purge" }).catch(() => {}); }, 6500);
+      INV.sel = new Set(); state.invKeepSel = true; renderPantry();
+    } catch (e) { fail(e); }
+  };
 }
 
 const PANTRY_UNITS = [["", "count"], ["tsp", "tsp"], ["tbsp", "tbsp"], ["cup", "cup"], ["fl oz", "fl oz"], ["pint", "pint"],

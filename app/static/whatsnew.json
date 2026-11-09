@@ -1,5 +1,13 @@
 [
  {
+  "id": "inventory-select",
+  "date": "2026-11-10",
+  "icon": "check",
+  "color": "blue",
+  "title": "Select several in Inventory",
+  "text": "Tap Select to move, use up, date or delete many items at once, with Undo."
+ },
+ {
   "id": "cooking-diary",
   "date": "2026-11-09",
   "icon": "book",

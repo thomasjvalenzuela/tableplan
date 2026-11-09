@@ -427,3 +427,38 @@ class UseByDates(unittest.TestCase):
         self.assertEqual((n["cleared"], n["opened"]), (1, 1))
         self.assertEqual((self.row(a)["expires_on"], self.row(a)["expiry_source"]), (None, "none"))
         self.assertEqual(self.row(b)["expiry_source"], "opened")
+
+
+class PantryBulk(unittest.TestCase):
+    def setUp(self):
+        with S.db() as c:
+            c.execute("DELETE FROM pantry_items")
+            self.ids = [S.add_pantry_item(c, n, "fridge") for n in ("Milk", "Eggs", "Spinach")]
+
+    def rows(self):
+        with S.db() as c:
+            return {r["id"]: dict(r) for r in c.execute("SELECT * FROM pantry_items")}
+
+    def test_move_used_date(self):
+        S.pantry_bulk({"ids": self.ids[:2], "action": "move", "location": "pantry"})
+        S.pantry_bulk({"ids": [self.ids[2]], "action": "used"})
+        S.pantry_bulk({"ids": self.ids[:2], "action": "set_date", "expires_on": day(4), "source": "package"})
+        r = self.rows()
+        self.assertEqual([r[i]["location"] for i in self.ids[:2]], ["pantry", "pantry"])
+        self.assertEqual(r[self.ids[2]]["status"], "used")
+        self.assertEqual({r[i]["expires_on"] for i in self.ids[:2]}, {day(4)})
+        with self.assertRaises(S.ApiError):
+            S.pantry_bulk({"ids": self.ids, "action": "move", "location": "garage"})
+        with self.assertRaises(S.ApiError):
+            S.pantry_bulk({"ids": [], "action": "used"})
+
+    def test_soft_delete_undo_and_purge(self):
+        S.pantry_bulk({"ids": self.ids[:2], "action": "delete"})
+        with S.db() as c:
+            self.assertEqual([i["name"] for i in S.list_pantry(c)], ["Spinach"])
+        S.pantry_bulk({"ids": self.ids[:2], "action": "restore"})
+        with S.db() as c:
+            self.assertEqual(len(S.list_pantry(c)), 3)
+        S.pantry_bulk({"ids": self.ids[:1], "action": "delete"})
+        S.pantry_bulk({"ids": self.ids[:1], "action": "purge"})
+        self.assertNotIn(self.ids[0], self.rows())
