@@ -687,3 +687,7 @@ body.selecting .toast{bottom:calc(176px + var(--safe-b))}
 .link-btn.inline{padding:0 2px;font-size:inherit;border:0;background:none;cursor:pointer}
 .section-h .pill-btn{color:var(--text)}
 .ing-note{color:var(--sub);font-weight:400;font-size:.9em}
+.food-detail{padding:4px 16px 14px;border-top:.5px solid var(--sep)}
+.food-detail .field{padding-left:0;padding-right:0}
+.food-detail .aliases{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.muted.small,.small.muted{font-size:13px}

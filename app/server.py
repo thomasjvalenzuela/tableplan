@@ -207,11 +207,247 @@ CREATE TABLE IF NOT EXISTS image_picks (
 """
 
 
+def _food_id(c, text):
+    """Canonical food id for a name (created when new)."""
+    t = (text or "").strip()
+    return n_foods.resolve(c, t) if t and n_foods.normalize(t) else None
+
+
+def _ing_food_name(line):
+    p = parse_ing_text(line)
+    return p["food"] if p else ""
+
+
+def _annotate_foods(c, rec, classify=None):
+    """Store the canonical food id on each ingredient of a recipe (in place). Returns the recipe."""
+    ings = [g for g in rec.get("recipeIngredient") or [] if isinstance(g, dict)]
+    names = {}
+    for g in ings:
+        nm = (g.get("food") or {}).get("name") if isinstance(g.get("food"), dict) else ""
+        names[id(g)] = nm or _ing_food_name(_ing_line(g))
+    found = n_foods.resolve_many(c, [n for n in names.values() if n], classify) if any(names.values()) else {}
+    for g in ings:
+        nm = names[id(g)]
+        g["food_id"] = found.get(nm) if nm else None
+    return rec
+
+
+def _food_classifier():
+    """AI mapping of unknown ingredient names onto existing canonical foods (or a new canonical name)."""
+    if not cfg("openai_key"):
+        return None
+
+    def classify(unknown, existing):
+        schema = {"type": "object", "additionalProperties": False, "required": ["items"], "properties": {"items": {
+            "type": "array", "items": {"type": "object", "additionalProperties": False,
+                                       "required": ["text", "food_id", "new_name"],
+                                       "properties": {"text": {"type": "string"}, "food_id": {"type": ["integer", "null"]},
+                                                      "new_name": {"type": "string"}}}}}}
+        out = openai_chat([{"role": "user", "content": (
+            "Map each grocery or ingredient name to an existing canonical food id when it is the same food, or propose a "
+            "short new canonical name (sentence case, singular unless the food is always plural, no brand, no size). "
+            "Different foods must stay different: sea salt is not table salt, unsalted butter is not salted butter, whole "
+            "milk is not 2% milk, extra-virgin olive oil is not olive oil, ground cinnamon is not cinnamon sticks.\n\n"
+            + json.dumps({"names": unknown[:80], "existing": existing[:600]}, ensure_ascii=False))}],
+            "food_map", schema, "food matching", f"{len(unknown)} names")
+        return out.get("items") or []
+    return classify
+
+
+def _food_usage(c):
+    """{food_id: {"recipes": n, "list": n, "pantry": n}}"""
+    use = {}
+    for row in c.execute("SELECT data FROM recipes"):
+        seen = set()
+        for g in (json.loads(row["data"]).get("recipeIngredient") or []):
+            fid = g.get("food_id") if isinstance(g, dict) else None
+            if fid is not None and fid not in seen:
+                seen.add(fid)
+                use.setdefault(fid, {"recipes": 0, "list": 0, "pantry": 0})
+                use[fid]["recipes"] += 1
+    for r in c.execute("SELECT food_id FROM shopping_items WHERE checked=0 AND food_id IS NOT NULL"):
+        use.setdefault(r[0], {"recipes": 0, "list": 0, "pantry": 0})
+        use[r[0]]["list"] += 1
+    for r in c.execute("SELECT food_id FROM pantry_items WHERE status='active' AND food_id IS NOT NULL"):
+        use.setdefault(r[0], {"recipes": 0, "list": 0, "pantry": 0})
+        use[r[0]]["pantry"] += 1
+    return use
+
+
+def foods_list(q=""):
+    q = " ".join((q or "").lower().split())[:60]
+    with db() as c:
+        use = _food_usage(c)
+        rows = c.execute("SELECT * FROM foods ORDER BY name COLLATE NOCASE").fetchall()
+        out = []
+        for r in rows:
+            als = n_foods.aliases(c, r["id"])
+            if q and q not in r["name"].lower() and not any(q in a.lower() for a in als):
+                continue
+            store = c.execute("SELECT store_id FROM food_store WHERE food_key=?", (n_lists.food_store_key(r["id"]),)).fetchone()
+            out.append({"id": r["id"], "name": r["name"], "category": r["category"] or aisle_for(r["name"]) or "",
+                        "location": r["location"] or "", "store_id": (store["store_id"] if store else r["store_id"]),
+                        "aliases": als[:20], "uses": use.get(r["id"], {"recipes": 0, "list": 0, "pantry": 0})})
+    out.sort(key=lambda f: (-(f["uses"]["recipes"] + f["uses"]["list"] + f["uses"]["pantry"]), f["name"].lower()))
+    return {"foods": out[:300], "total": len(out)}
+
+
+def food_update(fid, b):
+    require_native()
+    with db() as c:
+        if not n_foods.get(c, fid):
+            raise ApiError(404, "Food not found")
+        try:
+            if "name" in b:
+                n_foods.rename(c, fid, _s(b.get("name"), 60))
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        fields = {}
+        if "category" in b:
+            fields["category"] = _s(b.get("category"), 40).strip() or None
+        if "location" in b:
+            loc = _s(b.get("location"), 20)
+            if loc and loc not in LOCATIONS:
+                raise ApiError(400, "Pick fridge, freezer or pantry.")
+            fields["location"] = loc or None
+        if "store_id" in b:
+            sid = _store_arg(b.get("store_id"))
+            if sid is not None and not n_lists.get_store(c, sid):
+                raise ApiError(404, "Store not found")
+            fields["store_id"] = sid
+            k = n_lists.food_store_key(fid)
+            if sid is None:
+                c.execute("DELETE FROM food_store WHERE food_key=?", (k,))
+            else:
+                c.execute("INSERT INTO food_store(food_key, store_id) VALUES (?,?) ON CONFLICT(food_key) DO UPDATE SET "
+                          "store_id=excluded.store_id", (k, sid))
+        n_foods.update(c, fid, **fields)
+    return next((f for f in foods_list()["foods"] if f["id"] == fid), {"id": fid})
+
+
+def _food_repoint(c, src, dst):
+    """Move every reference from food src to dst; returns what moved (for Undo)."""
+    refs = {"recipes": [], "list": [r[0] for r in c.execute("SELECT id FROM shopping_items WHERE food_id=?", (src,))],
+            "pantry": [r[0] for r in c.execute("SELECT id FROM pantry_items WHERE food_id=?", (src,))],
+            "upc": [r[0] for r in c.execute("SELECT code FROM upc_cache WHERE food_id=?", (src,))], "store": None}
+    c.execute("UPDATE shopping_items SET food_id=? WHERE food_id=?", (dst, src))
+    c.execute("UPDATE pantry_items SET food_id=? WHERE food_id=?", (dst, src))
+    c.execute("UPDATE upc_cache SET food_id=? WHERE food_id=?", (dst, src))
+    for t in ("upc_local",):
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (t,)).fetchone():
+            c.execute(f"UPDATE {t} SET food_id=? WHERE food_id=?", (dst, src))
+    st = c.execute("SELECT store_id FROM food_store WHERE food_key=?", (n_lists.food_store_key(src),)).fetchone()
+    if st:
+        refs["store"] = st["store_id"]
+        c.execute("DELETE FROM food_store WHERE food_key=?", (n_lists.food_store_key(src),))
+        c.execute("INSERT OR IGNORE INTO food_store(food_key, store_id) VALUES (?,?)", (n_lists.food_store_key(dst), st["store_id"]))
+    for row in c.execute("SELECT id, data FROM recipes").fetchall():
+        rec = json.loads(row["data"])
+        hit = []
+        for i, g in enumerate(rec.get("recipeIngredient") or []):
+            if isinstance(g, dict) and g.get("food_id") == src:
+                g["food_id"] = dst
+                hit.append(i)
+        if hit:
+            refs["recipes"].append([row["id"], hit])
+            c.execute("UPDATE recipes SET data=? WHERE id=?", (json.dumps(rec, separators=(",", ":")), row["id"]))
+    return refs
+
+
+def _food_unpoint(c, src, dst, refs):
+    for iid in refs.get("list") or []:
+        c.execute("UPDATE shopping_items SET food_id=? WHERE id=?", (src, iid))
+    for pid in refs.get("pantry") or []:
+        c.execute("UPDATE pantry_items SET food_id=? WHERE id=?", (src, pid))
+    for code in refs.get("upc") or []:
+        c.execute("UPDATE upc_cache SET food_id=? WHERE code=?", (src, code))
+    if refs.get("store"):
+        c.execute("INSERT OR REPLACE INTO food_store(food_key, store_id) VALUES (?,?)", (n_lists.food_store_key(src), refs["store"]))
+    for rid, idxs in refs.get("recipes") or []:
+        rec = n_recipes.get(c, rid)
+        if not rec:
+            continue
+        ings = rec.get("recipeIngredient") or []
+        for i in idxs:
+            if i < len(ings) and isinstance(ings[i], dict) and ings[i].get("food_id") == dst:
+                ings[i]["food_id"] = src
+        c.execute("UPDATE recipes SET data=? WHERE id=?", (json.dumps(rec, separators=(",", ":")), rid))
+
+
+def foods_merge(b):
+    require_native()
+    ids = b.get("ids")
+    into = b.get("into")
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or not all(isinstance(x, int) and not isinstance(x, bool) for x in ids):
+        raise ApiError(400, "Pick the foods to merge.")
+    if not isinstance(into, int) or isinstance(into, bool):
+        raise ApiError(400, "Pick the food to keep.")
+    with db() as c:
+        try:
+            token, gone = n_foods.merge(c, ids, into, _food_repoint)
+        except KeyError:
+            raise ApiError(404, "Food not found")
+    return {"ok": True, "merged": len(gone), "undo_token": token}
+
+
+def foods_unmerge(b):
+    require_native()
+    token = _s((b or {}).get("undo_token"), 40).strip()
+    with db() as c:
+        try:
+            n_foods.unmerge(c, token, _food_unpoint)
+        except KeyError:
+            raise ApiError(404, "That merge can't be undone any more.")
+    return {"ok": True}
+
+
+def migrate_foods(c):
+    """One time: canonical foods for everything already stored (recipes, list, pantry, store memory, barcodes)."""
+    counts = {"foods_seeded": n_foods.seed(c, c.execute("SELECT * FROM shelf_rules").fetchall()),
+              "recipes": 0, "list_items": 0, "pantry_items": 0, "store_memory": 0, "barcodes": 0}
+    for row in c.execute("SELECT id FROM recipes").fetchall():
+        rec = n_recipes.get(c, row["id"])
+        if rec and rec.get("recipeIngredient"):
+            _annotate_foods(c, rec)
+            c.execute("UPDATE recipes SET data=? WHERE id=?", (json.dumps(rec, separators=(",", ":")), row["id"]))
+            counts["recipes"] += 1
+    for r in c.execute("SELECT id, food, note, text FROM shopping_items WHERE food_id IS NULL").fetchall():
+        fid = _food_id(c, r["food"]) if r["food"] else None
+        if fid:
+            c.execute("UPDATE shopping_items SET food_id=? WHERE id=?", (fid, r["id"]))
+            counts["list_items"] += 1
+    for r in c.execute("SELECT id, name FROM pantry_items WHERE food_id IS NULL").fetchall():
+        fid = _food_id(c, r["name"])
+        if fid:
+            c.execute("UPDATE pantry_items SET food_id=? WHERE id=?", (fid, r["id"]))
+            counts["pantry_items"] += 1
+    for r in c.execute("SELECT food_key, store_id FROM food_store WHERE food_key NOT LIKE 'food:%'").fetchall():
+        fid = _food_id(c, r["food_key"])
+        if fid:
+            c.execute("INSERT OR IGNORE INTO food_store(food_key, store_id) VALUES (?,?)", (n_lists.food_store_key(fid), r["store_id"]))
+            counts["store_memory"] += 1
+    for r in c.execute("SELECT code, data FROM upc_cache WHERE food_id IS NULL").fetchall():
+        try:
+            d = json.loads(r["data"] or "{}")
+        except ValueError:
+            continue
+        nm = d.get("name") or d.get("product_name") or ""
+        fid = _food_id(c, nm) if nm else None
+        if fid:
+            c.execute("UPDATE upc_cache SET food_id=? WHERE code=?", (fid, r["code"]))
+            counts["barcodes"] += 1
+    log("canonical foods:", ", ".join(f"{k} {v}" for k, v in counts.items()))
+    return counts
+
+
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     with db() as c:
         c.executescript(SCHEMA)
-        n_recipes.init(c); n_plans.init(c); n_lists.init(c)
+        n_recipes.init(c); n_plans.init(c); n_lists.init(c); n_foods.init(c)
+        for table, col in (("pantry_items", "food_id"), ("upc_cache", "food_id")):
+            if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pantry_items)")}
         for col, typ in (("qty", "REAL"), ("unit", "TEXT"), ("original_qty", "REAL")):
             if col not in cols:   # known amounts: qty left in `unit`, original_qty = the full package
@@ -221,6 +457,14 @@ def init_db():
             c.execute("INSERT INTO settings(key, value) VALUES ('stores_seeded', 'true')")
         if NATIVE:
             n_lists.single_list(c)   # one ongoing list; older installs with several get merged once
+        if c.execute("SELECT COUNT(*) FROM shelf_rules").fetchone()[0] == 0:
+            seed = json.load(open(SEED_FILE, encoding="utf-8"))
+            for r in seed["rules"]:
+                insert_rule(c, r, r.get("source", "starter"))
+            log(f"seeded {len(seed['rules'])} starter shelf-life rules")
+        if not c.execute("SELECT 1 FROM settings WHERE key='foods_migrated'").fetchone():
+            migrate_foods(c)
+            c.execute("INSERT INTO settings(key, value) VALUES ('foods_migrated', 'true')")
         if not c.execute("SELECT 1 FROM settings WHERE key='titlecase_migrated'").fetchone():
             for row in c.execute("SELECT id, name FROM recipes").fetchall():   # one-time: names in title case
                 tc = title_case(row["name"])
@@ -228,11 +472,6 @@ def init_db():
                     rec = n_recipes.get(c, row["id"])
                     n_recipes.update(c, row["id"], dict(rec, name=tc))
             c.execute("INSERT INTO settings(key, value) VALUES ('titlecase_migrated', 'true')")
-        if c.execute("SELECT COUNT(*) FROM shelf_rules").fetchone()[0] == 0:
-            seed = json.load(open(SEED_FILE, encoding="utf-8"))
-            for r in seed["rules"]:
-                insert_rule(c, r, r.get("source", "starter"))
-            log(f"seeded {len(seed['rules'])} starter shelf-life rules")
 
 
 RULE_FIELDS = ("sealed_pantry", "sealed_fridge", "opened_pantry", "opened_fridge", "freezer", "thawed_fridge")
@@ -846,7 +1085,7 @@ def parse_amount(text):
 
 
 def add_pantry_item(c, name, location=None, package_date=None, quantity_text="", mealie_item_id=None,
-                    qty=None, unit=None):
+                    qty=None, unit=None, food_id=None):
     """Stock an item. qty/unit, when known, are the amount bought (otherwise parsed from quantity_text)."""
     if qty is None and quantity_text:
         qty, unit = parse_amount(quantity_text)
@@ -863,9 +1102,11 @@ def add_pantry_item(c, name, location=None, package_date=None, quantity_text="",
         exp, src = (t + timedelta(days=d), "estimate") if d else (None, "none")
     cur = c.execute(
         """INSERT INTO pantry_items(name, quantity_text, location, purchased_on, frozen_on, expires_on,
-           expiry_source, rule_id, mealie_item_id, created_at, qty, unit, original_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           expiry_source, rule_id, mealie_item_id, created_at, qty, unit, original_qty, food_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (name.strip(), quantity_text or "", loc, iso(t), iso(t) if loc == "freezer" else None, iso(exp), src,
-         rule["id"] if rule else None, mealie_item_id, datetime.now().isoformat(timespec="seconds"), qty, unit, qty))
+         rule["id"] if rule else None, mealie_item_id, datetime.now().isoformat(timespec="seconds"), qty, unit, qty,
+         food_id if food_id is not None else _food_id(c, name)))
     event(c, cur.lastrowid, "added", f"{loc}; expires {iso(exp) or 'unknown'}")
     return cur.lastrowid
 
@@ -1172,6 +1413,7 @@ _recipe_lock = threading.Lock()
 sys.path.insert(0, HERE) if HERE not in sys.path else None  # python -I omits the script dir
 from native import lists as n_lists, plans as n_plans, recipes as n_recipes, scraper as n_scraper  # noqa: E402
 from native import units as n_units  # noqa: E402
+from native import foods as n_foods  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -1470,7 +1712,9 @@ def _save_new_recipe(data, image_url=None):
             data = polish_recipe(data)
         except Exception as e:   # the import still succeeds, just unpolished
             log("recipe polish skipped:", getattr(e, "message", None) or e)
+    classify = _food_classifier()
     with db() as c:
+        data = _annotate_foods(c, dict(data), classify)
         slug = n_recipes.create(c, data.get("name") or "Untitled recipe", data)
         rid = n_recipes.get(c, slug)["id"]
     if image_url:
@@ -1517,7 +1761,7 @@ def native_api(method, path, body=None, multipart=None):
                     raise ApiError(404, "Recipe not found")
                 return rec
             if method == "PUT":
-                return n_recipes.get(c, n_recipes.update(c, key, body or {}))
+                return n_recipes.get(c, n_recipes.update(c, key, _annotate_foods(c, dict(body or {}))))
             if method == "DELETE":
                 gone = n_recipes.get(c, key)
                 n_recipes.delete(c, key, images_dir=IMG_DIR)
@@ -1578,7 +1822,7 @@ def native_api(method, path, body=None, multipart=None):
                 ings = it.get("recipeIngredients") if it.get("recipeIngredients") is not None else rec.get("recipeIngredient") or []
                 lines = [_ing_line(g) for g in ings if _ing_line(g)]
                 n_lists.add_recipe_ingredients(c, lid, rec["id"], lines, it.get("recipeIncrementQuantity") or 1, parse_ing_text,
-                                               aisle_for, food_key)
+                                               aisle_for, food_key, resolve=_food_id)
             return n_lists.get_list(c, lid)
         mm = re.fullmatch(r"/api/households/shopping/lists/([^/]+)", p)
         if mm and method == "GET":
@@ -1591,7 +1835,7 @@ def native_api(method, path, body=None, multipart=None):
             for x in body or []:
                 by_list.setdefault(x["shoppingListId"], []).append(x.get("note") or x.get("display") or "")
             for lid, texts in by_list.items():
-                n_lists.add_items(c, lid, texts, parse_ing_text, aisle_for, food_key)
+                n_lists.add_items(c, lid, texts, parse_ing_text, aisle_for, food_key, resolve=_food_id)
             return {}
         mm = re.fullmatch(r"/api/households/shopping/items/([^/]+)", p)
         if mm and method == "PUT":
@@ -3637,7 +3881,7 @@ def recipe_polish(slug):
     if new is rec:
         raise ApiError(422, "The AI's rewrite dropped part of the method, so nothing was changed. Try again.")
     with db() as c:
-        slug = n_recipes.update(c, rec["id"], new)
+        slug = n_recipes.update(c, rec["id"], _annotate_foods(c, new))
         c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
     _recipe_cache["at"] = 0
     return recipe_detail(slug)
@@ -3662,7 +3906,7 @@ def recipe_restore_original(slug):
         rec = dict(rec, recipeIngredient=ings, description=o["description"] or rec.get("description") or "",
                    recipeInstructions=[{"id": str(uuid.uuid4()), "title": "", "text": t, "ingredientReferences": []}
                                        for t in o["steps"]])
-        slug = n_recipes.update(c, rec["id"], rec)
+        slug = n_recipes.update(c, rec["id"], _annotate_foods(c, rec))
         c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
     _recipe_cache["at"] = 0
     return recipe_detail(slug)
@@ -4913,7 +5157,8 @@ def plan_assign(b):
                 n_plans.delete_entry(c, old["id"])
                 replaced += _drop_entry_items(c, lid, old)
             eid = n_plans.add_entry(c, iso(d), et, rid, scale=scale)
-            added = n_lists.add_recipe_ingredients(c, lid, rid, lines, scale, parse_ing_text, aisle_for, food_key)
+            added = n_lists.add_recipe_ingredients(c, lid, rid, lines, scale, parse_ing_text, aisle_for, food_key,
+                                                   resolve=_food_id)
     return {"entry": plan_entry(eid, d), "added": len(set(added)),
             "skipped": sorted(set(skipped), key=str.lower), "replaced_removed": replaced}
 
@@ -5054,7 +5299,10 @@ def _pantry_by_key(c):
     rows = c.execute("SELECT * FROM pantry_items WHERE status='active' ORDER BY "
                      "CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id").fetchall()
     for r in rows:
-        for k in {food_key(r["name"]), food_key(clean_food(r["name"]))}:
+        keys = {food_key(r["name"]), food_key(clean_food(r["name"]))}
+        if r["food_id"] is not None:
+            keys.add(f"f:{r['food_id']}")
+        for k in keys:
             if k:
                 out.setdefault(k, []).append(r["id"])
     return out
@@ -5120,7 +5368,8 @@ def recipe_cooked(slug, b):
         pantry = _pantry_by_key(c)
         snap = {}
         for name, need, unit in _cook_needs(rec, factor):
-            ids = pantry.get(food_key(name)) or []
+            fid = n_foods.lookup(c, name)
+            ids = (pantry.get(f"f:{fid}") if fid is not None else None) or pantry.get(food_key(name)) or []
             row = next((r for r in (pantry_row(c, i) for i in ids) if r and r["status"] == "active"), None)
             if not row:
                 continue
@@ -5314,6 +5563,8 @@ def _store_arg(v):
 
 
 def _item_key(it):
+    if it.get("foodId"):
+        return n_lists.food_store_key(it["foodId"])
     return food_key((it.get("food") or {}).get("name") or it.get("note") or it.get("display") or "")
 
 
@@ -5330,7 +5581,7 @@ def list_add(b):
     with db() as c:
         lid = n_lists.single_list(c)
         try:
-            ids = n_lists.add_items(c, lid, items, parse_ing_text, aisle_for, food_key, sid)
+            ids = n_lists.add_items(c, lid, items, parse_ing_text, aisle_for, food_key, sid, resolve=_food_id)
         except KeyError:
             raise ApiError(404, "Store not found")
         names = _recipe_names(c)
@@ -6484,6 +6735,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, get_settings())
 
         # --- recipes & images
+        if m == "GET" and path == "/api/foods":
+            require_native()
+            return self.send(200, foods_list(q.get("q", "")))
+        mm = re.fullmatch(r"/api/foods/(\d{1,12})", path)
+        if m == "PATCH" and mm:
+            return self.send(200, food_update(int(mm.group(1)), self.body()))
+        if m == "POST" and path == "/api/foods/merge":
+            return self.send(200, foods_merge(self.body()))
+        if m == "POST" and path == "/api/foods/unmerge":
+            return self.send(200, foods_unmerge(self.body()))
         if m == "POST" and path == "/api/recipes/bulk":
             return self.send(200, recipes_bulk(self.body()))
         if m == "POST" and path == "/api/categories/rename":
@@ -6761,7 +7022,7 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 raise ApiError(400, "Type the item.")
             with db() as c:
-                n_lists.set_item_text(c, item_id, text, parse_ing_text, aisle_for)
+                n_lists.set_item_text(c, item_id, text, parse_ing_text, aisle_for, resolve=_food_id)
         if "store_id" in b:
             with db() as c:
                 try:

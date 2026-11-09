@@ -86,6 +86,7 @@ def _item(r):
         "id": r["id"], "display": _display(r), "note": r["note"], "quantity": r["quantity"],
         "unit": {"name": r["unit"], "pluralName": r["unit_plural"] or None} if r["unit"] else None,
         "food": {"name": r["food"]} if r["food"] else None,
+        "foodId": r["food_id"] if "food_id" in r.keys() else None,
         "label": {"name": r["label"]} if r["label"] else None,
         "checked": bool(r["checked"]), "position": r["position"],
         "recipeIds": json.loads(r["recipe_ids"] or "[]"),
@@ -108,6 +109,8 @@ def init(c):
         c.execute("ALTER TABLE shopping_items ADD COLUMN store_id TEXT")
     if "contrib" not in cols:   # {recipe_id: quantity in the item's unit} each recipe added
         c.execute("ALTER TABLE shopping_items ADD COLUMN contrib TEXT NOT NULL DEFAULT '{}'")
+    if "food_id" not in cols:   # canonical food (foods table); NULL for non-food lines
+        c.execute("ALTER TABLE shopping_items ADD COLUMN food_id INTEGER")
     if "checked_how" not in cols:   # 'have' = ticked as "I already have this" (no purchase); NULL = bought
         c.execute("ALTER TABLE shopping_items ADD COLUMN checked_how TEXT")
     if "manual" not in cols:    # 1 = typed in by someone (quick add), so recipe removals never delete it
@@ -168,12 +171,14 @@ def _contrib(r):
     return d if isinstance(d, dict) else {}
 
 
-def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None, store_key=None, store_id=None, manual=False):
+def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None, store_key=None, store_id=None, manual=False,
+             resolve=None):
     """Insert one line, merging into an unchecked item with the same food+unit. Returns the item id.
 
     New items get ``store_id`` if given, else the store remembered for ``store_key(food or text)``.
     A recipe's share of the quantity is recorded in ``contrib`` so removing the recipe later subtracts exactly it;
-    ``manual`` marks lines someone typed in."""
+    ``manual`` marks lines someone typed in. With ``resolve(c, name) -> food_id`` lines merge by canonical food
+    ("table salt" and "Morton salt" are one item) and the remembered store is keyed by food id."""
     text = (text or "").strip()
     if not text:
         return None
@@ -186,13 +191,22 @@ def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None, sto
             unit = plural = ""
             qty = None
             note = "; ".join(x for x in (p["amount_text"], note) if x)
-        dup = c.execute("SELECT id, quantity, note, recipe_ids, contrib, manual FROM shopping_items WHERE list_id=? "
-                        "AND checked=0 AND food IS NOT NULL AND lower(food)=? AND coalesce(unit,'')=?",
-                        (list_id, food.lower(), unit)).fetchone()
+        fid = resolve(c, food) if resolve else None
+        if fid is not None:
+            dup = c.execute("SELECT id, quantity, note, recipe_ids, contrib, manual FROM shopping_items WHERE list_id=? "
+                            "AND checked=0 AND food IS NOT NULL AND food_id=? AND coalesce(unit,'')=?",
+                            (list_id, fid, unit)).fetchone()
+        else:
+            dup = c.execute("SELECT id, quantity, note, recipe_ids, contrib, manual FROM shopping_items WHERE list_id=? "
+                            "AND checked=0 AND food IS NOT NULL AND lower(food)=? AND coalesce(unit,'')=?",
+                            (list_id, food.lower(), unit)).fetchone()
     else:
         unit = plural = ""
         food, note, qty = None, text, 1.0
+        fid = resolve(c, text) if resolve else None
         dup = c.execute("SELECT id, quantity, note, recipe_ids, contrib, manual FROM shopping_items WHERE list_id=? "
+                        "AND checked=0 AND food_id=? ORDER BY position LIMIT 1", (list_id, fid)).fetchone() if fid is not None else None
+        dup = dup or c.execute("SELECT id, quantity, note, recipe_ids, contrib, manual FROM shopping_items WHERE list_id=? "
                         "AND checked=0 AND food IS NULL AND lower(note)=?", (list_id, text.lower())).fetchone()
     share = (qty or 0) if food else 0
     if dup:
@@ -209,35 +223,42 @@ def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None, sto
                   (new_qty, new_note, json.dumps(rids), json.dumps(contrib), int(bool(dup["manual"]) or manual), dup["id"]))
         return dup["id"]
     pos = c.execute("SELECT coalesce(max(position), -1) + 1 FROM shopping_items WHERE list_id=?", (list_id,)).fetchone()[0]
+    if store_id is None and fid is not None:
+        store_id = store_for(c, food_store_key(fid))
     if store_id is None and store_key:
         store_id = store_for(c, store_key(food or text))
     iid = str(uuid.uuid4())
     c.execute("INSERT INTO shopping_items (id, list_id, text, food, quantity, unit, unit_plural, note, label, checked, "
-              "position, recipe_ids, created_at, store_id, contrib, manual) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
+              "position, recipe_ids, created_at, store_id, contrib, manual, food_id) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)",
               (iid, list_id, text, food, qty, unit or None, plural or None, note,
                (categorize(food or text) if categorize else None) or None, pos,
                json.dumps([recipe_id] if recipe_id else []), _now(), store_id,
-               json.dumps({recipe_id: share} if recipe_id else {}), int(bool(manual))))
+               json.dumps({recipe_id: share} if recipe_id else {}), int(bool(manual)), fid))
     return iid
 
 
-def add_items(c, list_id, texts, parse=None, categorize=None, store_key=None, store_id=None):
+def food_store_key(food_id):
+    """food_store key for a canonical food (older installs keyed it by the food's words)."""
+    return f"food:{food_id}"
+
+
+def add_items(c, list_id, texts, parse=None, categorize=None, store_key=None, store_id=None, resolve=None):
     """Add free-text lines. parse(text) -> {quantity, unit, unit_plural, food, note} | None;
     categorize(food_or_text) -> aisle label | None. Returns the affected item ids (merged items included)."""
     _require_list(c, list_id)
     if store_id is not None and not get_store(c, store_id):
         raise KeyError(f"store {store_id} not found")
-    ids = [_add_one(c, list_id, t, parse, categorize, store_key=store_key, store_id=store_id, manual=True)
+    ids = [_add_one(c, list_id, t, parse, categorize, store_key=store_key, store_id=store_id, manual=True, resolve=resolve)
            for t in texts or []]
     return [i for i in ids if i]
 
 
-def add_recipe_ingredients(c, list_id, recipe_id, lines, scale, parse, categorize, store_key=None):
+def add_recipe_ingredients(c, list_id, recipe_id, lines, scale, parse, categorize, store_key=None, resolve=None):
     """Add a recipe's ingredient lines with parsed quantities multiplied by `scale`."""
     _require_list(c, list_id)
     scale = float(scale or 1)
-    ids = [_add_one(c, list_id, t, parse, categorize, scale, str(recipe_id) if recipe_id else None, store_key)
-           for t in lines or []]
+    ids = [_add_one(c, list_id, t, parse, categorize, scale, str(recipe_id) if recipe_id else None, store_key,
+                    resolve=resolve) for t in lines or []]
     return [i for i in ids if i]
 
 
@@ -299,7 +320,7 @@ def remove_recipe_items(c, list_id, recipe_id):
     return removed
 
 
-def set_item_text(c, item_id, text, parse=None, categorize=None):
+def set_item_text(c, item_id, text, parse=None, categorize=None, resolve=None):
     """Rewrite an item from new free text (re-parsed and re-categorized); keeps its store and recipe links."""
     text = (text or "").strip()
     if not text:
@@ -312,8 +333,9 @@ def set_item_text(c, item_id, text, parse=None, categorize=None):
     else:
         vals = (text, None, 1.0, None, None, text)
     label = (categorize(food or text) if categorize else None) or None
-    return c.execute("UPDATE shopping_items SET text=?, food=?, quantity=?, unit=?, unit_plural=?, note=?, label=? "
-                     "WHERE id=?", (*vals, label, item_id)).rowcount > 0
+    fid = resolve(c, food or text) if resolve else None
+    return c.execute("UPDATE shopping_items SET text=?, food=?, quantity=?, unit=?, unit_plural=?, note=?, label=?, food_id=? "
+                     "WHERE id=?", (*vals, label, fid, item_id)).rowcount > 0
 
 
 def mark_have(c, item_ids):
@@ -488,7 +510,7 @@ def migrate_from_mealie(c, mealie):
 
 
 __all__ = ["init", "single_list", "get_item", "unchecked_for_recipe", "missing_counts", "remove_recipe_items",
-           "mark_have", "recently_checked", "checked_since", "list_stores", "get_store", "seed_stores", "replace_stores", "store_for",
+           "mark_have", "recently_checked", "checked_since", "food_store_key", "list_stores", "get_store", "seed_stores", "replace_stores", "store_for",
            "set_item_store", "set_item_text", "list_lists", "create_list", "rename_list", "delete_list", "get_list", "add_items",
            "add_recipe_ingredients", "set_checked", "update_item", "delete_item", "clear_checked",
            "migrate_from_mealie"]

@@ -1609,7 +1609,8 @@ async function openSettings() {
 
 
       <div class="group-label">Recipes</div>
-      <div class="group"><button class="row" id="st-cats"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Categories</div><div class="b">${esc((s.categories || []).slice(0, 4).join(", "))}${(s.categories || []).length > 4 ? "…" : ""}</div></div><span class="chev">${ic("chevR")}</span></button></div>
+      <div class="group"><button class="row" id="st-cats"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Categories</div><div class="b">${esc((s.categories || []).slice(0, 4).join(", "))}${(s.categories || []).length > 4 ? "…" : ""}</div></div><span class="chev">${ic("chevR")}</span></button>
+        ${c.backend === "native" ? `<button class="row" id="st-foods"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("leaf")}</span><div class="main"><div class="a">Foods</div><div class="b">One name per food, so recipes, list and pantry match</div></div><span class="chev">${ic("chevR")}</span></button>` : ""}</div>
       <div class="group-label">Shopping</div>
       <div class="group"><button class="row" id="st-stores"><span class="ic bg-teal" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("store")}</span><div class="main"><div class="a">Stores</div><div class="b" id="st-stores-b">Rename, reorder or remove the stores on your list</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Pantry</div>
@@ -1658,6 +1659,7 @@ async function openSettings() {
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $("#st-stores").onclick = () => storesManager(draw);
     $("#st-cats").onclick = () => categoriesManager(draw);
+    $("#st-foods") && ($("#st-foods").onclick = () => foodsManager(draw));
     $("#st-polish").onchange = (e) => { save({ polish_imports: e.target.checked }); if (e.target.checked && !c.ai_key) toast("Polishing needs an OpenAI key", "Add key", () => openSetupSection("ai", "AI recipe import", reloadCfg)); };
     $("#st-backups").onclick = () => backupsView(draw);
     api("GET", "/api/stores").then((ss) => { const b = $("#st-stores-b"); if (b && Array.isArray(ss) && ss.length) b.textContent = ss.map((x) => x.name).join(", "); }).catch(() => {});
@@ -1726,6 +1728,83 @@ async function storesManager(back) {
     });
   };
   draw();
+}
+
+// ---------- Settings → Foods: canonical foods (rename, merge duplicates with Undo, default store/location/category)
+function foodsManager(back) {
+  const F = { q: "", list: [], total: 0, sel: new Set(), open: null, merging: false, stores: [] };
+  const uses = (u) => [u.recipes ? plural(u.recipes, "recipe") : "", u.list ? "on list" : "", u.pantry ? "in pantry" : ""].filter(Boolean).join(" · ") || "Not used yet";
+  const load = async () => {
+    try {
+      const [d, st] = await Promise.all([api("GET", `/api/foods?q=${enc(F.q)}`), F.stores.length ? F.stores : api("GET", "/api/stores").catch(() => [])]);
+      F.list = d.foods || []; F.total = d.total || 0; F.stores = st || [];
+    } catch (e) { fail(e); }
+    drawRows();
+  };
+  const shell = () => {
+    if (!sheetBody()) return;
+    sheetBody().innerHTML = `<div class="btn-row" style="margin-bottom:12px"><button class="btn sec small" id="fm-back">${ic("chevL")} Settings</button></div>
+      <div class="search">${ic("search")}<input id="fm-q" type="search" placeholder="Search foods" autocomplete="off" value="${esc(F.q)}"></div>
+      <div class="pk-tools"><span class="muted small" id="fm-n"></span><span class="grow"></span><button class="link-btn" id="fm-merge" aria-pressed="false">Merge duplicates</button></div>
+      <div id="fm-list">${loading()}</div><div class="pk-bar" id="fm-bar" hidden></div>
+      <p class="hint">Every ingredient, list item and pantry item points at one of these foods, so “Morton iodized salt” and “table salt” match while sea salt stays separate.</p>`;
+    $("#fm-back").onclick = back;
+    let t;
+    $("#fm-q").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { F.q = e.target.value; load(); }, 200); };
+    $("#fm-merge").onclick = () => { F.merging = !F.merging; F.sel.clear(); $("#fm-merge").textContent = F.merging ? "Cancel" : "Merge duplicates"; $("#fm-merge").setAttribute("aria-pressed", String(F.merging)); drawRows(); };
+  };
+  const drawRows = () => {
+    const box = $("#fm-list"); if (!box) return;
+    $("#fm-n").textContent = `${plural(F.total, "food")}`;
+    box.innerHTML = F.list.length ? `<div class="group">${F.list.map((f) => {
+      const on = F.sel.has(f.id), open = F.open === f.id;
+      return `<div class="food-row ${open ? "open" : ""}"><button class="row" data-fid="${esc(f.id)}" ${F.merging ? `aria-pressed="${on}"` : `aria-expanded="${open}"`}>
+        ${F.merging ? `<span class="selc ${on ? "on" : ""}" aria-hidden="true">${on ? ic("check") : ""}</span>` : ""}
+        <div class="main"><div class="a">${esc(f.name)}</div><div class="b">${esc(uses(f.uses))}${f.aliases.length ? ` · ${esc(plural(f.aliases.length, "other name"))}` : ""}</div></div>${F.merging ? "" : `<span class="chev">${ic(open ? "chevD" : "chevR")}</span>`}</button>
+        ${open ? foodDetail(f) : ""}</div>`;
+    }).join("")}</div>` : `<div class="empty">No foods match.</div>`;
+    $$("#fm-list [data-fid]").forEach((b) => (b.onclick = () => {
+      const id = +b.dataset.fid;
+      if (F.merging) { F.sel.has(id) ? F.sel.delete(id) : F.sel.add(id); }
+      else F.open = F.open === id ? null : id;
+      drawRows();
+    }));
+    const f = F.list.find((x) => x.id === F.open);
+    if (f && !F.merging) bindDetail(f);
+    drawBar();
+  };
+  const foodDetail = (f) => `<div class="food-detail">
+      <div class="field"><label>Name</label><input id="fd-name" value="${esc(f.name)}" maxlength="60"></div>
+      <div class="field"><label>Category</label><input id="fd-cat" value="${esc(f.category)}" maxlength="40" placeholder="Aisle"></div>
+      <div class="field"><label>Stored in</label><select id="fd-loc">${[["", "Automatic"], ["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([v, l]) => `<option value="${v}" ${f.location === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="field"><label>Buy at</label><select id="fd-store"><option value="">Any store</option>${F.stores.map((s) => `<option value="${esc(s.id)}" ${String(f.store_id) === String(s.id) ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select></div>
+      ${f.aliases.length ? `<div class="aliases"><small class="muted">Also matches</small>${f.aliases.map((a) => `<span class="cat-pill">${esc(a)}</span>`).join("")}</div>` : ""}
+    </div>`;
+  const bindDetail = (f) => {
+    const save = async (body, msg) => { try { await api("PATCH", `/api/foods/${enc(f.id)}`, body); if (msg) toast(msg); await load(); } catch (e) { fail(e); } };
+    $("#fd-name").onchange = (e) => { const v = e.target.value.trim(); if (v && v !== f.name) save({ name: v }, `Renamed to ${v}`); };
+    $("#fd-cat").onchange = (e) => save({ category: e.target.value.trim() });
+    $("#fd-loc").onchange = (e) => save({ location: e.target.value }, "Saved");
+    $("#fd-store").onchange = (e) => save({ store_id: e.target.value || null }, "Saved");
+  };
+  const drawBar = () => {
+    const bar = $("#fm-bar"); if (!bar) return;
+    bar.hidden = !F.merging;
+    if (!F.merging) return;
+    const chosen = F.list.filter((f) => F.sel.has(f.id));
+    bar.innerHTML = chosen.length < 2 ? `<span>Pick 2 or more foods that are the same thing</span>` :
+      `<span>Keep:</span>${chosen.map((f) => `<button class="filter sm" data-into="${esc(f.id)}">${esc(f.name)}</button>`).join("")}`;
+    $$("[data-into]", bar).forEach((b) => (b.onclick = async () => {
+      const into = +b.dataset.into, ids = chosen.map((f) => f.id).filter((x) => x !== into);
+      try {
+        const r = await api("POST", "/api/foods/merge", { ids, into });
+        toast(`Merged ${plural(r.merged, "food")} into ${b.textContent}`, "Undo", async () => { try { await api("POST", "/api/foods/unmerge", { undo_token: r.undo_token }); load(); } catch (x) { fail(x); } });
+        F.merging = false; F.sel.clear(); const m = $("#fm-merge"); if (m) m.textContent = "Merge duplicates";
+        load();
+      } catch (e) { fail(e); }
+    }));
+  };
+  shell(); load();
 }
 
 // ---------- Settings → Categories (add, rename everywhere, delete with Undo, reorder; every change saves right away)
