@@ -160,6 +160,7 @@ function renderTabs() {
 }
 function go(tab) {
   state.tab = tab;
+  document.body.classList.remove("selecting");
   if (location.hash !== "#" + tab) history.pushState(null, "", "#" + tab);
   lastHash = location.hash;
   renderTabs();
@@ -170,6 +171,7 @@ let lastHash = null;
 function route() {
   if (location.hash === lastHash && document.getElementById("app").childElementCount) return;
   lastHash = location.hash;
+  document.body.classList.remove("selecting");
   const h = decodeURIComponent(location.hash.slice(1));
   if (h.startsWith("recipe/")) { window.scrollTo(0, 0); return renderRecipe(h.slice(7)); }
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));

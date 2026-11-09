@@ -654,3 +654,27 @@ a.row{color:var(--text);text-decoration:none}
 .plan-cta{display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin-top:12px;padding:16px;border-radius:14px;background:var(--card);box-shadow:var(--shadow)}
 .plan-cta span{color:var(--sub);font-size:14.5px}
 .plan-cta .btn{width:auto;margin-top:6px}
+.cat-pills{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}
+.cat-pill{font-size:12.5px;font-weight:600;padding:4px 10px;border-radius:999px;background:var(--fill);color:var(--text)}
+.cook-due{display:flex;align-items:center;gap:10px;margin:8px 0 4px;font-size:14px;color:var(--sub)}
+.cook-due .cook-pill{margin:0;padding:7px 14px;font-size:14px}
+/* recipes: select mode */
+.text-btn{border:0;background:none;color:var(--blue);font:inherit;font-size:16px;font-weight:500;padding:8px 6px;cursor:pointer}
+.text-btn.strong{font-weight:700}
+.text-btn:disabled{opacity:.4}
+.recipe-list .row.sel,.rcard.sel{background:var(--fill)}
+.recipe-list .selc{margin-right:2px}
+.rcard .img{position:relative}
+.rcard .selc{position:absolute;top:10px;left:10px;background:rgba(255,255,255,.85);border-color:#fff}
+.rcard .selc.on{background:var(--blue);border-color:var(--blue)}
+.sel-bar{position:fixed;left:0;right:0;bottom:calc(56px + var(--safe-b));z-index:25;padding:10px 16px;background:var(--bg-elev);border-top:.5px solid var(--sep);box-shadow:0 -4px 16px rgba(0,0,0,.08)}
+.sel-bar[hidden]{display:none}
+.sel-row{display:flex;align-items:center;gap:6px;max-width:760px;margin:0 auto;flex-wrap:wrap}
+.sel-row .grow{flex:1}
+.sel-row .pill-btn{box-shadow:none;background:var(--fill)}
+.sel-row .pill-btn.ink{background:var(--ink);color:var(--on-ink)}
+.sel-row .pill-btn.danger{background:var(--red);color:#fff}
+.sel-cats{display:flex;flex-wrap:wrap;gap:6px;max-width:760px;margin:0 auto 8px}
+body.selecting #app{padding-bottom:calc(170px + var(--safe-b))}
+@media (min-width:1024px){.sel-bar{left:var(--sidebar);bottom:0}}
+body.selecting .toast{bottom:calc(176px + var(--safe-b))}

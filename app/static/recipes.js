@@ -28,45 +28,130 @@ function ingLine(x, factor, portion = 1) {
 const recipeImg = (r, size = "min") => (r && r.has_image ? `/img/${enc(r.id)}?size=${enc(size)}&v=${enc(r.image_v || "")}` : null);
 
 // ------------------------------------------------------------------ RECIPES list
-const rstate = { q: "", filter: "all", list: null, tags: [] };
+const rstate = { q: "", filter: "all", list: null, tags: [], sel: null, last: -1, shown: [] };
 async function renderRecipes() {
-  app.innerHTML = topbar(`<button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
+  rstate.sel = null;
+  app.innerHTML = topbar(`<button class="text-btn" id="btn-select">Select</button><button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
     `<h1 class="title">All recipes</h1>
     <div class="search">${ic("search")}<input id="rq" placeholder="Search recipes" value="${esc(rstate.q)}" autocomplete="off"></div>
-    <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div>`;
+    <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div><div class="sel-bar" id="sel-bar" hidden></div>`;
   bindTopbar();
   $("#btn-add").onclick = openAddRecipe;
+  $("#btn-select").onclick = () => setSelect(!rstate.sel);
   try { const d = await api("GET", "/api/recipes"); rstate.list = d.recipes; rstate.tags = d.tags; }
   catch (e) { $("#rlist").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
-  const chips = [["all", "All"], ["fav", "♥ Favorites"], ...["Breakfast", "Lunch", "Dinner", "Dessert", "Snack"].filter((t) => rstate.tags.some((x) => x.toLowerCase() === t.toLowerCase())).map((t) => [t, t]),
-    ...rstate.tags.filter((t) => !["breakfast", "lunch", "dinner", "dessert", "snack"].includes(t.toLowerCase())).slice(0, 12).map((t) => [t, t])];
-  $("#rchips").innerHTML = chips.map(([k, l]) => `<button class="filter ${rstate.filter === k ? "on" : ""}" data-f="${esc(k)}">${esc(l)}</button>`).join("");
-  $$("#rchips [data-f]").forEach((b) => (b.onclick = () => { rstate.filter = b.dataset.f; $$("#rchips .filter").forEach((x) => x.classList.toggle("on", x === b)); draw(); }));
+  drawRecipeChips();
   let t;
-  $("#rq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { rstate.q = e.target.value; draw(); }, 120); };
-  const draw = () => {
-    const q = rstate.q.trim().toLowerCase();
-    const list = rstate.list.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.tags.some((x) => x.toLowerCase().includes(q))) &&
-      (rstate.filter === "all" || (rstate.filter === "fav" ? r.favorite : [...r.tags, ...r.categories].some((x) => x.toLowerCase() === rstate.filter.toLowerCase()))));
-    if (!rstate.list.length) {
-      $("#rlist").innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>`;
-      $("#r-first").onclick = openAddRecipe; return;
-    }
-    if (!list.length) { $("#rlist").innerHTML = `<div class="empty">No recipes match.</div>`; return; }
-    const meta = (r) => `<div class="meta">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : ""}${r.minutes && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span style="color:var(--red)">♥</span>' : ""}</div>`;
-    $("#rlist").innerHTML = `<div class="group recipe-list">${list.map((r) => {
-      const img = recipeImg(r);
-      return `<button class="row" data-slug="${esc(r.slug)}"><div class="thumb" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
-        <div class="main"><div class="a">${esc(r.name)}</div>${meta(r)}</div><span class="chev">${ic("chevR")}</span></button>`;
-    }).join("")}</div>
-    <div class="recipe-grid">${list.map((r) => {
-      const img = recipeImg(r);
-      return `<button class="rcard" data-slug="${esc(r.slug)}"><div class="img" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}${r.favorite ? '<span class="heart">♥</span>' : ""}</div>
-        <div class="body"><div class="n">${esc(r.name)}</div>${meta(r)}</div></button>`;
-    }).join("")}</div>`;
-    $$("#rlist [data-slug]").forEach((b) => (b.onclick = () => openRecipe(b.dataset.slug)));
+  $("#rq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { rstate.q = e.target.value; drawRecipeList(); }, 120); };
+  drawRecipeList();
+}
+function drawRecipeChips() {
+  const cats = (state.cfg?.settings?.categories || []).filter((c) => rstate.list.some((r) => (r.categories || []).includes(c)));
+  const uncat = rstate.list.some((r) => !(r.categories || []).length) && cats.length;
+  const chips = [["all", "All"], ["fav", "♥ Favorites"], ...cats.map((c) => ["cat:" + c, c]), ...(uncat ? [["none", "Uncategorized"]] : [])];
+  if (!chips.some(([k]) => k === rstate.filter)) rstate.filter = "all";
+  $("#rchips").innerHTML = chips.map(([k, l]) => `<button class="filter ${rstate.filter === k ? "on" : ""}" data-f="${esc(k)}">${esc(l)}</button>`).join("");
+  $$("#rchips [data-f]").forEach((b) => (b.onclick = () => { rstate.filter = b.dataset.f; $$("#rchips .filter").forEach((x) => x.classList.toggle("on", x === b)); drawRecipeList(); }));
+}
+function setSelect(on) {
+  rstate.sel = on ? new Set() : null; rstate.last = -1;
+  const b = $("#btn-select"); if (b) b.textContent = on ? "Cancel" : "Select";
+  document.body.classList.toggle("selecting", !!on);
+  drawRecipeList();
+}
+function drawRecipeList() {
+  const box = $("#rlist");
+  if (!box || !rstate.list) return;
+  const q = rstate.q.trim().toLowerCase(), f = rstate.filter;
+  const list = rstate.shown = rstate.list.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.tags.some((x) => x.toLowerCase().includes(q))) &&
+    (f === "all" || (f === "fav" ? r.favorite : f === "none" ? !(r.categories || []).length : f.startsWith("cat:") ? (r.categories || []).includes(f.slice(4)) : true)));
+  drawSelBar();
+  if (!rstate.list.length) {
+    box.innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>`;
+    $("#r-first").onclick = openAddRecipe; return;
+  }
+  if (!list.length) { box.innerHTML = `<div class="empty">No recipes match.</div>`; return; }
+  const sel = rstate.sel;
+  const mark = (r) => (sel ? `<span class="selc ${sel.has(r.slug) ? "on" : ""}" aria-hidden="true">${sel.has(r.slug) ? ic("check") : ""}</span>` : "");
+  const pressed = (r) => (sel ? `aria-pressed="${sel.has(r.slug)}"` : "");
+  const meta = (r) => `<div class="meta">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : ""}${r.minutes && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span class="heart-s">♥</span>' : ""}</div>`;
+  box.innerHTML = `<div class="group recipe-list ${sel ? "selecting" : ""}">${list.map((r, i) => {
+    const img = recipeImg(r);
+    return `<button class="row ${sel && sel.has(r.slug) ? "sel" : ""}" data-slug="${esc(r.slug)}" data-i="${i}" ${pressed(r)}>${mark(r)}<div class="thumb" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
+      <div class="main"><div class="a">${esc(r.name)}</div>${meta(r)}</div>${sel ? "" : `<span class="chev">${ic("chevR")}</span>`}</button>`;
+  }).join("")}</div>
+  <div class="recipe-grid ${sel ? "selecting" : ""}">${list.map((r, i) => {
+    const img = recipeImg(r);
+    return `<button class="rcard ${sel && sel.has(r.slug) ? "sel" : ""}" data-slug="${esc(r.slug)}" data-i="${i}" ${pressed(r)}><div class="img" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}${mark(r)}${r.favorite ? '<span class="heart">♥</span>' : ""}</div>
+      <div class="body"><div class="n">${esc(r.name)}</div>${meta(r)}</div></button>`;
+  }).join("")}</div>`;
+  box.onclick = (e) => {
+    const b = e.target.closest("[data-slug]"); if (!b) return;
+    if (!rstate.sel) return openRecipe(b.dataset.slug);
+    const i = +b.dataset.i, slug = b.dataset.slug;
+    if (e.shiftKey && rstate.last >= 0) {
+      const [lo, hi] = [Math.min(rstate.last, i), Math.max(rstate.last, i)];
+      rstate.shown.slice(lo, hi + 1).forEach((r) => rstate.sel.add(r.slug));
+    } else if (rstate.sel.has(slug)) rstate.sel.delete(slug); else rstate.sel.add(slug);
+    rstate.last = i;
+    drawRecipeList();
   };
-  draw();
+}
+const SEL = { arm: null, timer: 0, picking: false, cats: new Set(), busy: false };
+function drawSelBar() {
+  const bar = $("#sel-bar");
+  if (!bar) return;
+  if (!rstate.sel) { bar.hidden = true; bar.innerHTML = ""; SEL.picking = false; return; }
+  bar.hidden = false;
+  const n = rstate.sel.size, cats = state.cfg?.settings?.categories || [];
+  if (SEL.picking) {
+    bar.innerHTML = `<div class="sel-cats" role="group" aria-label="Categories">${cats.map((c) => `<button class="filter sm ${SEL.cats.has(c) ? "on" : ""}" data-sc="${esc(c)}" aria-pressed="${SEL.cats.has(c)}">${esc(c)}</button>`).join("")}</div>
+      <div class="sel-row"><span class="muted">Set for ${esc(plural(n, "recipe"))}</span><span class="grow"></span><button class="text-btn" id="sc-cancel">Cancel</button><button class="pill-btn ink" id="sc-apply" ${n ? "" : "disabled"}>Apply</button></div>`;
+    $$("[data-sc]", bar).forEach((b) => (b.onclick = () => { const c = b.dataset.sc; SEL.cats.has(c) ? SEL.cats.delete(c) : SEL.cats.add(c); drawSelBar(); }));
+    $("#sc-cancel").onclick = () => { SEL.picking = false; drawSelBar(); };
+    $("#sc-apply").onclick = async () => {
+      const slugs = [...rstate.sel], names = cats.filter((c) => SEL.cats.has(c));
+      try {
+        await api("POST", "/api/recipes/bulk", { slugs, categories: names });
+        toast(names.length ? `${plural(slugs.length, "recipe")} · ${names.join(", ")}` : `Cleared categories on ${plural(slugs.length, "recipe")}`);
+        SEL.picking = false; renderRecipes();
+      } catch (e) { fail(e); }
+    };
+    return;
+  }
+  bar.innerHTML = `<div class="sel-row"><b>${esc(n)} selected</b><button class="text-btn" id="sel-all">Select all</button><span class="grow"></span>
+    <button class="text-btn" id="sel-cat" ${n ? "" : "disabled"}>Set category</button>
+    <button class="pill-btn ${SEL.arm ? "danger" : ""}" id="sel-del" ${n ? "" : "disabled"}>${SEL.arm ? `Tap again to delete ${esc(n)}` : "Delete"}</button>
+    <button class="text-btn strong" id="sel-done">Done</button></div>`;
+  $("#sel-all").onclick = () => { rstate.shown.forEach((r) => rstate.sel.add(r.slug)); drawRecipeList(); };
+  $("#sel-done").onclick = () => setSelect(false);
+  $("#sel-cat").onclick = () => {
+    const chosen = rstate.list.filter((r) => rstate.sel.has(r.slug));
+    SEL.cats = new Set(cats.filter((c) => chosen.length && chosen.every((r) => (r.categories || []).includes(c))));
+    SEL.picking = true; drawSelBar();
+  };
+  $("#sel-del").onclick = async () => {
+    if (SEL.busy || !n) return;
+    if (!SEL.arm) {
+      SEL.arm = true; drawSelBar();
+      clearTimeout(SEL.timer); SEL.timer = setTimeout(() => { SEL.arm = null; drawSelBar(); }, 4000);
+      return;
+    }
+    clearTimeout(SEL.timer); SEL.arm = null; SEL.busy = true;
+    const slugs = [...rstate.sel], btn = $("#sel-del");
+    let done = 0;
+    try {
+      for (const slug of slugs) {
+        if (btn) btn.textContent = `Deleting ${done + 1} of ${slugs.length}…`;
+        await api("DELETE", `/api/recipe/${encodeURIComponent(slug)}`);
+        done++;
+      }
+    } catch (e) { fail(e); }
+    SEL.busy = false;
+    if (done) toast(`Deleted ${plural(done, "recipe")}`);
+    document.body.classList.remove("selecting");
+    renderRecipes();
+  };
 }
 
 // ------------------------------------------------------------------ RECIPE page
@@ -88,7 +173,9 @@ async function renderRecipe(slug) {
       <button class="round-btn fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite">${rec.favorite ? "♥" : "♡"}</button>
     </div>
     <div class="rd-body">
-      <h1>${esc(rec.name)}</h1>${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
+      <h1>${esc(rec.name)}</h1>${(rec.categories || []).length ? `<div class="cat-pills">${rec.categories.map((c) => `<span class="cat-pill">${esc(c)}</span>`).join("")}</div>` : ""}
+      ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>` : ""}
+      ${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
       <div class="stats">
         <div class="stat">${ic("clock")}<small>Cooking time</small><b>${esc(rec.minutes || "—")} <span>${rec.minutes ? "mins" : ""}</span></b></div>
         <div class="stat">${ic("chef")}<small>Difficulty</small><b>${esc(rec.difficulty)}</b></div>
@@ -101,6 +188,7 @@ async function renderRecipe(slug) {
         <button class="pill-btn" id="rd-missing">${ic("cart")} Add missing to list</button>
         <button class="pill-btn" id="rd-share">${ic("share")} Share & export</button>
         <button class="pill-btn" id="rd-edit">${ic("edit")} Edit</button>
+        ${rec.cook_entry ? "" : `<button class="pill-btn" id="rd-cooked">${ic("check")} Mark as cooked</button>`}
         ${extLink(rec.source_url) ? `<a class="pill-btn" ${extLink(rec.source_url)}>${ic("link")} Original</a>` : ""}
       </div>
       <div id="rd-miss"></div>
@@ -119,6 +207,12 @@ async function renderRecipe(slug) {
   $("#rd-plan").onclick = () => planRecipe(rec);
   $("#rd-missing").onclick = () => addMissing();
   $("#rd-edit").onclick = () => { location.hash = "edit/" + encodeURIComponent(slug); };
+  $("#rd-cooked").onclick = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    const body = rec.cook_entry ? { plan_id: rec.cook_entry.id } : { servings: R.servings };
+    try { await markCooked(rec.slug, body, () => { if (location.hash === "#recipe/" + encodeURIComponent(slug)) renderRecipe(slug); }); }
+    catch (x) { fail(x); btn.disabled = false; }
+  };
   drawContent();
   drawCookReady();
 }
@@ -376,7 +470,16 @@ function drawCook() {
   $("#ck-x").onclick = endCook;
   $("#ck-prev").onclick = () => cookMove(-1);
   $("#ck-next") && ($("#ck-next").onclick = () => cookMove(1));
-  $("#ck-done") && ($("#ck-done").onclick = () => { endCook(); toast("Enjoy your meal! 🍽️"); });
+  $("#ck-done") && ($("#ck-done").onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    const rec = R.rec, ce = rec && rec.cook_entry;
+    endCook();
+    if (!rec) return toast("Enjoy your meal! 🍽️");
+    const body = { servings: R.servings };
+    if (ce && ce.today) body.plan_id = ce.id;
+    try { await markCooked(rec.slug, body, () => { if (location.hash === "#recipe/" + encodeURIComponent(rec.slug)) renderRecipe(rec.slug); }); }
+    catch (x) { fail(x); }
+  });
   $("#ck-start") && ($("#ck-start").onclick = () => { unlockAudio(); C.timers.push({ step: C.i, label: s.timer_label || `Step ${C.i + 1}`, left: s.timer_sec, done: false }); drawCook(); });
   $("#ck-stop") && ($("#ck-stop").onclick = () => { C.timers = C.timers.filter((t) => t.step !== C.i); drawCook(); });
   $("#ck-add") && ($("#ck-add").onclick = () => { const t = C.timers.find((x) => x.step === C.i); if (t) { t.left += 60; t.done = false; } drawCook(); });
