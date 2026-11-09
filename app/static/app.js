@@ -2243,4 +2243,5 @@ function openUpdateHelp() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("#layer").firstChild && !$("#cook") && TABS.some((t) => t[0] === location.hash.slice(1))) refresh(); });
   setTimeout(maybeWhatsNew, 600);
+  setTimeout(() => resumeCook(), 300);   // timers survive a reload: reopen cook mode where it was
 })();

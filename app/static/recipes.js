@@ -419,7 +419,7 @@ async function drawContent() {
     };
   } else {
     if (!R.guide) {
-      box.innerHTML = state.cfg.ai_key ? `<div class="importing"><div class="pot">✨</div><div class="stage">Arranging the steps for your kitchen…</div><div class="muted small">First time only, about 10–20 seconds. After that it's instant.</div></div>` : loading();
+      box.innerHTML = R.guideAi ? `<div class="importing"><div class="pot">✨</div><div class="stage">Arranging the steps for your kitchen…</div></div>` : loading();
       try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided${R.guideAi ? "?ai=1" : ""}`); }
       catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
     }
@@ -429,11 +429,12 @@ async function drawContent() {
       const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
       html += `<div class="step-card"><div class="num">${n + 1}. ${esc(s.title || "")}</div><div class="txt">${esc(s.text)}</div>
         ${uses ? `<div class="uses">${uses}</div>` : ""}
-        <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${s.timer_sec ? `<span class="badge2 blue">⏱ ${esc(s.timer_label || fmtDur(s.timer_sec))}</span>` : ""}</div>
+        <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${stepTimers(s).map((t) => `<span class="badge2 blue">⏱ ${esc(t.label)}</span>`).join("")}${s.cue && !stepTimers(s).length ? `<span class="badge2 blue">👀 ${esc(s.cue)}</span>` : ""}</div>
         ${s.tip ? `<p class="hint" style="margin:8px 0 0">${esc(s.tip)}</p>` : ""}</div>`;
     });
     if (g.tips?.length) html += `<div class="group" style="padding:14px 16px"><b>Tips</b><ul style="margin:6px 0 0;padding-left:18px;color:var(--sub)">${g.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>`;
-    if (g.source !== "ai") html += `<div class="nudge" id="rd-ai" style="margin-top:14px"><span class="ic bg-indigo">${ic("sparkle")}</span><span><b>Make it smarter with AI</b><small>${state.cfg.ai_key ? `Reorders everything for your ${esc(state.cfg.settings.stove)} stove, with exact timing. Usually under 1¢.` : "Add your OpenAI key in Settings → AI recipe import."}</small></span></div>`;
+    if (g.ai_pending) html += `<p class="hint" id="rd-ai-wait">✨ A smarter AI order is being prepared. It will appear here by itself.</p>`;
+    else if (g.source !== "ai") html += `<div class="nudge" id="rd-ai" style="margin-top:14px"><span class="ic bg-indigo">${ic("sparkle")}</span><span><b>Make it smarter with AI</b><small>${state.cfg.ai_key ? `Reorders everything for your ${esc(state.cfg.settings.stove)} stove, with exact timing. Usually under 1¢.` : "Add your OpenAI key in Settings → AI recipe import."}</small></span></div>`;
     else html += `<button class="pill-btn" id="rd-ai-redo" style="margin-top:8px">${ic("refresh")} Re-do with AI</button>`;
     box.innerHTML = html;
     $("#rd-ai") && ($("#rd-ai").onclick = async () => {
@@ -441,6 +442,14 @@ async function drawContent() {
       box.insertAdjacentHTML("beforeend", loading());
       try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided?ai=1`); R.guideAi = true; drawContent(); } catch (e) { fail(e); drawContent(); }
     });
+    if (g.ai_pending && !R.guideWatch) {
+      R.guideWatch = setTimeout(async function poll(n = 0) {
+        R.guideWatch = null;
+        if (R.rec?.slug !== rec.slug || !$("#rd-ai-wait")) return;
+        try { const ng = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided`); if (ng.source === "ai") { R.guide = ng; drawContent(); return; } } catch (_) { return; }
+        if (n < 15) R.guideWatch = setTimeout(() => poll(n + 1), 6000);
+      }, 6000);
+    }
     $("#rd-ai-redo") && ($("#rd-ai-redo").onclick = async () => { try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/guided?ai=1&refresh=1`); drawContent(); } catch (e) { fail(e); } });
   }
   $$("#rd-content [data-ing]").forEach((p) => p.dataset.ing && (p.onclick = () => openImagePicker({ kind: "ingredient", name: p.dataset.ing, after: () => drawContent() })));
@@ -599,106 +608,249 @@ function openRecipeExport() {
 }
 
 // ------------------------------------------------------------------ COOK MODE (walkthrough with timers)
-const C = { i: 0, steps: [], timers: [], tick: null, wake: null, audio: null };
-async function startCook() {
+// Timers are stored as end times in localStorage, so they keep counting across steps, closing cook mode and reloads.
+const C = { i: 0, steps: [], tick: null, wake: null, audio: null, slug: null, presetFor: null };
+const TKEY = "tp.timers", CKEY = "tp.cook";
+const loadTimers = () => { try { const t = JSON.parse(localStorage.getItem(TKEY) || "[]"); return Array.isArray(t) ? t.filter((x) => x && x.end && x.id) : []; } catch (_) { return []; } };
+const saveTimers = (ts) => { try { localStorage.setItem(TKEY, JSON.stringify(ts.slice(-20))); } catch (_) {} };
+const leftOf = (t) => (t.paused != null ? t.paused : Math.max(0, Math.round((t.end - Date.now()) / 1000)));
+const stepTimers = (s) => (s.timers && s.timers.length ? s.timers : s.timer_sec ? [{ sec: s.timer_sec, label: s.timer_label, kind: "countdown" }] : []);
+
+async function startCook(opts = {}) {
   const btn = $("#rd-cook");
   if (btn?.disabled) return;
   if (!R.guide) {
     const label = btn?.innerHTML;
-    if (btn) { btn.disabled = true; btn.innerHTML = state.cfg.ai_key ? "✨ Arranging steps… (first time ~15 s)" : "Preparing…"; }
-    try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(R.rec.slug)}/guided`); }
+    if (btn) { btn.disabled = true; btn.innerHTML = "Preparing…"; }
+    try { R.guide = await api("GET", `/api/recipe/${encodeURIComponent(R.rec.slug)}/guided`); }   // instant: never waits for the AI
     catch (e) { R.guide = null; }
     finally { if (btn) { btn.disabled = false; btn.innerHTML = label; } }
   }
   let steps = R.guide?.steps || [];
   if (!steps.length) {   // fall back to the recipe's own steps so cooking always works
     steps = (R.rec.steps || []).filter((s) => s.text).map((s) => ({ title: s.title || "", text: s.text, ingredients: (s.refs || []).map((i) => ({ i, portion: 1 })),
-      timer_sec: s.duration_sec || null, timer_label: null, heat: null, temperature: null, tip: null }));
+      timers: s.duration_sec ? [{ sec: s.duration_sec, label: fmtDur(s.duration_sec), kind: "countdown" }] : [], heat: null, temperature: null, tip: null }));
   }
   if (!steps.length) return toast("This recipe has no instructions yet. Tap Edit to add them.", "Edit", () => { location.hash = "edit/" + encodeURIComponent(R.rec.slug); });
-  C.steps = steps.map((s) => ({ ...s, ingredients: s.ingredients || [], text: s.text || "" })); C.i = 0;
+  C.steps = steps.map((s) => ({ ...s, ingredients: s.ingredients || [], text: s.text || "" }));
+  C.slug = R.rec.slug;
+  C.i = Math.max(0, Math.min(C.steps.length - 1, opts.step || 0));
+  C.startedAt = opts.startedAt || Date.now();
+  rememberCook();
+  $("#cook")?.remove();
   const el = document.createElement("div"); el.className = "cook"; el.id = "cook"; document.body.appendChild(el);
   document.body.style.overflow = "hidden";
-  try { C.wake = await navigator.wakeLock?.request("screen"); } catch (_) {}
-  if ("Notification" in window && Notification.permission === "default" && window.isSecureContext) { try { Notification.requestPermission(); } catch (_) {} }
-  C.tick = setInterval(tickTimers, 1000);
+  await keepAwake();
   document.addEventListener("keydown", cookKeys);
   try { drawCook(); } catch (e) { endCook(); fail(e); }
+  ensureTimerTick();
+  if (R.guide?.ai_pending) watchAiGuide(C.slug);
 }
-function endCook() {
-  clearInterval(C.tick); C.timers = []; document.removeEventListener("keydown", cookKeys);
+// The AI version is being prepared: swap it in when it's ready (on the same step), without interrupting.
+function watchAiGuide(slug, tries = 0) {
+  if (tries > 20) return;
+  setTimeout(async () => {
+    if (!$("#cook") || C.slug !== slug) return;
+    let g; try { g = await api("GET", `/api/recipe/${encodeURIComponent(slug)}/guided`); } catch (_) { return; }
+    if (g.source === "ai") {
+      R.guide = g;
+      if (!$("#cook") || C.slug !== slug) return;
+      const cur = C.steps[C.i];
+      C.steps = g.steps.map((s) => ({ ...s, ingredients: s.ingredients || [], text: s.text || "" }));
+      if (C.i === 0 || !cur) { C.i = 0; drawCook(); toast("✨ Steps rearranged for your kitchen"); }
+      else toast("✨ A smarter step order is ready", "Use it", () => { C.i = 0; drawCook(); });
+    } else if (g.ai_pending) watchAiGuide(slug, tries + 1);
+  }, 6000);
+}
+function rememberCook() { try { localStorage.setItem(CKEY, JSON.stringify({ slug: C.slug, i: C.i, at: Date.now(), startedAt: C.startedAt, servings: R.servings })); } catch (_) {} }
+async function keepAwake() {
+  try { if (navigator.wakeLock && !document.hidden) { C.wake = await navigator.wakeLock.request("screen"); } } catch (_) { C.wake = null; }   // not supported: the screen may dim
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && $("#cook")) keepAwake(); if (!document.hidden) tickTimers(); });
+function endCook(finished) {
+  document.removeEventListener("keydown", cookKeys);
   try { C.wake?.release(); } catch (_) {}
+  C.wake = null;
+  if (finished) { saveTimers(loadTimers().filter((t) => t.slug !== C.slug)); try { localStorage.removeItem(CKEY); } catch (_) {} }
+  else if (!loadTimers().some((t) => t.slug === C.slug && !t.done)) { try { localStorage.removeItem(CKEY); } catch (_) {} }
   $("#cook")?.remove(); document.body.style.overflow = "";
+  drawTimerPill();
 }
-function cookKeys(e) { if (e.key === "ArrowRight") cookMove(1); if (e.key === "ArrowLeft") cookMove(-1); if (e.key === "Escape") endCook(); }
-function cookMove(d) { C.i = Math.max(0, Math.min(C.steps.length - 1, C.i + d)); drawCook(); }
+function cookKeys(e) { if (e.target.matches?.("input,textarea")) return; if (e.key === "ArrowRight") cookMove(1); if (e.key === "ArrowLeft") cookMove(-1); if (e.key === "Escape") endCook(); }
+function cookMove(d) { C.i = Math.max(0, Math.min(C.steps.length - 1, C.i + d)); C.presetFor = null; rememberCook(); drawCook(); }
+
+function addTimer(t) {
+  unlockAudio(); askNotify();
+  const ts = loadTimers();
+  ts.push({ id: Math.random().toString(36).slice(2, 10), slug: C.slug, step: C.i, label: t.label, end: Date.now() + t.sec * 1000, dur: t.sec, kind: t.kind || "countdown", side: t.side || 0 });
+  saveTimers(ts); ensureTimerTick(); drawCook();
+}
+function askNotify() {
+  if ("Notification" in window && Notification.permission === "default" && window.isSecureContext) { try { Notification.requestPermission(); } catch (_) {} }
+}
+const presetRow = (k) => `<div class="tpresets" role="group" aria-label="Start a timer">${[1, 3, 5, 10, 15].map((m) => `<button class="chip-s" data-preset="${m}" data-k="${esc(k)}">${m} min</button>`).join("")}
+  <form class="tcustom" data-k="${esc(k)}"><input type="number" min="1" max="600" inputmode="numeric" placeholder="min" aria-label="Minutes"><button class="chip-s" type="submit">Start</button></form></div>`;
+
 function drawCook() {
+  const el = $("#cook"); if (!el) return;
   const s = C.steps[C.i], rec = R.rec, f = factor(), n = C.steps.length;
   const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
-  const running = C.timers.find((t) => t.step === C.i);
-  $("#cook").innerHTML = `
-    <div class="cook-top"><button class="round-btn" id="ck-x" aria-label="Close">${ic("x")}</button><div class="prog"><i style="width:${((C.i + 1) / n) * 100}%"></i></div><span class="count">${C.i + 1}/${n}</span></div>
+  const mine = loadTimers().filter((t) => t.slug === C.slug && t.step === C.i);
+  const stated = stepTimers(s);
+  const timerCards = stated.map((t, k) => {
+    const run = mine.find((x) => x.src === k && !x.manual);
+    if (t.kind === "long") {
+      return `<div class="timer-ring long"><div><div class="t sm">${esc(t.label)}</div><div class="l">${run ? `Reminder set for ${esc(new Date(run.end).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))}` : "No countdown for this one"}</div></div>
+        <div class="acts">${run ? `<button class="btn sec small" data-stop="${esc(run.id)}">Cancel</button>` : `<button class="btn sec small" data-start="${k}">Remind me</button>`}</div></div>`;
+    }
+    const left = run ? leftOf(run) : t.sec;
+    return `<div class="timer-ring ${run && run.done ? "done" : ""}"><div><div class="t" data-left="${run ? esc(run.id) : ""}">${fmtClock(left)}</div><div class="l">${esc(t.name ? `${t.name} · ${t.label}` : t.label || "Timer")}</div></div>
+      <div class="acts">${run ? `<button class="btn sec small" data-plus="${esc(run.id)}">+1 min</button><button class="btn sec small" data-stop="${esc(run.id)}">${run.done ? "Done" : "Stop"}</button>`
+        : `<button class="btn tint small" data-start="${k}">${ic("play")} ${t.kind === "per_side" ? "Start side 1" : "Start"}</button>`}</div></div>`;
+  }).join("");
+  const extra = mine.filter((x) => x.manual);
+  const extraCards = extra.map((run) => `<div class="timer-ring ${run.done ? "done" : ""}"><div><div class="t" data-left="${esc(run.id)}">${fmtClock(leftOf(run))}</div><div class="l">${esc(run.label)}</div></div>
+    <div class="acts"><button class="btn sec small" data-plus="${esc(run.id)}">+1 min</button><button class="btn sec small" data-stop="${esc(run.id)}">${run.done ? "Done" : "Stop"}</button></div></div>`).join("");
+  const showPresets = (!stated.length && s.cue) || C.presetFor === C.i;
+  el.innerHTML = `
+    <div class="cook-top"><button class="round-btn" id="ck-x" aria-label="Close cook mode">${ic("x")}</button><div class="prog"><i style="width:${((C.i + 1) / n) * 100}%"></i></div><span class="count">${C.i + 1}/${n}</span></div>
     <div class="cook-body">
       <div class="ttl">${esc(s.title || `Step ${C.i + 1}`)}</div>
       <div class="big">${esc(s.text)}</div>
       ${uses ? `<div class="uses" style="display:flex;flex-wrap:wrap;gap:8px">${uses}</div>` : ""}
-      <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}</div>
+      <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${s.cue ? `<span class="badge2 blue">👀 ${esc(s.cue)}</span>` : ""}</div>
       ${s.tip ? `<p class="hint" style="margin:12px 0 0">${esc(s.tip)}</p>` : ""}
-      ${s.timer_sec ? `<div class="timer-ring"><div><div class="t" id="ck-t">${running ? fmtClock(running.left) : fmtClock(s.timer_sec)}</div><div class="l">${esc(s.timer_label || "Timer")}</div></div>
-        <div class="acts">${running ? `<button class="btn sec small" id="ck-add">+1 min</button><button class="btn sec small" id="ck-stop">Stop</button>` : `<button class="btn tint small" id="ck-start">${ic("play")} Start timer</button>`}</div></div>` : ""}
+      ${timerCards}${extraCards}
+      ${showPresets ? `<div class="timer-ask"><span>${s.cue && !stated.length ? `No time given: cook ${esc(s.cue)}. Want a reminder to check?` : "Add a timer"}</span>${presetRow("x")}</div>`
+        : `<button class="link-btn add-timer" id="ck-addt">${ic("plus")} Timer</button>`}
       ${C.i < n - 1 ? `<p class="hint" style="margin:18px 0 0">Next: ${esc(C.steps[C.i + 1].text.slice(0, 120))}${C.steps[C.i + 1].text.length > 120 ? "…" : ""}</p>` : ""}
     </div>
-    <div class="timers-tray" id="ck-tray"></div>
+    <div class="timers-tray" id="ck-tray" aria-live="polite"></div>
     <div class="cook-foot"><button class="btn sec" id="ck-prev" ${C.i ? "" : "disabled"}>${ic("chevL")} Back</button>
       ${C.i < n - 1 ? `<button class="btn" id="ck-next">Next ${ic("chevR")}</button>` : `<button class="btn tint" id="ck-done">Done 🎉</button>`}</div>`;
-  $("#ck-x").onclick = endCook;
+  $("#ck-x").onclick = () => endCook();
   $("#ck-prev").onclick = () => cookMove(-1);
   $("#ck-next") && ($("#ck-next").onclick = () => cookMove(1));
+  $("#ck-addt") && ($("#ck-addt").onclick = () => { C.presetFor = C.i; drawCook(); });
+  $$("[data-start]", el).forEach((b) => (b.onclick = () => {
+    const t = stated[+b.dataset.start];
+    addTimer({ sec: t.sec, label: t.name || stepName(C.steps[C.i], C.i), kind: t.kind, side: t.kind === "per_side" ? 1 : 0 });
+    const ts = loadTimers(); ts[ts.length - 1].src = +b.dataset.start; saveTimers(ts); drawCook();
+  }));
+  $$("[data-preset]", el).forEach((b) => (b.onclick = () => { C.presetFor = null; addManual(+b.dataset.preset); }));
+  $$(".tcustom", el).forEach((f) => (f.onsubmit = (e) => { e.preventDefault(); const m = +f.querySelector("input").value; if (m > 0 && m <= 600) { C.presetFor = null; addManual(m); } }));
+  $$("[data-stop]", el).forEach((b) => (b.onclick = () => { saveTimers(loadTimers().filter((x) => x.id !== b.dataset.stop)); hideTimerAlert(b.dataset.stop); drawCook(); }));
+  $$("[data-plus]", el).forEach((b) => (b.onclick = () => plusMinute(b.dataset.plus)));
   $("#ck-done") && ($("#ck-done").onclick = async (e) => {
     e.currentTarget.disabled = true;
     const rec = R.rec, ce = rec && rec.cook_entry;
-    if (!rec) { endCook(); return toast("Enjoy your meal! 🍽️"); }
+    if (!rec) { endCook(true); return toast("Enjoy your meal! 🍽️"); }
     const body = { servings: R.servings };
     if (ce && ce.today) body.plan_id = ce.id;
     let r;
-    try { r = await markCooked(rec.slug, body); } catch (x) { endCook(); return fail(x); }
-    const back = () => { endCook(); if (location.hash === "#recipe/" + encodeURIComponent(rec.slug)) renderRecipe(rec.slug); };
+    try { r = await markCooked(rec.slug, body); } catch (x) { endCook(true); return fail(x); }
+    const back = () => { endCook(true); if (location.hash === "#recipe/" + encodeURIComponent(rec.slug)) renderRecipe(rec.slug); };
     if (!r.diary_id || !$("#cook")) return back();
     $("#cook").innerHTML = `<div class="ck-finish"><div class="ck-cheers">🎉</div><h2>${esc(rec.name)}</h2><p class="muted">${esc(cookedMessage(r))}</p>${howWasItHtml()}<button class="btn sec" id="ck-close">Close</button></div>`;
     bindHowWasIt(r.diary_id, back);
     $("#ck-close").onclick = () => { state.justCooked = null; back(); };
   });
-  $("#ck-start") && ($("#ck-start").onclick = () => { unlockAudio(); C.timers.push({ step: C.i, label: s.timer_label || `Step ${C.i + 1}`, left: s.timer_sec, done: false }); drawCook(); });
-  $("#ck-stop") && ($("#ck-stop").onclick = () => { C.timers = C.timers.filter((t) => t.step !== C.i); drawCook(); });
-  $("#ck-add") && ($("#ck-add").onclick = () => { const t = C.timers.find((x) => x.step === C.i); if (t) { t.left += 60; t.done = false; } drawCook(); });
   drawTray();
+}
+// A short name for a step's timer: its title, or its first few words ("Simmer the sauce").
+function stepName(s, i) {
+  if (s.title) return s.title.slice(0, 40);
+  const words = [];
+  for (const w of (s.text || "").split(/[,.;:(]/)[0].split(/\s+/).filter(Boolean)) {
+    if (/\d/.test(w) || /^(for|about|until|on|over|at|in)$/i.test(w) || words.length >= 4) break;
+    words.push(w);
+  }
+  return (words.join(" ") || `Step ${i + 1}`).slice(0, 40);
+}
+function addManual(min) {
+  addTimer({ sec: min * 60, label: `${stepName(C.steps[C.i], C.i)} · ${min} min`, kind: "countdown" });
+  const ts = loadTimers(); ts[ts.length - 1].manual = true; saveTimers(ts); drawCook();
+}
+function plusMinute(id) {
+  const ts = loadTimers(), t = ts.find((x) => x.id === id); if (!t) return;
+  t.end = Math.max(t.end, Date.now()) + 60000; t.done = false; t.alerted = false;
+  saveTimers(ts); hideTimerAlert(id); ensureTimerTick(); drawCook(); drawTimerPill();
 }
 const fmtClock = (sec) => { sec = Math.max(0, Math.round(sec)); const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60; return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0"); };
 function drawTray() {
   const tray = $("#ck-tray"); if (!tray) return;
-  tray.innerHTML = C.timers.map((t, k) => `<button class="tchip ${t.done ? "done" : ""}" data-k="${k}">⏱ ${esc(t.label)} · ${t.done ? "Done!" : fmtClock(t.left)}</button>`).join("");
-  $$("#ck-tray [data-k]").forEach((b) => (b.onclick = () => { const t = C.timers[+b.dataset.k]; if (t.done) C.timers.splice(+b.dataset.k, 1); C.i = t.step; drawCook(); }));
+  const ts = loadTimers().filter((t) => t.slug === C.slug);
+  tray.innerHTML = ts.map((t) => `<button class="tchip ${t.done ? "done" : ""}" data-go="${esc(t.id)}">⏱ ${esc(t.label)} · ${t.done ? "Done!" : t.kind === "long" ? esc(new Date(t.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })) : fmtClock(leftOf(t))}</button>`).join("");
+  $$("#ck-tray [data-go]").forEach((b) => (b.onclick = () => { const t = loadTimers().find((x) => x.id === b.dataset.go); if (!t) return; C.i = Math.min(C.steps.length - 1, t.step); drawCook(); }));
+}
+// One ticker for every timer (cook mode open or not).
+function ensureTimerTick() {
+  if (!C.tick && loadTimers().some((t) => !t.done)) C.tick = setInterval(tickTimers, 1000);
+  tickTimers();
 }
 function tickTimers() {
+  const ts = loadTimers();
   let changed = false;
-  C.timers.forEach((t) => {
-    if (t.done) return;
-    t.left -= 1; changed = true;
-    if (t.left <= 0) { t.done = true; alertTimer(t); }
-  });
-  if (changed) { const cur = C.timers.find((t) => t.step === C.i); if (cur && $("#ck-t")) $("#ck-t").textContent = cur.done ? "0:00" : fmtClock(cur.left); drawTray(); }
+  for (const t of ts) {
+    if (!t.done && Date.now() >= t.end) {
+      t.done = true; changed = true;
+      alertTimer(t);
+    }
+  }
+  if (changed) saveTimers(ts);
+  for (const n of $$("#cook [data-left]")) { const t = ts.find((x) => x.id === n.dataset.left); if (t) n.textContent = fmtClock(leftOf(t)); }
+  drawTray(); drawTimerPill();
+  if (!ts.some((t) => !t.done)) { clearInterval(C.tick); C.tick = null; }
+}
+// Outside cook mode: a small pill with the soonest timer; tap to go back to cooking.
+function drawTimerPill() {
+  let pill = $("#timer-pill");
+  const ts = loadTimers().filter((t) => !$("#cook"));
+  if (!ts.length) { pill?.remove(); return; }
+  if (!pill) { pill = document.createElement("button"); pill.id = "timer-pill"; pill.className = "timer-pill"; document.body.appendChild(pill); pill.onclick = resumeCook; }
+  const soon = ts.slice().sort((a, b) => (a.done === b.done ? a.end - b.end : a.done ? -1 : 1))[0];
+  pill.innerHTML = `${ic("clock")} <span>${esc(soon.label)} · ${soon.done ? "done" : fmtClock(leftOf(soon))}</span>${ts.length > 1 ? `<b>+${ts.length - 1}</b>` : ""}`;
+  pill.setAttribute("aria-label", `${ts.length} timer${ts.length > 1 ? "s" : ""} running. Open cook mode`);
+}
+// Reopen cook mode after a reload (or from the timer pill) when timers are still running.
+async function resumeCook() {
+  let c = null; try { c = JSON.parse(localStorage.getItem(CKEY) || "null"); } catch (_) {}
+  const ts = loadTimers();
+  if (!c || !c.slug || Date.now() - (c.at || 0) > 12 * 3600e3) { if (ts.length) ensureTimerTick(); return; }
+  if (!ts.some((t) => t.slug === c.slug)) return;
+  if (location.hash !== "#recipe/" + encodeURIComponent(c.slug)) location.hash = "recipe/" + encodeURIComponent(c.slug);
+  for (let k = 0; k < 50 && R.rec?.slug !== c.slug; k++) await new Promise((r) => setTimeout(r, 100));
+  if (R.rec?.slug !== c.slug) return;
+  if (c.servings) R.servings = c.servings;
+  startCook({ step: c.i, startedAt: c.startedAt });
 }
 function unlockAudio() { try { C.audio = C.audio || new (window.AudioContext || window.webkitAudioContext)(); C.audio.resume(); } catch (_) {} }
-function alertTimer(t) {
-  const next = C.steps[t.step + 1];
-  const msg = `⏰ ${t.label} is done${next ? ` · Next: ${next.title || next.text.slice(0, 60)}` : ""}`;
-  toast(msg, next ? "Go" : null, () => { C.i = t.step + 1; drawCook(); });
-  try { navigator.vibrate?.([300, 150, 300, 150, 300]); } catch (_) {}
+function beep() {
   try {
+    unlockAudio();
     const a = C.audio; if (a) [0, 0.35, 0.7].forEach((d) => { const o = a.createOscillator(), g = a.createGain(); o.frequency.value = 880; o.connect(g); g.connect(a.destination); g.gain.setValueAtTime(0.25, a.currentTime + d); g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + d + 0.3); o.start(a.currentTime + d); o.stop(a.currentTime + d + 0.32); });
   } catch (_) {}
-  try { if (document.hidden && window.Notification?.permission === "granted") new Notification("TablePlan timer", { body: msg }); } catch (_) {}
 }
+function alertTimer(t) {
+  const flip = t.kind === "per_side" && t.side === 1;
+  const msg = flip ? `Flip it! ${t.label} side 1 is done` : t.kind === "long" ? `Reminder: ${t.label}` : `${t.label} is done`;
+  beep();
+  try { navigator.vibrate?.([300, 150, 300, 150, 300]); } catch (_) {}
+  try { if (document.hidden && window.Notification?.permission === "granted") new Notification("TablePlan timer", { body: msg, tag: t.id }); } catch (_) {}
+  let bar = $("#timer-alert");
+  if (!bar) { bar = document.createElement("div"); bar.id = "timer-alert"; bar.className = "timer-alert"; bar.setAttribute("role", "alert"); document.body.appendChild(bar); }
+  bar.insertAdjacentHTML("beforeend", `<div class="ta-row" data-ta="${esc(t.id)}"><span>⏰ ${esc(msg)}</span>
+    ${flip ? `<button class="btn small" data-ta-side2="${esc(t.id)}">Start side 2</button>` : `<button class="btn sec small" data-ta-plus="${esc(t.id)}">+1 min</button>`}
+    <button class="btn small ${flip ? "sec" : ""}" data-ta-done="${esc(t.id)}">Done</button></div>`);
+  $$("[data-ta-plus]", bar).forEach((b) => (b.onclick = () => plusMinute(b.dataset.taPlus)));
+  $$("[data-ta-done]", bar).forEach((b) => (b.onclick = () => { saveTimers(loadTimers().filter((x) => x.id !== b.dataset.taDone)); hideTimerAlert(b.dataset.taDone); drawCook(); drawTimerPill(); }));
+  $$("[data-ta-side2]", bar).forEach((b) => (b.onclick = () => {
+    const ts = loadTimers(), x = ts.find((y) => y.id === b.dataset.taSide2); if (!x) return;
+    Object.assign(x, { end: Date.now() + x.dur * 1000, done: false, side: 2, label: x.label + " · side 2" });
+    saveTimers(ts); hideTimerAlert(x.id); ensureTimerTick(); drawCook();
+  }));
+}
+function hideTimerAlert(id) { $(`#timer-alert [data-ta="${CSS.escape(id)}"]`)?.remove(); const bar = $("#timer-alert"); if (bar && !bar.children.length) bar.remove(); }
 
 // ------------------------------------------------------------------ image picker (recipes & ingredients)
 function openImagePicker({ kind, slug, name, after }) {

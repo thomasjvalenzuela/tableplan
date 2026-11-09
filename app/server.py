@@ -487,6 +487,7 @@ def init_db():
     with db() as c:
         c.executescript(SCHEMA)
         n_recipes.init(c); n_plans.init(c); n_lists.init(c); n_foods.init(c)
+        c.execute("DELETE FROM guided_cache WHERE profile NOT IN ('ai3', 'auto3')")   # older step-by-step formats
         for table, col, typ in (("pantry_items", "food_id", "INTEGER"), ("upc_cache", "food_id", "INTEGER"),
                                 ("pantry_items", "product", "TEXT"), ("pantry_items", "image", "TEXT"),
                                 ("pantry_items", "upc", "TEXT"), ("pantry_items", "pack_qty", "REAL")):
@@ -1600,6 +1601,7 @@ from native import lists as n_lists, plans as n_plans, recipes as n_recipes, scr
 from native import units as n_units  # noqa: E402
 from native import foods as n_foods  # noqa: E402
 from native import plu as n_plu  # noqa: E402
+from native import timers as n_timers  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -3569,7 +3571,7 @@ def recipe_update(slug, b):
     out = mealie("PUT", f"/api/recipes/{_q(slug)}", r)
     _recipe_cache["at"] = 0
     with db() as c:
-        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (r.get("id"),))
+        invalidate_guided(c, r.get("id"), out.get("slug") or slug)
     return {"slug": out.get("slug") or slug}
 
 
@@ -3889,8 +3891,7 @@ def import_video(url):
 
 def _imported(slug):
     slug = slug.strip('"') if isinstance(slug, str) else slug
-    if cfg("openai_key"):   # prepare the AI step-by-step version in the background so it's instant later
-        background(guided, slug, True)
+    queue_guided(slug)   # the recipe is saved (polished first): prepare its AI step-by-step in the background
     _recipe_cache["at"] = 0
     try:
         r = mealie("GET", f"/api/recipes/{_q(slug)}")
@@ -4076,7 +4077,7 @@ def recipe_polish(slug):
         raise ApiError(422, "The AI's rewrite dropped part of the method, so nothing was changed. Try again.")
     with db() as c:
         slug = n_recipes.update(c, rec["id"], _annotate_foods(c, new))
-        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+        invalidate_guided(c, rec["id"], slug)
     _recipe_cache["at"] = 0
     return recipe_detail(slug)
 
@@ -4101,7 +4102,7 @@ def recipe_restore_original(slug):
                    recipeInstructions=[{"id": str(uuid.uuid4()), "title": "", "text": t, "ingredientReferences": []}
                                        for t in o["steps"]])
         slug = n_recipes.update(c, rec["id"], _annotate_foods(c, rec))
-        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+        invalidate_guided(c, rec["id"], slug)
     _recipe_cache["at"] = 0
     return recipe_detail(slug)
 
@@ -4135,14 +4136,31 @@ STOVE_TIPS = {
 }
 
 
-def _guided_profile():
-    st = get_settings()
-    return f"{st.get('stove')}|{st.get('oven')}|{st.get('temp_unit')}"
+GUIDED_AI, GUIDED_AUTO = "ai3", "auto3"   # cache "profile" tags; the kitchen (stove, oven, units) is applied when shown
+
+
+def _guided_key(rec):
+    """Fingerprint of what the step-by-step is built from. Photos, categories, ratings or notes don't change it."""
+    src = [rec.get("name"), rec.get("servings"),
+           [(x.get("i"), x.get("display"), x.get("food"), x.get("section")) for x in rec.get("ingredients") or []],
+           [(s0.get("title"), s0.get("text")) for s0 in rec.get("steps") or []]]
+    return hashlib.sha256(json.dumps(src, sort_keys=True, default=str).encode()).hexdigest()[:24]
+
+
+def _temp_raw(text):
+    tm = TEMP_RE.search(text or "")
+    if tm and re.search(r"oven|bake|roast|preheat|°", text, re.I):
+        return {"v": int(tm.group(1)), "u": (tm.group(2) or "F").upper()}
+    return None
+
+
+def _timing(text):
+    t = n_timers.step_timing(text)
+    return {"timers": t["timers"], "cue": t["cue"]}
 
 
 def guided_auto(rec):
-    st = get_settings()
-    stove, oven, unit = st.get("stove"), st.get("oven"), st.get("temp_unit") or "F"
+    """Built-in step-by-step (no AI): ingredients placed in the step that uses them, stated times as timers."""
     used, steps = set(), []
     tokens_of = {x["i"]: set(tokens(x["food"])) for x in rec["ingredients"] if x["food"]}
     for s0 in rec["steps"]:
@@ -4152,41 +4170,56 @@ def guided_auto(rec):
             ttoks = set(tokens(text))
             refs = [i for i, tk in tokens_of.items() if tk and tk <= ttoks and i not in used]
         used.update(refs)
-        timer, label = s0.get("duration_sec"), None
-        if not timer:
-            m = None
-            for m in DUR_RE.finditer(text):
-                pass
-            if m:
-                lo, hi, u = float(m.group(1)), m.group(2), m.group(3).lower()
-                mult = 3600 if u.startswith("h") else 1 if u.startswith("s") else 60
-                timer = int(lo * mult)
-                label = f"Check at {m.group(1)}" + (f"–{hi}" if hi else "") + (" h" if mult == 3600 else " sec" if mult == 1 else " min")
+        tmg = _timing(text)
+        if not tmg["timers"] and s0.get("duration_sec"):
+            d = int(s0["duration_sec"])
+            tmg["timers"] = [{"sec": d, "high_sec": None, "label": n_timers.fmt(d), "kind": "countdown", "source": ""}]
         heat = HEAT_RE.search(text)
-        temp = None
-        tm = TEMP_RE.search(text)
-        if tm and re.search(r"oven|bake|roast|preheat|°", text, re.I):
-            t, u = int(tm.group(1)), (tm.group(2) or "F").upper()
-            if u != unit:
-                t = round((t - 32) * 5 / 9 / 5) * 5 if unit == "C" else round((t * 9 / 5 + 32) / 5) * 5
-            if oven == "convection" and re.search(r"bake|roast|oven", text, re.I):
-                t -= 25 if unit == "F" else 15
-            temp = f"{t}°{unit}"
         steps.append({"title": s0["title"] or "", "text": text, "ingredients": [{"i": i, "portion": 1} for i in refs],
-                      "timer_sec": timer, "timer_label": label or (f"{round(timer / 60)} min" if timer else None),
-                      "heat": heat.group(1).lower() if heat else None, "temperature": temp,
-                      "tip": STOVE_TIPS.get(stove) if heat else None})
+                      **tmg, "heat": heat.group(1).lower() if heat else None, "temp_raw": _temp_raw(text)})
     leftovers = [x["i"] for x in rec["ingredients"] if x["i"] not in used and (x["food"] or x["display"])]
     out = []
-    oven_steps = [s for s in steps if s["temperature"]]
-    if oven_steps and not re.search(r"preheat", steps[0]["text"] if steps else "", re.I):
-        t = oven_steps[0]["temperature"]
-        out.append({"title": "Preheat", "text": f"Preheat the oven to {t}" + (" (convection, already lowered 25°F)" if oven == "convection" and unit == "F" else "")
-                    + ". It takes about 10–15 minutes, so keep going with the next steps while it heats.",
-                    "ingredients": [], "timer_sec": 600, "timer_label": "Oven preheating", "heat": None, "temperature": t, "tip": None})
+    oven = next((st["temp_raw"] for st in steps if st["temp_raw"]), None)
+    if oven and not re.search(r"preheat", steps[0]["text"] if steps else "", re.I):
+        out.append({"title": "Preheat", "kind": "preheat", "text": "", "ingredients": [], "timers": [], "cue": None,
+                    "heat": None, "temp_raw": oven})
     names = [rec["ingredients"][i]["food"] or rec["ingredients"][i]["display"] for i in leftovers]
     tips = [f"Also have ready: {', '.join(n for n in names if n)}."] if leftovers and any(names) else []
     return {"source": "auto", "steps": out + steps, "tips": tips}
+
+
+def _local_temp(raw, unit, oven):
+    if not raw:
+        return None, False
+    t, u = int(raw["v"]), raw.get("u") or "F"
+    if u != unit:
+        t = round((t - 32) * 5 / 9 / 5) * 5 if unit == "C" else round((t * 9 / 5 + 32) / 5) * 5
+    conv = oven == "convection"
+    if conv:
+        t -= 25 if unit == "F" else 15
+    return f"{t}°{unit}", conv
+
+
+def guided_localize(data, settings=None):
+    """Apply this kitchen (stove, oven, °F/°C) to a cached step-by-step. Changing those settings never needs the AI."""
+    st = settings or get_settings()
+    stove, oven, unit = st.get("stove"), st.get("oven"), st.get("temp_unit") or "F"
+    steps = []
+    for s0 in data.get("steps") or []:
+        s1 = dict(s0)
+        temp, conv = _local_temp(s1.get("temp_raw"), unit, oven)
+        s1["temperature"] = temp
+        if s1.get("kind") == "preheat":
+            s1["text"] = (f"Preheat the oven to {temp}" + (f" (convection, already lowered {'25°F' if unit == 'F' else '15°C'})" if conv else "")
+                          + ". It takes about 10–15 minutes, so keep going with the next steps while it heats.")
+            s1["timers"] = [{"sec": 600, "high_sec": 900, "label": "Oven preheating", "kind": "countdown", "source": "preheat"}]
+        ts = s1.get("timers") or []
+        first = next((x for x in ts if x.get("kind") != "long"), None)
+        s1["timer_sec"] = first["sec"] if first else None
+        s1["timer_label"] = first["label"] if first else (ts[0]["label"] if ts else None)
+        s1["tip"] = STOVE_TIPS.get(stove) if s1.get("heat") else None
+        steps.append(s1)
+    return {**data, "steps": steps}
 
 
 GUIDE_SCHEMA = {
@@ -4316,21 +4349,27 @@ def parse_recipe_text(t):
 
 
 def guided_ai(rec):
-    st = get_settings()
+    """AI order of operations. Kitchen-independent (stove, oven and units are applied when shown), and any timer the
+    AI gives must be a time the recipe itself states."""
     ing_lines = "\n".join(f"[{x['i']}] {x['display'] or x['food']}" + (f"  (section: {x['section']})" if x["section"] else "")
                           for x in rec["ingredients"])
     step_lines = "\n".join(f"{n + 1}. {s0['text']}" for n, s0 in enumerate(rec["steps"]))
+    source_texts = [s0["text"] for s0 in rec["steps"]]
+    stated = n_timers.stated_seconds(source_texts)
+    hint = n_timers.hints(source_texts)
     sys_prompt = (
         "You rewrite home recipes into a perfect order of operations a nervous home cook can follow without reading ahead. "
         "Rules: keep every original ingredient and amount, never invent ingredients. Each step lists exactly which ingredients it uses "
         "by their [index]; if an ingredient is split across steps, give the fraction used as portion (e.g. 0.5), otherwise 1. "
         "Put preheating (oven, pans, water to boil) at the moment it must start so it's ready in time. "
-        f"The cook has a {st.get('stove')} stovetop and a {st.get('oven')} oven"
-        + (" (lower convection temperatures by 25°F / 15°C and say so)" if st.get("oven") == "convection" else "")
-        + f". Give temperatures in °{st.get('temp_unit') or 'F'}. Translate heat levels to that stove, with a short practical cue "
-        "(e.g. 'gas: flame just touching the pan'). For every step that involves waiting (simmer, bake, rest, marinate, boil), "
-        "set timer_minutes and a short timer_label such as 'Simmer sauce'. If something useful can be done while waiting, say so in the text. "
-        "Steps are short and imperative, one action each. tips: up to 3 short tips specific to this recipe. "
+        "Keep oven temperatures exactly as the recipe gives them (same number and °F/°C). Describe stovetop heat as low, "
+        "medium-low, medium, medium-high or high in the heat field. "
+        "TIMES: only use times that appear in the recipe. Never invent a time. When a step waits for a stated time "
+        "(simmer, bake, rest, marinate, boil, chill, rise), put that exact time in the step text and set timer_minutes to "
+        "the low end of it with a short timer_label such as 'Simmer sauce'. When the recipe gives no time, leave "
+        "timer_minutes null and keep the recipe's doneness cue (e.g. 'until golden'). If something useful can be done "
+        "while waiting, say so in the text. Steps are short and imperative, one action each. tips: up to 3 short tips "
+        "specific to this recipe. "
         "INGREDIENT PLACEMENT (most important): each step's ingredients list holds ONLY the ingredients physically added or used "
         "in that exact step, with the amount used there. Example: 'Whisk the wet ingredients' lists only buttermilk, eggs and melted "
         "butter; the next step 'Add the dry ingredients' lists only flour, sugar, baking powder and salt. If an original step adds "
@@ -4339,17 +4378,26 @@ def guided_ai(rec):
         "ingredient split across steps gets a portion in each (portions add up to 1).")
     data = openai_chat([
         {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": f"Recipe: {rec['name']} (serves {rec['servings'] or '?'})\n\nIngredients:\n{ing_lines}\n\nOriginal steps:\n{step_lines}"},
+        {"role": "user", "content": f"Recipe: {rec['name']} (serves {rec['servings'] or '?'})\n\nIngredients:\n{ing_lines}\n\n"
+                                    f"Original steps:\n{step_lines}\n\nTimes stated in this recipe: "
+                                    f"{', '.join(hint) if hint else 'none'}"},
     ], "guided_recipe", GUIDE_SCHEMA, "step-by-step", rec["name"])
     valid = {x["i"] for x in rec["ingredients"]}
     steps = []
     for s0 in data.get("steps") or []:
+        text = s0.get("text") or ""
+        tmg = _timing(text)
+        tmg["timers"] = [t for t in tmg["timers"] if t["sec"] in stated]           # only times the recipe states
         tm = s0.get("timer_minutes")
-        steps.append({"title": s0.get("title") or "", "text": s0.get("text") or "",
+        if not tmg["timers"] and tm and int(round(float(tm) * 60)) in stated:
+            sec = int(round(float(tm) * 60))
+            tmg["timers"] = [{"sec": sec, "high_sec": None, "label": n_timers.fmt(sec), "kind": "countdown", "source": ""}]
+        if tmg["timers"] and s0.get("timer_label") and len(tmg["timers"]) == 1 and tmg["timers"][0]["kind"] == "countdown":
+            tmg["timers"][0]["name"] = str(s0["timer_label"])[:40]
+        steps.append({"title": s0.get("title") or "", "text": text,
                       "ingredients": [{"i": x["index"], "portion": max(0.05, min(1.0, float(x.get("portion") or 1)))}
                                       for x in s0.get("ingredients") or [] if x.get("index") in valid],
-                      "timer_sec": int(tm * 60) if tm else None, "timer_label": s0.get("timer_label"),
-                      "heat": s0.get("heat"), "temperature": s0.get("temperature"), "tip": None})
+                      **tmg, "heat": s0.get("heat"), "temp_raw": _temp_raw(s0.get("temperature") or "") or _temp_raw(text)})
     if not steps:
         raise ApiError(502, "The AI didn't return any steps. Try again.")
     used = {x["i"] for st in steps for x in st["ingredients"]}
@@ -4363,33 +4411,147 @@ def guided_ai(rec):
     return {"source": "ai", "steps": steps, "tips": (data.get("tips") or [])[:3]}
 
 
-def guided(slug, use_ai=None, refresh=False):
-    """Step-by-step version of a recipe. Uses AI automatically when an OpenAI key is set (cached), else the built-in arranger."""
-    if use_ai is None:
-        use_ai = bool(cfg("openai_key"))
-        if use_ai:
-            try:
-                return guided(slug, True, refresh)
-            except ApiError as e:
-                log("AI step-by-step failed, using built-in:", e.message)
-                use_ai = False
-    rec = recipe_detail(slug)
-    profile = _guided_profile() + ("|ai2" if use_ai else "|auto2")
-    if not refresh:
-        with db() as c:
-            row = c.execute("SELECT * FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], profile)).fetchone()
-        if row and row["updated"] == rec["updated"]:
-            return {**json.loads(row["data"]), "cached": True}
-    data = guided_ai(rec) if use_ai else guided_auto(rec)
+def _guided_cached(c, rec_id, tag, key):
+    row = c.execute("SELECT data FROM guided_cache WHERE recipe_id=? AND profile=? AND updated=?", (rec_id, tag, key)).fetchone()
+    return json.loads(row["data"]) if row else None
+
+
+def _guided_store(rec, tag, key, data):
     with db() as c:
         c.execute("INSERT INTO guided_cache(recipe_id, profile, updated, source, data, created_at) VALUES (?,?,?,?,?,?) "
-                  "ON CONFLICT(recipe_id, profile) DO UPDATE SET updated=excluded.updated, source=excluded.source, data=excluded.data, created_at=excluded.created_at",
-                  (rec["id"], profile, rec["updated"], data["source"], json.dumps(data), datetime.now().isoformat(timespec="seconds")))
-    has_ai = False
-    if not use_ai:
+                  "ON CONFLICT(recipe_id, profile) DO UPDATE SET updated=excluded.updated, source=excluded.source, "
+                  "data=excluded.data, created_at=excluded.created_at",
+                  (rec["id"], tag, key, data["source"], json.dumps(data), datetime.now().isoformat(timespec="seconds")))
+
+
+def guided(slug, use_ai=None, refresh=False):
+    """Step-by-step version of a recipe.
+    use_ai=None (cook mode): the AI version when it's ready, otherwise the instant built-in one right away while the
+    AI version is prepared in the background (ai_pending). use_ai=True: the AI version now (an explicit request).
+    use_ai=False: the built-in arranger."""
+    rec = recipe_detail(slug)
+    key = _guided_key(rec)
+    with db() as c:
+        ai = None if refresh else _guided_cached(c, rec["id"], GUIDED_AI, key)
+    if ai is not None and use_ai is not False:
+        return {**guided_localize(ai), "cached": True, "ai_available": True}
+    if use_ai is True:
+        data = guided_ai(rec)
+        _guided_store(rec, GUIDED_AI, key, data)
+        return {**guided_localize(data), "cached": False, "ai_available": True}
+    with db() as c:
+        auto = _guided_cached(c, rec["id"], GUIDED_AUTO, key)
+    if auto is None:
+        auto = guided_auto(rec)
+        _guided_store(rec, GUIDED_AUTO, key, auto)
+    pending = use_ai is None and bool(cfg("openai_key"))
+    if pending:
+        queue_guided(rec["slug"] if rec.get("slug") else slug, delay=0)
+    return {**guided_localize(auto), "cached": True, "ai_available": False, "ai_pending": pending}
+
+
+# Rebuilding the AI step-by-step after an edit: debounced (several quick edits make one AI call) and one per recipe.
+GUIDED_DEBOUNCE = 4.0
+_gq_lock = threading.Lock()
+_gq_timers, _gq_running = {}, set()
+
+
+def queue_guided(slug, delay=None):
+    if not cfg("openai_key") or not slug:
+        return
+    with _gq_lock:
+        t = _gq_timers.pop(slug, None)
+        if t:
+            t.cancel()
+        if slug in _gq_running and delay == 0:
+            return
+        t = threading.Timer(GUIDED_DEBOUNCE if delay is None else delay, background, (_guided_build, slug))
+        t.daemon = True
+        _gq_timers[slug] = t
+        t.start()
+
+
+def _guided_build(slug):
+    with _gq_lock:
+        _gq_timers.pop(slug, None)
+        if slug in _gq_running:
+            return
+        _gq_running.add(slug)
+    try:
+        guided(slug, True)
+    except ApiError as e:
+        log(f"step-by-step for {slug} not prepared:", e.message)
+        _gw_failed[slug] = time.time()
+    finally:
+        with _gq_lock:
+            _gq_running.discard(slug)
+
+
+def invalidate_guided(c, rec_id, slug):
+    """The recipe's text changed: drop its step-by-step and prepare a fresh one in the background."""
+    c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec_id,))
+    queue_guided(slug)
+
+
+# Warming: recipes on the plan for the next 14 days first, then the rest, one at a time with a pause between.
+_gw_failed = {}
+
+
+def guided_warm_candidates(limit=400):
+    with db() as c:
+        planned = [r["recipe_id"] for r in c.execute(
+            "SELECT recipe_id, MIN(date) d FROM meal_plans WHERE recipe_id IS NOT NULL AND date>=? AND date<=? "
+            "GROUP BY recipe_id ORDER BY d", (iso(today()), iso(today() + timedelta(days=14))))]
+        rest = [r["id"] for r in c.execute("SELECT id FROM recipes ORDER BY updated_at DESC LIMIT ?", (limit,))]
+        slugs = {r["id"]: r["slug"] for r in c.execute("SELECT id, slug FROM recipes")}
+    seen, out = set(), []
+    for rid in planned + rest:
+        if rid in slugs and rid not in seen:
+            seen.add(rid); out.append(slugs[rid])
+    return out
+
+
+def _ai_over_budget():
+    budget = float(get_settings().get("ai_budget") or 0)
+    if budget <= 0:
+        return False
+    try:
+        sp = ai_spending()
+        return float(sp.get("estimate_usd") or 0) >= budget
+    except Exception:
+        return False
+
+
+def guided_warm_next():
+    """Prepare one missing AI step-by-step. Returns the slug it prepared, or None when there's nothing to do."""
+    if not (NATIVE and cfg("openai_key")) or _ai_over_budget():
+        return None
+    for slug in guided_warm_candidates():
+        if time.time() - _gw_failed.get(slug, 0) < 86400 or slug in _gq_running:
+            continue
+        try:
+            rec = recipe_detail(slug)
+        except ApiError:
+            continue
+        if not rec.get("steps"):
+            continue
         with db() as c:
-            has_ai = bool(c.execute("SELECT 1 FROM guided_cache WHERE recipe_id=? AND profile=?", (rec["id"], _guided_profile() + "|ai2")).fetchone())
-    return {**data, "cached": False, "ai_available": has_ai}
+            if _guided_cached(c, rec["id"], GUIDED_AI, _guided_key(rec)) is not None:
+                continue
+        _guided_build(slug)
+        return slug
+    return None
+
+
+def guided_warmer():
+    time.sleep(120)   # let start-up finish
+    while True:
+        try:
+            did = guided_warm_next()
+        except Exception as e:
+            log("step-by-step warm-up error:", e)
+            did = None
+        time.sleep(90 if did else 900)
 
 
 # ============================================================ AI spending
@@ -6435,7 +6597,7 @@ def recipe_adjust_save(slug, b):
         new = _apply_version(rec, [{"line": x.get("line")} for x in ings], steps)
         new["extras"] = extras
         slug = n_recipes.update(c, rec["id"], _annotate_foods(c, new))
-        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+        invalidate_guided(c, rec["id"], slug)
         now = datetime.now().isoformat(timespec="seconds")
         changes = [x.get("line") or x.get("text") for x in (b.get("ingredients") or []) + (b.get("steps") or [])
                    if isinstance(x, dict) and x.get("status") in ("changed", "added")]
@@ -6477,7 +6639,7 @@ def recipe_version_restore(slug, n):
         new["description"] = v.get("description") or rec.get("description") or ""
         new["extras"] = extras
         slug = n_recipes.update(c, rec["id"], _annotate_foods(c, new))
-        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+        invalidate_guided(c, rec["id"], slug)
     _recipe_cache["at"] = 0
     return recipe_detail(slug)
 
@@ -6889,9 +7051,8 @@ def _print_steps(slug, rec, style):
     if style == "steps":
         try:
             with db() as c:
-                row = c.execute("SELECT data, updated FROM guided_cache WHERE recipe_id=? AND profile=?",
-                                (rec["id"], _guided_profile() + "|ai2")).fetchone()
-            data = json.loads(row["data"]) if row and row["updated"] == rec["updated"] else guided(slug, False)
+                cached = _guided_cached(c, rec["id"], GUIDED_AI, _guided_key(recipe_detail(slug)))
+            data = guided_localize(cached) if cached is not None else guided(slug, False)
             steps = [{"title": s.get("title") or "", "text": s.get("text") or "",
                       "extra": " · ".join(x for x in (s.get("temperature"), s.get("timer_label")) if x)}
                      for s in data.get("steps") or [] if s.get("text")]
@@ -8511,6 +8672,7 @@ def main():
                 log(f"USDA FoodKeeper sync skipped ({e}); using starter shelf-life table. Retry from Settings.")
         threading.Thread(target=first_sync, daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=guided_warmer, daemon=True, name="tp-guided-warm").start()
     if PUBLIC_MODE and not cfg("app_password_hash"):
         log(f"PUBLIC MODE · one-time setup code: {SETUP_CODE}  (enter it on the sign-in screen, then set a household password)")
     log(f"TablePlan {APP_VERSION} listening on :{LISTEN_PORT} · {'public' if PUBLIC_MODE else 'home network'} mode"

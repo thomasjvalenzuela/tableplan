@@ -1,5 +1,13 @@
 [
  {
+  "id": "cook-timers",
+  "date": "2026-11-12",
+  "icon": "clock",
+  "color": "orange",
+  "title": "Timers in cook mode",
+  "text": "Every time a recipe states becomes a timer. Run several at once: they keep counting between steps and after a reload, and they beep, buzz and show a banner when time's up. Start cooking also opens right away now."
+ },
+ {
   "id": "new-look",
   "date": "2026-11-11",
   "icon": "sparkle",
