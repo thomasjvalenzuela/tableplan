@@ -235,3 +235,40 @@ class Arrange(unittest.TestCase):
             out = S.plan_arrange({"recipe_ids": self.r[:2], "start": day(0), "end": day(1)})
         self.assertFalse(out["ai"])
         self.assertEqual(len(out["assignments"]), 2)
+
+
+class SeveralPerDay(unittest.TestCase):
+    def setUp(self):
+        with S.db() as c:
+            c.execute("DELETE FROM meal_plans")
+        S._recipe_cache["at"] = 0
+        self.r = [new_recipe(f"Day {i} {id(self)}", 2, ["1 cup rice"])[1] for i in range(4)]
+
+    def plan(self):
+        return [(e["date"], e["entry_type"], e["recipe"]["id"]) for e in S.get_plans(S.today(), S.today() + timedelta(days=3))]
+
+    def test_entries_add_up_and_swap_needs_replace_id(self):
+        a = S.plan_assign({"date": day(1), "recipe_id": self.r[0]})["entry"]["id"]
+        S.plan_assign({"date": day(1), "recipe_id": self.r[1]})                       # a second dinner
+        S.plan_assign({"date": day(1), "recipe_id": self.r[2], "entry_type": "lunch"})
+        S.plan_assign({"date": day(1), "recipe_id": self.r[3], "entry_type": "side"})
+        S.plan_assign({"date": day(1), "recipe_id": self.r[3], "entry_type": "side"})  # same recipe, same slot: no-op
+        self.assertEqual([t for _, t, _ in self.plan()], ["lunch", "dinner", "dinner", "side"])
+        S.plan_assign({"date": day(1), "recipe_id": self.r[2], "replace_id": a})
+        self.assertNotIn(self.r[0], [r for _, _, r in self.plan()])
+        self.assertEqual(len(self.plan()), 4)
+        with self.assertRaises(S.ApiError):
+            S.plan_assign({"date": day(1), "recipe_id": self.r[0], "replace_id": 999999})
+
+    def test_per_entry_move_and_swap(self):
+        a = S.plan_assign({"date": day(1), "recipe_id": self.r[0]})["entry"]["id"]
+        b = S.plan_assign({"date": day(1), "recipe_id": self.r[1], "entry_type": "lunch"})["entry"]["id"]
+        c_ = S.plan_assign({"date": day(2), "recipe_id": self.r[2]})["entry"]["id"]
+        self.assertEqual(S.plan_move({"id": b, "date": day(2)}), {"ok": True, "swapped_with": None})
+        dates = {e["id"]: e["date"] for e in S.get_plans(S.today(), S.today() + timedelta(days=3))}
+        self.assertEqual((dates[a], dates[b], dates[c_]), (day(1), day(2), day(2)))
+        self.assertEqual(S.plan_move({"id": a, "date": day(2), "swap_with": c_})["swapped_with"], c_)
+        dates = {e["id"]: e["date"] for e in S.get_plans(S.today(), S.today() + timedelta(days=3))}
+        self.assertEqual((dates[a], dates[c_]), (day(2), day(1)))
+        with self.assertRaises(S.ApiError):   # swapping needs a meal of the same type on that day
+            S.plan_move({"id": a, "date": day(1), "swap_with": b})

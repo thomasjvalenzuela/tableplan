@@ -236,6 +236,7 @@ async function renderHome() {
 
   const todayISO = isoDate(today());
   const tonight = s.week.filter((e) => e.date === todayISO).sort((a, b) => (a.entry_type === "dinner" ? -1 : 1))[0];
+  const todayCount = s.week.filter((e) => e.date === todayISO).length;
   const exp = s.expiring || [];
   const expired = exp.filter((i) => i.days_left < 0).length;
 
@@ -257,7 +258,7 @@ async function renderHome() {
   if (tonight && tonight.recipe) {
     const img = imgUrl(tonight.recipe, "full");
     html += `<button class="tile hero wide ${img ? "" : "noimg"}" id="hero" ${img ? bgStyle(img) : ""}>
-      <div class="shade"></div><div class="hero-txt"><div class="t-sub">${esc(cap(tonight.entry_type))}</div><div class="t-title">${esc(entryName(tonight))}</div></div></button>`;
+      <div class="shade"></div><div class="hero-txt"><div class="t-sub">${esc(cap(tonight.entry_type))}${todayCount > 1 ? ` · +${esc(todayCount - 1)} more` : ""}</div><div class="t-title">${esc(entryName(tonight))}</div></div></button>`;
   } else {
     html += `<div class="grid"><button class="tile wide dim" id="plan-now"><span class="ic bg-orange">${ic("sparkle")}</span>
       <span><div class="t-title">Plan this week</div><div class="t-sub">Pick meals from your recipes in one tap</div></span></button></div>`;
@@ -267,11 +268,11 @@ async function renderHome() {
   html += `<div class="section-h"><h2>This Week</h2><button data-go="meals">See all</button></div><div class="strip">`;
   for (let i = 0; i < 7; i++) {
     const d = addDays(today(), i), iso = isoDate(d);
-    const e = s.week.filter((x) => x.date === iso).sort((a, b) => (a.entry_type === "dinner" ? -1 : 1))[0];
+    const all = s.week.filter((x) => x.date === iso), e = all.sort((a, b) => (a.entry_type === "dinner" ? -1 : b.entry_type === "dinner" ? 1 : 0))[0];
     if (e) {
       const img = imgUrl(e.recipe);
       html += `<button class="day-card" data-entry="${esc(e.id)}"><div class="img ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</div>
-        <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">${esc(entryName(e))}</div></div></button>`;
+        <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">${esc(entryName(e))}</div>${all.length > 1 ? `<div class="more-n">+${esc(all.length - 1)} more</div>` : ""}</div></button>`;
     } else {
       html += `<button class="day-card blank" data-plan-day="${esc(iso)}"><div class="img ph" style="background:rgba(255,255,255,.12)">${ic("plus")}</div>
         <div class="body"><div class="d">${esc(dayName(iso))}</div><div class="n">Not planned</div></div></button>`;
@@ -326,8 +327,11 @@ function relExpiry(it) {
 
 // ------------------------------------------------------------------ PLAN (rolling board with drag & drop)
 // Only dinner is planned on the board for now; add "breakfast"/"lunch" here and every slot, menu and picker follows.
-const PLAN_TYPES = ["dinner"];
-const ORDER = { breakfast: 0, lunch: 1, dinner: 2, side: 3 };
+const PLAN_TYPES = ["dinner"];   // sequential planning and the "Plan my 2 weeks" flow stay dinner-first
+const MEAL_TYPES = [["breakfast", "Breakfast"], ["lunch", "Lunch"], ["dinner", "Dinner"], ["side", "Side"], ["dessert", "Dessert"], ["snack", "Snack"]];
+const ORDER = { breakfast: 0, lunch: 1, dinner: 2, side: 3, dessert: 4, snack: 5, drink: 6 };
+const plannedTypes = () => { const t = (state.cfg?.settings?.meal_types || []).filter((x) => ORDER[x] != null); return t.length ? t.sort((a, b) => ORDER[a] - ORDER[b]) : ["dinner"]; };
+const firstOpenType = (entries) => [...plannedTypes(), "side", "dessert", "lunch", "breakfast", "snack"].find((t) => !entries.some((e) => e.entry_type === t)) || "dinner";
 const order = (t) => ORDER[t] ?? 9;
 const horizon = () => Math.min(28, Math.max(7, +state.cfg?.settings?.plan_horizon_days || 14));
 const shortDate = (s) => fmt(parseISO(s), { month: "short", day: "numeric" });
@@ -345,7 +349,7 @@ async function renderMeals() {
       <button class="pill-btn" id="to-list">${ic("cart")} Shopping list<span id="list-n"></span></button></div>
     <div id="plan-cta"></div><div id="past" class="past"></div>
     <div id="board" class="board">${loading()}</div>
-    <p class="hint board-hint"><span class="mobile-only">Touch and hold a meal, then drag it to another day.</span><span class="desktop-only">Drag a meal onto another day to move it. Dropping on a planned day swaps the two.</span></p>`;
+    <p class="hint board-hint"><span class="mobile-only">Touch and hold a meal, then drag it to another day.</span><span class="desktop-only">Drag a meal onto another day to move it there. Drop it on a meal of the same type to swap the two.</span></p>`;
   bindTopbar();
   $("#btn-share").onclick = () => openShare("plan", { start, end, label: `Next ${H} days` });
   $("#fill").onclick = () => planSequential();
@@ -371,13 +375,16 @@ async function drawBoard() {
   } catch (e) { board.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
   if (!document.body.contains(board)) return;
   state.plan = data;
-  const byDay = {};
-  (data.entries || []).filter((e) => PLAN_TYPES.includes(e.entry_type)).forEach((e) => ((byDay[e.date] = byDay[e.date] || {})[e.entry_type] = e));
+  const byDay = {};   // date -> entries, breakfast first
+  (data.entries || []).forEach((e) => (byDay[e.date] = byDay[e.date] || []).push(e));
+  Object.values(byDay).forEach((l) => l.sort((a, b) => order(a.entry_type) - order(b.entry_type) || a.id - b.id));
+  const primary = plannedTypes().includes("dinner") ? "dinner" : plannedTypes()[0];
+  const hasPrimary = (d) => (byDay[d] || []).some((e) => e.entry_type === primary);
 
   // header: "Planned through …" and the list count
   let through = status ? status.planned_through : null;
-  if (!status) { for (let i = 0; i < H && byDay[isoDate(addDays(t0, i))]; i++) through = isoDate(addDays(t0, i)); }
-  const empty = Array.from({ length: H }, (_, i) => isoDate(addDays(t0, i))).filter((d) => !byDay[d]).length;
+  if (!status) { for (let i = 0; i < H && hasPrimary(isoDate(addDays(t0, i))); i++) through = isoDate(addDays(t0, i)); }
+  const empty = Array.from({ length: H }, (_, i) => isoDate(addDays(t0, i))).filter((d) => !hasPrimary(d)).length;
   const low = status && status.reminder_days && status.days_left <= status.reminder_days;
   $("#plan-sub").innerHTML = (through ? `<span class="${low ? "warn" : ""}">Planned through ${esc(fmt(parseISO(through), { weekday: "short", month: "short", day: "numeric" }))}</span>` : "Nothing planned yet") +
     (empty ? ` · ${esc(plural(empty, "empty day"))}` : "");
@@ -391,37 +398,41 @@ async function drawBoard() {
   $("#list-n").textContent = n === null ? "" : ` (${n})`;
   drawPast(((past && past.entries) || []).filter((e) => PLAN_TYPES.includes(e.entry_type) && e.recipe?.slug && !e.cooked && !e.skipped));
 
+  const types = plannedTypes(), showType = types.length > 1 || (data.entries || []).some((e) => e.entry_type !== "dinner");
+  const card = (e, iso) => {
+    const r = e.recipe || {}, img = imgUrl(r), miss = e.cooked ? 0 : +e.missing || 0;
+    return `<div class="bcard ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}" data-type="${esc(e.entry_type)}" tabindex="0" role="button" aria-label="${esc(cap(e.entry_type))}: ${esc(entryName(e))}, ${esc(dayLong(iso))}${e.cooked ? ", cooked" : ""}. Open recipe">
+      <div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}${e.cooked ? `<span class="cooked-badge" aria-hidden="true">✓</span>` : ""}</div>
+      <div class="main">${showType ? `<div class="mtype">${esc(cap(e.entry_type))}</div>` : ""}<div class="a">${esc(entryName(e))}</div>
+        <div class="b">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} min</span>` : ""}${miss ? `<span class="pill soon miss-chip">Missing ${esc(miss)}</span>` : ""}${e.cooked ? `<span class="pill ok">Cooked</span>` : r.slug ? `<button class="cook-pill" data-cook="${esc(e.id)}" aria-label="Mark ${esc(entryName(e))} as cooked">✓ Cook</button>` : ""}</div></div>
+      <button class="bmore" data-more="${esc(e.id)}" aria-label="More options for ${esc(entryName(e))}">${ic("more")}</button></div>`;
+  };
   let html = "";
   for (let i = 0; i < H; i++) {
-    const iso = isoDate(addDays(t0, i)), wd = parseISO(iso).getDay();
+    const iso = isoDate(addDays(t0, i)), wd = parseISO(iso).getDay(), list = byDay[iso] || [];
     html += `<div class="bday ${i === 0 ? "today" : ""} ${wd === 0 || wd === 6 ? "wkend" : ""}" data-date="${esc(iso)}">
-      <div class="bday-h"><b>${esc(dayName(iso))}</b><span>${esc(shortDate(iso))}</span></div>`;
-    PLAN_TYPES.forEach((type) => {
-      const e = (byDay[iso] || {})[type];
-      if (!e) { html += `<button class="bempty" data-pick="${esc(iso)}" data-type="${esc(type)}">${ic("plus")}<span>Add ${esc(type)}</span></button>`; return; }
-      const r = e.recipe || {}, img = imgUrl(r), miss = e.cooked ? 0 : +e.missing || 0;
-      html += `<div class="bcard ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}" tabindex="0" role="button" aria-label="${esc(entryName(e))}, ${esc(dayLong(iso))}${e.cooked ? ", cooked" : ""}. Open recipe">
-        <div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}${e.cooked ? `<span class="cooked-badge" aria-hidden="true">✓</span>` : ""}</div>
-        <div class="main"><div class="a">${esc(entryName(e))}</div>
-          <div class="b">${r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} min</span>` : PLAN_TYPES.length > 1 ? esc(cap(type)) : ""}${miss ? `<span class="pill soon miss-chip">Missing ${esc(miss)}</span>` : ""}${e.cooked ? `<span class="pill ok">Cooked</span>` : r.slug ? `<button class="cook-pill" data-cook="${esc(e.id)}" aria-label="Mark ${esc(entryName(e))} as cooked">✓ Cook</button>` : ""}</div></div>
-        <button class="bmore" data-more="${esc(e.id)}" aria-label="More options for ${esc(entryName(e))}">${ic("more")}</button></div>`;
+      <div class="bday-h"><b>${esc(dayName(iso))}</b><span>${esc(shortDate(iso))}</span>${list.length ? `<button class="bday-add" data-add="${esc(iso)}" aria-label="Add another recipe to ${esc(dayLong(iso))}">${ic("plus")}</button>` : ""}</div>
+      <div class="bday-meals">${list.map((e) => card(e, iso)).join("")}`;
+    types.filter((t) => !list.some((e) => e.entry_type === t)).forEach((t) => {
+      html += `<button class="bempty" data-pick="${esc(iso)}" data-type="${esc(t)}">${ic("plus")}<span>Add ${esc(t)}</span></button>`;
     });
-    html += `</div>`;
+    html += `</div></div>`;
   }
   board.innerHTML = html;
   const find = (id) => (data.entries || []).find((e) => String(e.id) === String(id));
   board.onclick = (ev) => {
     if (Date.now() < DND.quietUntil) return;
     const more = ev.target.closest("[data-more]"), pick = ev.target.closest("[data-pick]"), card = ev.target.closest(".bcard");
-    const cook = ev.target.closest("[data-cook]");
+    const cook = ev.target.closest("[data-cook]"), add = ev.target.closest("[data-add]");
     if (cook) { const e = find(cook.dataset.cook); if (e) cookEntry(e, cook); return; }
+    if (add) return openPicker(add.dataset.add, firstOpenType(byDay[add.dataset.add] || []), null, { anyType: true });
     if (more) return entryMenu(more, find(more.dataset.more));
     if (pick) return openPicker(pick.dataset.pick, pick.dataset.type);
     if (card) { const e = find(card.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else if (e) entryMenu($(".bmore", card), e); }
   };
   board.onkeydown = (ev) => { const card = ev.target.closest?.(".bcard"); if (card && ev.target === card && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); card.click(); } };
   board.oncontextmenu = (ev) => { if (ev.target.closest(".bcard")) ev.preventDefault(); };
-  boardDnD(board, (id, from, to) => moveEntry(find(id), to, true));
+  boardDnD(board, (id, from, to, swapWith) => moveEntry(find(id), to, true, swapWith));
 }
 
 // ---------- cooked: take what a recipe used out of the pantry (with Undo) and tick off the plan entry
@@ -514,6 +525,9 @@ function boardDnD(board, onDrop) {
     s.ghost.style.transform = `translate(${s.x - s.dx}px,${s.y - s.dy}px) rotate(-1.5deg) scale(1.03)`;
     const el = document.elementFromPoint(s.x, s.y), day = el && el.closest(".bday");
     const t = day && board.contains(day) ? day : null;
+    const over = el && el.closest(".bcard");   // a meal of the same type on another day: the two swap
+    const sw = over && over !== s.card && over.dataset.type === s.card.dataset.type && t && t.dataset.date !== s.from ? over : null;
+    if (sw !== s.swap) { s.swap?.classList.remove("swap-on"); s.swap = sw; sw?.classList.add("swap-on"); }
     if (t !== s.target) { s.target?.classList.remove("drop-on"); s.target = t; if (t && t.dataset.date !== s.from) t.classList.add("drop-on"); }
   }
   function move(e) {
@@ -535,12 +549,12 @@ function boardDnD(board, onDrop) {
     const to = s.active && s.target ? s.target.dataset.date : null;
     if (s.active) DND.quietUntil = Date.now() + 350;   // swallow the click that follows a drop
     if (to && to !== s.from) {
-      // optimistic: swap the cards in place, then sync with the server
-      const dest = s.target, src = s.card.closest(".bday"), other = dest.querySelector(".bcard, .bempty");
-      if (other) src.appendChild(other);
-      dest.appendChild(s.card);
-      dest.classList.add("dropped"); setTimeout(() => dest.classList.remove("dropped"), 600);
-      onDrop(s.id, s.from, to);
+      // optimistic: put the card on the new day (or trade places with the meal it was dropped on), then sync
+      const dest = $(".bday-meals", s.target), src = s.card.closest(".bday-meals"), sw = s.swap;
+      if (sw) src.appendChild(sw);
+      dest.prepend(s.card);
+      s.target.classList.add("dropped"); const t = s.target; setTimeout(() => t.classList.remove("dropped"), 600);
+      onDrop(s.id, s.from, to, sw ? sw.dataset.entry : null);
     }
     cleanup();
   }
@@ -549,7 +563,7 @@ function boardDnD(board, onDrop) {
     const s = DND.s;
     if (!s) return;
     clearTimeout(s.timer); cancelAnimationFrame(s.raf);
-    s.ghost?.remove(); s.target?.classList.remove("drop-on");
+    s.ghost?.remove(); s.target?.classList.remove("drop-on"); s.swap?.classList.remove("swap-on");
     s.card.classList.remove("dragging", "pressing");
     document.body.classList.remove("dnd");
     window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", cancel);
@@ -558,13 +572,13 @@ function boardDnD(board, onDrop) {
 }
 
 // ---------- plan actions (no confirmations: everything is undoable from the toast)
-async function moveEntry(e, to, fromDrag) {
+async function moveEntry(e, to, fromDrag, swapWith) {
   if (!e || !to || e.date === to) return;
   const from = e.date;
   try {
-    const r = await api("POST", "/api/plan/move", { id: e.id, date: to });
+    const r = await api("POST", "/api/plan/move", swapWith ? { id: e.id, date: to, swap_with: +swapWith } : { id: e.id, date: to });
     toast(`Moved to ${dayLong(to)}${r && r.swapped_with ? " · swapped days" : ""}`, "Undo", async () => {
-      try { await api("POST", "/api/plan/move", { id: e.id, date: from }); replan(); } catch (x) { fail(x); }
+      try { await api("POST", "/api/plan/move", r && r.swapped_with ? { id: e.id, date: from, swap_with: r.swapped_with } : { id: e.id, date: from }); replan(); } catch (x) { fail(x); }
     });
   } catch (x) { fail(x); }
   replan();
@@ -580,8 +594,8 @@ async function removeEntry(e) {
   } catch (x) { fail(x); }
   replan();
 }
-async function assignRecipe(date, recipeId, type = "dinner") {
-  const r = await api("POST", "/api/plan/assign", { date, recipe_id: recipeId, entry_type: type });
+async function assignRecipe(date, recipeId, type = "dinner", replaceId = null) {
+  const r = await api("POST", "/api/plan/assign", { date, recipe_id: recipeId, entry_type: type, ...(replaceId != null ? { replace_id: replaceId } : {}) });
   const n = (r && r.added) || 0, skipped = (r && r.skipped) || [];
   toast(`Added to ${wkShort(date)}${n ? ` · ${plural(n, "item")} on your list` : skipped.length ? " · you have everything" : ""}`, n ? "View list" : null, () => go("list"));
   return r;
@@ -634,8 +648,8 @@ function entryMenu(anchor, e) {
         if (a === "move") {
           const H = horizon(), plan = state.plan?.entries || [];
           el.innerHTML = `<div class="pop-h">Move ${esc(entryName(e))} to</div><div class="pop-scroll">${Array.from({ length: H }, (_, i) => isoDate(addDays(today(), i))).filter((d) => d !== e.date).map((d) => {
-            const o = plan.find((x) => x.date === d && x.entry_type === e.entry_type);
-            return `<button data-to="${esc(d)}"><b>${esc(dayName(d))}</b> <span class="muted">${esc(shortDate(d))}</span><small>${o ? `swap with ${esc(entryName(o))}` : "empty"}</small></button>`;
+            const o = plan.filter((x) => x.date === d);
+            return `<button data-to="${esc(d)}"><b>${esc(dayName(d))}</b> <span class="muted">${esc(shortDate(d))}</span><small>${o.length ? `with ${esc(o.map(entryName).slice(0, 2).join(", "))}` : "empty"}</small></button>`;
           }).join("")}</div>`;
           p.place();
           $$("[data-to]", el).forEach((x) => (x.onclick = () => { closePop(); moveEntry(e, x.dataset.to); }));
@@ -659,13 +673,15 @@ async function planSequential(type = "dinner") {
   openPicker(empty[0], type, null, { seq: true });
 }
 async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
-  const pk = { q: "", f: "open", cat: "", recipes: null, last: {}, inPlan: {}, taken: new Set(), multi: false, sel: [], seq: !!opts.seq && !replacing,
-    date, added: 0, items: 0, msg: "", preview: null };
+  const pk = { q: "", f: "open", cat: "", recipes: null, last: {}, inPlan: {}, takenBy: {}, multi: false, sel: [], seq: !!opts.seq && !replacing,
+    date, added: 0, items: 0, msg: "", preview: null, type };
+  const takenSet = () => (pk.takenBy[pk.type] = pk.takenBy[pk.type] || new Set());
   const titleFor = (d) => pk.seq
     ? `${fmt(parseISO(d), { weekday: "short", month: "short", day: "numeric" })} · day ${Math.round((parseISO(d) - today()) / 864e5) + 1} of ${horizon()}`
-    : `${replacing ? "Swap" : cap(type)} · ${dayLong(d)}, ${shortDate(d)}`;
+    : `${replacing ? "Swap" : cap(pk.type)} · ${dayLong(d)}, ${shortDate(d)}`;
   openSheet(titleFor(date),
-    `<div class="search">${ic("search")}<input id="pk-q" type="search" placeholder="Search recipes" autocomplete="off" enterkeyhint="search"></div>
+    `${replacing ? "" : `<div class="seg pk-types" id="pk-type" role="radiogroup" aria-label="Meal">${MEAL_TYPES.map(([k, l]) => `<button data-t="${k}" role="radio" aria-checked="${k === type}" class="${k === type ? "on" : ""}">${esc(l)}</button>`).join("")}</div>`}
+    <div class="search">${ic("search")}<input id="pk-q" type="search" placeholder="Search recipes" autocomplete="off" enterkeyhint="search"></div>
     <div class="chips pk-chips" id="pk-f">${[["open", "Not on plan"], ["all", "All"], ["fav", "♥ Favorites"]].map(([k, l]) => `<button class="filter ${k === pk.f ? "on" : ""}" data-f="${k}">${l}</button>`).join("")}</div>
     <div class="chips pk-chips" id="pk-c"></div>
     <div class="pk-tools">${replacing ? "" : `<button class="link-btn" id="pk-multi" aria-pressed="false">Select several</button>`}
@@ -679,6 +695,11 @@ async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
       $("#pk-q").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { pk.q = e.target.value; draw(); }, 100); };
       $("#pk-q").onkeydown = (e) => { if (e.key === "Enter") { const first = $("#pk-list [data-rid]"); if (first) first.click(); } };
       $$("#pk-f [data-f]").forEach((b) => (b.onclick = () => { pk.f = b.dataset.f; $$("#pk-f .filter").forEach((x) => x.classList.toggle("on", x === b)); draw(); }));
+      $$("#pk-type [data-t]").forEach((b) => (b.onclick = () => {
+        pk.type = b.dataset.t;
+        $$("#pk-type [data-t]").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", String(x === b)); });
+        const h = $("#layer .sheet-h h3"); if (h) h.textContent = titleFor(pk.date);
+      }));
       $("#pk-multi") && ($("#pk-multi").onclick = () => {
         pk.multi = !pk.multi; pk.sel = []; pk.preview = null;
         $("#pk-multi").textContent = pk.multi ? "Cancel selection" : "Select several";
@@ -700,7 +721,7 @@ async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
     ]);
     pk.recipes = rs.recipes || [];
     (hist.entries || []).forEach((e) => {
-      if (e.entry_type === type && e.date >= todayISO && e.date <= lastDay) pk.taken.add(e.date);
+      if (e.date >= todayISO && e.date <= lastDay) (pk.takenBy[e.entry_type] = pk.takenBy[e.entry_type] || new Set()).add(e.date);
       const id = e.recipe?.id; if (!id) return;
       if (e.date < todayISO) { if (!pk.last[id] || e.date > pk.last[id]) pk.last[id] = e.date; }
       else if (e.date <= lastDay && (!pk.inPlan[id] || e.date < pk.inPlan[id])) pk.inPlan[id] = e.date;
@@ -716,7 +737,7 @@ async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
     $$("[data-c]", cbox).forEach((b) => (b.onclick = () => { pk.cat = b.dataset.c; $$("[data-c]", cbox).forEach((x) => x.classList.toggle("on", x === b)); draw(); }));
   }
   const ago = (d) => { const n = Math.round((today() - parseISO(d)) / 864e5); return n < 14 ? `${plural(n, "day")} ago` : n < 60 ? `${Math.round(n / 7)} weeks ago` : `${Math.round(n / 30)} months ago`; };
-  const empties = () => hz.filter((d) => !pk.taken.has(d));
+  const empties = () => hz.filter((d) => !takenSet().has(d));
   const setMsg = (m) => { const el = $("#pk-msg"); if (el) el.textContent = m || ""; };
   const finishSeq = () => {
     closeSheet(); replan();
@@ -766,11 +787,11 @@ async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
       b.classList.add("picked");
       try {
         if (pk.seq) {
-          const r = await api("POST", "/api/plan/assign", { date: pk.date, recipe_id: rid, entry_type: type });
-          pk.added++; pk.items += (r && r.added) || 0; pk.taken.add(pk.date); pk.inPlan[rid] = pk.inPlan[rid] && pk.inPlan[rid] < pk.date ? pk.inPlan[rid] : pk.date;
+          const r = await api("POST", "/api/plan/assign", { date: pk.date, recipe_id: rid, entry_type: pk.type });
+          pk.added++; pk.items += (r && r.added) || 0; takenSet().add(pk.date); pk.inPlan[rid] = pk.inPlan[rid] && pk.inPlan[rid] < pk.date ? pk.inPlan[rid] : pk.date;
           const name = (pk.recipes.find((x) => x.id === rid) || {}).name || "it";
           advance(`Added ${name} to ${wkShort(pk.date)}`);
-        } else { await assignRecipe(pk.date, rid, type); closeSheet(); replan(); }
+        } else { await assignRecipe(pk.date, rid, replacing ? replacing.entry_type : pk.type, replacing ? replacing.id : null); closeSheet(); replan(); }
       } catch (e) { fail(e); $$("#pk-list [data-rid]").forEach((x) => (x.disabled = false)); b.classList.remove("picked"); }
     }));
   };
@@ -781,7 +802,7 @@ async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
     let plan;
     if (ai) {
       $("#pk-ai").disabled = true; $("#pk-ai").textContent = "Arranging…";
-      try { plan = (await api("POST", "/api/plan/arrange", { recipe_ids: ids, start: hz[0], end: hz[hz.length - 1], entry_type: type })).assignments; }
+      try { plan = (await api("POST", "/api/plan/arrange", { recipe_ids: ids, start: hz[0], end: hz[hz.length - 1], entry_type: pk.type })).assignments; }
       catch (e) { fail(e); } finally { $("#pk-ai").innerHTML = `${ic("sparkle")} Arrange with AI`; $("#pk-ai").disabled = false; }
       if (!plan) return;
     } else plan = days.slice(0, ids.length).map((d, i) => ({ date: d, recipe_id: ids[i] }));
@@ -800,7 +821,7 @@ async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
       try {
         for (const [i, a] of plan.entries()) {
           btn.textContent = `Planning ${i + 1} of ${plan.length}…`;
-          const r = await api("POST", "/api/plan/assign", { date: a.date, recipe_id: a.recipe_id, entry_type: type });
+          const r = await api("POST", "/api/plan/assign", { date: a.date, recipe_id: a.recipe_id, entry_type: pk.type });
           if (r?.entry?.id != null) made.push(r.entry.id);
           items += (r && r.added) || 0;
         }
@@ -1621,9 +1642,9 @@ async function openSettings() {
         <div class="field"><label>Remind me before the plan runs out<small class="lh">A message when only this many planned days are left.</small></label><select id="st-rem">${[[0, "Off"], [1, "1 day"], [2, "2 days"], [3, "3 days"], [5, "5 days"], [7, "7 days"]].map(([v, l]) => `<option value="${v}" ${(s.plan_reminder_days ?? 3) === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       </div>
       <div class="group-label">Meal planning</div>
-      <p class="hint" style="margin-top:-2px">Meals to plan</p>
+      <p class="hint" style="margin-top:-2px">Meals I plan <span class="muted">(each day shows these; the + adds any meal)</span></p>
       <div class="group">
-        <div class="tag-cloud" id="st-types">${["breakfast", "lunch", "dinner", "side"].map((t) => `<button class="tag ${s.meal_types.includes(t) ? "on" : ""}" data-t="${t}">${cap(t)}</button>`).join("")}</div>
+        <div class="tag-cloud" id="st-types">${MEAL_TYPES.map(([t, l]) => `<button class="tag ${s.meal_types.includes(t) ? "on" : ""}" data-t="${t}">${l}</button>`).join("")}</div>
         <div class="field"><label>No repeats for (days)<small class="lh">The same recipe won't come back within this many days.</small></label><input type="number" id="st-nr" value="${esc(s.no_repeat_days)}" min="0" max="90"></div>
         <div class="field"><label>Use food before it goes bad<small class="lh">Plans favor recipes using items close to their use-by date.</small></label><label class="toggle"><input type="checkbox" id="st-exp" ${s.prefer_expiring ? "checked" : ""}><span></span></label></div>
         <div class="field"><label>Warn me this many days early<small class="lh">Items show as “use soon” when they're this close to their use-by date.</small></label><input type="number" id="st-win" value="${esc(s.expiring_window_days)}" min="1" max="14"></div>

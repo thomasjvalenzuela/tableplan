@@ -112,8 +112,8 @@ class PlannerListSync(Base):
         self.assertEqual(cm.exception.status, 404)
 
     def test_assign_replaces_existing_entry_and_its_items(self):
-        S.plan_assign({"date": day(1), "recipe_id": self.tid})
-        res = S.plan_assign({"date": day(1), "recipe_id": self.pid})
+        first = S.plan_assign({"date": day(1), "recipe_id": self.tid})["entry"]["id"]
+        res = S.plan_assign({"date": day(1), "recipe_id": self.pid, "replace_id": first})
         self.assertEqual(res["replaced_removed"], 4)   # the old recipe's items go before the new ones are added
         plan = S.get_plans(S.today(), S.today() + timedelta(days=3))
         self.assertEqual([(p["date"], p["recipe"]["id"]) for p in plan], [(day(1), self.pid)])
@@ -129,7 +129,7 @@ class PlannerListSync(Base):
         a = S.plan_assign({"date": day(1), "recipe_id": self.tid})["entry"]["id"]
         b = S.plan_assign({"date": day(2), "recipe_id": self.pid})["entry"]["id"]
         before = self.texts()
-        self.assertEqual(S.plan_move({"id": a, "date": day(2)}), {"ok": True, "swapped_with": b})
+        self.assertEqual(S.plan_move({"id": a, "date": day(2), "swap_with": b}), {"ok": True, "swapped_with": b})
         self.assertEqual(S.plan_move({"id": a, "date": day(5)}), {"ok": True, "swapped_with": None})
         self.assertEqual(S.plan_move({"id": a, "date": day(5)}), {"ok": True, "swapped_with": None})
         plan = {p["id"]: p["date"] for p in S.get_plans(S.today(), S.today() + timedelta(days=7))}

@@ -5411,7 +5411,7 @@ def plan_entry(entry_id, day):
 
 
 def plan_assign(b):
-    """Put a recipe on a day (replacing that day's entry of the same type) and add its ingredients to the list."""
+    """Put a recipe on a day (alongside what's there, or in place of replace_id) and add its ingredients to the list."""
     require_native()
     d = _strict_date(b.get("date"))
     et = _entry_type_arg(b.get("entry_type"))
@@ -5436,16 +5436,20 @@ def plan_assign(b):
             skipped.append(fname)
             continue
         lines.append(line)
+    replace_id = _int_id(b["replace_id"]) if b.get("replace_id") not in (None, "") else None
     added, replaced = [], 0
     with db() as c:
         lid = n_lists.single_list(c)
         existing = n_plans.entries_on(c, iso(d), et)
-        same = next((x for x in existing if x["recipe_id"] == rid), None)
-        if same:
+        same = next((x for x in existing if x["recipe_id"] == rid and x["id"] != replace_id), None)
+        if same:   # the same recipe in the same slot already: nothing to do
             eid, skipped = same["id"], []
         else:
-            for old in existing:
-                n_plans.delete_entry(c, old["id"])
+            if replace_id is not None:   # an explicit swap replaces that one entry; otherwise entries add up
+                old = n_plans.get_entry(c, replace_id)
+                if not old:
+                    raise ApiError(404, "Plan entry not found")
+                n_plans.delete_entry(c, replace_id)
                 replaced += _drop_entry_items(c, lid, old)
             eid = n_plans.add_entry(c, iso(d), et, rid, scale=scale)
             added = n_lists.add_recipe_ingredients(c, lid, rid, lines, scale, parse_ing_text, aisle_for, food_key,
@@ -5455,7 +5459,7 @@ def plan_assign(b):
 
 
 def plan_move(b):
-    """Move an entry to another day; if that day already has one of the same type, the two swap."""
+    """Move an entry to another day (it joins that day's meals); with swap_with, the two entries trade days."""
     require_native()
     eid = _int_id(b.get("id"))
     d = _strict_date(b.get("date"))
@@ -5465,11 +5469,14 @@ def plan_move(b):
             raise ApiError(404, "Plan entry not found")
         if e["date"] == iso(d):
             return {"ok": True, "swapped_with": None}
-        other = n_plans.entries_on(c, iso(d), e["entry_type"], exclude_id=eid)
         swapped = None
-        if other:
-            n_plans.update_entry(c, other[0]["id"], date=e["date"])
-            swapped = other[0]["id"]
+        sw = _int_id(b["swap_with"]) if b.get("swap_with") not in (None, "") else None
+        if sw is not None:   # dropped onto a specific meal of the same type: the two trade days
+            other = n_plans.get_entry(c, sw)
+            if not other or other["date"] != iso(d) or other["entry_type"] != e["entry_type"]:
+                raise ApiError(400, "Pick a meal of the same type on that day to swap with.")
+            n_plans.update_entry(c, sw, date=e["date"])
+            swapped = sw
         n_plans.update_entry(c, eid, date=iso(d))
     return {"ok": True, "swapped_with": swapped}
 

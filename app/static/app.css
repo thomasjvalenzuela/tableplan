@@ -739,3 +739,14 @@ body.scanning .toast{bottom:calc(60vh + 10px)}
 .sb-method{margin:8px auto 4px}
 .sb-method small.soon{margin-left:4px;font-size:10px;font-weight:700;color:var(--sub);text-transform:uppercase}
 .sb-method [aria-disabled="true"]{opacity:.55}
+/* several meals per day */
+.bday-meals{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.bday-h{position:relative}
+.bday-add{margin-top:4px;width:28px;height:28px;border-radius:50%;border:0;background:var(--fill);color:var(--text);display:grid;place-items:center;cursor:pointer}
+.bday-add svg{width:16px;height:16px}
+.bcard .mtype{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--sub)}
+.bcard.swap-on{box-shadow:0 0 0 2px var(--orange);border-radius:12px}
+.pk-types{margin:0 0 10px;overflow-x:auto;scrollbar-width:none}
+.pk-types button{padding:7px 10px;font-size:13.5px;white-space:nowrap}
+.day-card .more-n{font-size:11.5px;color:var(--sub);margin-top:2px}
+@media (min-width:1024px){.bday-h{gap:6px}.bday-h span{margin-left:auto}.bday-add{margin-top:0;width:22px;height:22px;flex:none;align-self:center}.bday-add svg{width:14px;height:14px}}

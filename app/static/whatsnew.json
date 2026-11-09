@@ -1,5 +1,13 @@
 [
  {
+  "id": "several-meals",
+  "date": "2026-11-09",
+  "icon": "cal",
+  "color": "orange",
+  "title": "More than one meal a day",
+  "text": "Plan breakfast, lunch, sides and dessert too: tap + on any day, and pick the meal at the top of the recipe picker."
+ },
+ {
   "id": "inventory-grid",
   "date": "2026-11-09",
   "icon": "box",
