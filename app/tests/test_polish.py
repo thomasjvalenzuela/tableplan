@@ -206,3 +206,62 @@ class Categories(unittest.TestCase):
             slug = S._save_new_recipe(imported("Cat Pancakes"))
         self.assertIn("Main dish; Side dish", oc.call_args.args[0][0]["content"])
         self.assertEqual(self.cats(slug), ["Breakfast", "Dessert"])
+
+
+class DiaryAndAdjust(unittest.TestCase):
+    def setUp(self):
+        S.save_settings({"polish_imports": False})
+        with S.db() as c:
+            c.execute("DELETE FROM diary")
+        self.slug = S._save_new_recipe(dict(imported(f"Diary Pancakes {id(self)}"), recipeServings=2))
+        S._recipe_cache["at"] = 0
+
+    def test_cooked_creates_entry_rating_average_and_undo(self):
+        out = S.recipe_cooked(self.slug, {})
+        self.assertIsNotNone(out["diary_id"])
+        S.diary_update(out["diary_id"], {"rating": 5, "note": "Less sugar next time"})
+        second = S.recipe_cooked(self.slug, {})
+        S.diary_update(second["diary_id"], {"rating": 4})
+        d = S.recipe_detail(self.slug)
+        self.assertEqual(d["rating"], 4.5)
+        self.assertEqual([e["rating"] for e in d["diary"]], [4, 5])
+        pool = {r["slug"]: r for r in S.recipe_pool(refresh=True)}
+        self.assertEqual(pool[self.slug]["rating"], 4.5)
+        self.assertEqual([e["note"] for e in S.diary_list("notes")], ["Less sugar next time"])
+        self.assertEqual(len(S.diary_list("top")), 2)
+        S.cooked_undo({"undo_token": second["undo_token"]})   # undoing a cook removes its diary entry
+        self.assertEqual(len(S.recipe_detail(self.slug)["diary"]), 1)
+        note = S.diary_add({"slug": self.slug, "note": "Try with blueberries"})
+        self.assertEqual(note["kind"], "note")
+        for bad in ({"rating": 6}, {"rating": True}):
+            with self.assertRaises(S.ApiError):
+                S.diary_update(note["id"], bad)
+        S.diary_delete(note["id"])
+
+    def test_adjust_preview_save_and_revert(self):
+        proposal = {"summary": "spicier: +1 tsp chili flakes", "ingredients": [
+            {"status": "same", "was": "2 c. flour", "line": "2 c. flour", "reason": ""},
+            {"status": "changed", "was": "1 ½ cups milk", "line": "1 ½ cups buttermilk", "reason": "tangier"},
+            {"status": "removed", "was": "1 egg", "line": "", "reason": "lighter"},
+            {"status": "added", "was": "", "line": "1 tsp chili flakes", "reason": "spicier"}],
+            "steps": [{"status": "same", "was": "mix", "text": "mix", "reason": ""},
+                      {"status": "changed", "was": "cook 3 min", "text": "cook 3 min with the chili", "reason": "spice"},
+                      {"status": "same", "was": "serve", "text": "serve", "reason": ""}]}
+        with mock.patch.object(S, "openai_chat", return_value=proposal) as oc:
+            p = S.recipe_adjust(self.slug, {"request": "spicier"})
+        self.assertIn("Make only the changes needed", oc.call_args.args[0][0]["content"])
+        d = S.recipe_adjust_save(self.slug, {**p, "request": "spicier"})
+        self.assertEqual([i["raw"] for i in d["ingredients"]], ["2 c. flour", "1 ½ cups buttermilk", "1 tsp chili flakes"])
+        self.assertEqual(d["steps"][1]["text"], "cook 3 min with the chili")
+        self.assertEqual(d["versions"], 1)
+        self.assertTrue(d["diary"][0]["note"].startswith("Adjusted: spicier: +1 tsp chili flakes"))
+        vs = S.recipe_versions(d["slug"])["versions"]
+        d = S.recipe_version_restore(d["slug"], vs[0]["n"])
+        self.assertEqual([i["raw"] for i in d["ingredients"]], ["2 c. flour", "1 ½ cups milk", "1 egg"])
+        self.assertEqual(d["versions"], 1)   # the adjusted text is kept as a version too
+        S.set_cfg(openai_key="")
+        try:
+            with self.assertRaises(S.ApiError):
+                S.recipe_adjust(self.slug, {"request": "spicier"})
+        finally:
+            S.set_cfg(openai_key="sk-test")

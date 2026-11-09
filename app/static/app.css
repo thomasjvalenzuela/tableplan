@@ -908,3 +908,35 @@ h1.title{font-family:var(--serif);font-weight:700;letter-spacing:-.01em}
 .sb-all{display:inline-flex;gap:6px;align-items:center}
 .sb-all input{font:inherit;font-size:13px;padding:4px 6px;border-radius:8px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
 .tr-exp{display:inline-flex;align-items:center;gap:6px}.tr-fill{flex:0 0 auto}
+/* cooking diary, "How was it?", Make it my way */
+.dy{display:flex;flex-direction:column}
+.dy-h{font-size:12.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--sub);margin:10px 0 4px}
+.dy-h:first-child{margin-top:0}
+.dy-row{display:flex;gap:12px;align-items:flex-start;padding:8px 0;text-align:left;width:100%;border:0;background:none;color:var(--text)}
+.dy-row+.dy-row{border-top:.5px solid var(--sep)}
+.dy-img{width:52px;height:52px;border-radius:50%;object-fit:cover;flex:none;background:var(--card2);display:grid;place-items:center;font-size:24px}
+.dy-row .main{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dy-row .a{font-weight:600;font-family:var(--serif);font-size:16px}
+.dy-row .b{font-size:13px;color:var(--sub)}
+.dy-row .stars{color:#E6A700;letter-spacing:1px}
+.dy-note{font-family:var(--serif);font-style:italic;font-size:14.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.how,.adj{background:var(--card2);border-radius:var(--r-md);padding:12px 14px;margin:0 0 14px;display:flex;flex-direction:column;gap:10px}
+.how-h{display:flex;align-items:center;justify-content:space-between}
+.how-h b{font-family:var(--serif);font-size:18px}
+.how-stars{display:flex;gap:6px}
+.how-stars button{font-size:30px;line-height:1;color:var(--sub2);background:none;border:0;cursor:pointer;padding:0 2px}
+.how-stars button.on{color:#E6A700}
+.how textarea,.adj input{font:inherit;font-size:16px;padding:9px 11px;border-radius:10px;border:1px solid var(--sep);background:var(--card);color:var(--text);resize:vertical}
+.how-acts{display:flex;align-items:center;gap:8px}
+.how-acts .grow{flex:1}
+.how-acts .btn{width:auto}
+.how-photo{box-shadow:none;background:var(--card)}
+.diff ul,.diff ol{margin:0 0 6px;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-size:15px}
+.df-changed{background:rgba(255,204,0,.18);border-radius:6px;padding:1px 4px}
+.df-added{background:rgba(52,199,89,.16);border-radius:6px;padding:1px 4px}
+.df-removed{color:var(--sub)}
+.df-was,.df-why{display:block;font-size:12.5px;color:var(--sub)}
+.ck-finish{max-width:520px;margin:0 auto;padding:40px 20px;display:flex;flex-direction:column;gap:12px;text-align:center}
+.ck-finish .ck-cheers{font-size:56px}
+.ck-finish h2{font-family:var(--serif);margin:0}
+.ck-finish .how{text-align:left}

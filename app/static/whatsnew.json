@@ -1,5 +1,21 @@
 [
  {
+  "id": "cooking-diary",
+  "date": "2026-11-09",
+  "icon": "book",
+  "color": "orange",
+  "title": "Cooking diary",
+  "text": "Every meal you cook is saved with your stars, a note and a photo, and your favorites come up more often in plans."
+ },
+ {
+  "id": "make-it-my-way",
+  "date": "2026-11-09",
+  "icon": "sparkle",
+  "color": "purple",
+  "title": "Make it my way",
+  "text": "Ask for a recipe spicier, dairy-free or faster, see exactly what changes, and keep it as your own version."
+ },
+ {
   "id": "trusted-dates",
   "date": "2026-11-09",
   "icon": "clock",

@@ -175,6 +175,7 @@ function route() {
   const h = decodeURIComponent(location.hash.slice(1));
   if (h.startsWith("recipe/")) { window.scrollTo(0, 0); return renderRecipe(h.slice(7)); }
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
+  if (h === "diary") { window.scrollTo(0, 0); return renderDiary(); }
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
 const upd = () => !!state.update?.update_available;
@@ -277,7 +278,15 @@ async function renderHome() {
       <div class="tn-acts">${tonight.cooked ? `<span class="pill ok">Cooked ✓</span>` : miss ? `<button class="btn sec small" id="tn-miss">${ic("cart")} Missing ${esc(miss)}</button>` : `<button class="btn small" id="tn-cook">${ic("play")} Start cooking</button>`}</div></section>`;
   }
 
+  html += `<section class="home-card diary-w" id="home-diary" hidden aria-label="Cooking diary"></section>`;
   app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
+  api("GET", "/api/diary?limit=3").then((d) => {
+    const box = $("#home-diary"); if (!box || !(d.entries || []).length) return;
+    box.hidden = false;
+    box.innerHTML = `<div class="hc-h"><h2>Cooking diary</h2><button class="link-btn" id="diary-all">View all ›</button></div>${diaryTimeline(d.entries)}`;
+    $("#diary-all").onclick = () => { location.hash = "diary"; };
+    bindDiaryTimeline(box);
+  }).catch(() => {});
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
   $("#fix-mealie") && ($("#fix-mealie").onclick = () => openSetupSection("mealie", "Recipe library", reloadCfg));
   $$(".wk-day[data-entry]").forEach((b) => (b.onclick = () => { const e = s.week.find((x) => String(x.id) === b.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else openEntry(e); }));
@@ -462,8 +471,9 @@ function cookedMessage(r) {
 }
 async function markCooked(slug, body, after) {
   const r = await api("POST", `/api/recipe/${enc(slug)}/cooked`, body || {});
+  if (r.diary_id) state.justCooked = { diary_id: r.diary_id, slug };   // the recipe page asks "How was it?"
   toast(cookedMessage(r), "Undo", async () => {
-    try { await api("POST", "/api/cooked/undo", { undo_token: r.undo_token }); toast("Undone"); if (after) after(); } catch (x) { fail(x); }
+    try { await api("POST", "/api/cooked/undo", { undo_token: r.undo_token }); state.justCooked = null; toast("Undone"); if (after) after(); } catch (x) { fail(x); }
   });
   if (after) after();
   return r;

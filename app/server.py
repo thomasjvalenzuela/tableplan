@@ -203,6 +203,12 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 );
 CREATE INDEX IF NOT EXISTS ix_ai_usage_at ON ai_usage(at);
 CREATE TABLE IF NOT EXISTS upc_cache (code TEXT PRIMARY KEY, data TEXT, at TEXT);
+CREATE TABLE IF NOT EXISTS diary (
+  id INTEGER PRIMARY KEY, recipe_id TEXT NOT NULL, plan_entry_id INTEGER, kind TEXT NOT NULL DEFAULT 'cooked',
+  cooked_at TEXT NOT NULL, rating INTEGER, note TEXT NOT NULL DEFAULT '', photo TEXT, servings REAL, undo_token TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_diary_recipe ON diary(recipe_id, cooked_at);
 CREATE TABLE IF NOT EXISTS trips (
   id INTEGER PRIMARY KEY, store_id TEXT, store_name TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, method TEXT NOT NULL,
   items INTEGER NOT NULL DEFAULT 0, checked INTEGER NOT NULL DEFAULT 0, total REAL, files TEXT NOT NULL DEFAULT '[]',
@@ -2022,6 +2028,11 @@ def recipe_pool(refresh=False):
                     "image_v": r.get("image") or "",
                     "favorite": r["id"] in favs,
                 })
+            if NATIVE:
+                rated = diary_ratings()
+                for it in items:
+                    if it["id"] in rated:
+                        it["rating"], it["ratings"] = rated[it["id"]]
             _recipe_cache.update(at=time.time(), items=items)
         return list(_recipe_cache["items"])
 
@@ -2192,7 +2203,7 @@ def _pick(pool, d, day_index, no_repeat, used, used_this_plan, boost, exclude=()
         candidates = rest[:max(1, len(rest) // 4)]
     weights = []
     for r in candidates:
-        w = 1.0 + (float(r["rating"] or 0) / 5.0)
+        w = 1.0 + 1.5 * (float(r["rating"] or 0) / 5.0) ** 2   # well-loved recipes (diary ratings) come up more
         if r["id"] in boost and day_index < 4:
             w *= 1 + 2.5 * boost[r["id"]]
         if r["id"] in used_this_plan:
@@ -3991,7 +4002,9 @@ def recipe_detail(slug):
         "yield": r.get("recipeYield") or "", "minutes": minutes,
         "prep_minutes": round(int(r.get("prepTimeSeconds") or 0) / 60) or None,
         "cook_minutes": round(int(r.get("performTimeSeconds") or 0) / 60) or None,
-        "difficulty": difficulty, "rating": r.get("rating") or 0, "favorite": r["id"] in favorite_ids(),
+        "difficulty": difficulty, "rating": (diary_ratings().get(r["id"]) or (r.get("rating") or 0,))[0] if NATIVE else r.get("rating") or 0,
+        "favorite": r["id"] in favorite_ids(), "diary": diary_list(recipe_id=r["id"], limit=20) if NATIVE else [],
+        "versions": len(((r.get("extras") or {}).get("versions") or [])) if isinstance(r.get("extras"), dict) else 0,
         "tags": [t.get("name") for t in r.get("tags") or []],
         "categories": [t.get("name") for t in r.get("recipeCategory") or []],
         "ingredients": ings, "steps": steps, "source_url": r.get("orgURL") or "",
@@ -5991,6 +6004,7 @@ def plan_arrange(b):
         return {"assignments": [], "ai": False, "dropped": len(recs), "empty_days": 0}
     pool = {r["id"]: r for r in recipe_pool()}
     info = [{"id": r["id"], "name": r.get("name") or "", "minutes": (pool.get(r["id"]) or {}).get("minutes") or 0,
+             "rating": (pool.get(r["id"]) or {}).get("rating") or 0,
              "ingredients": [_ing_line(g) for g in r.get("recipeIngredient") or []][:25]} for r in recs]
     n_empty = len(dates)
     dropped = max(0, len(info) - len(dates))
@@ -6002,7 +6016,7 @@ def plan_arrange(b):
             res = openai_chat([{"role": "user", "content": (
                 "Assign each recipe to exactly one of the dates (one recipe per date, use every recipe once). Aim for "
                 "variety: don't put similar proteins or cuisines on back-to-back days. Put quicker recipes on weekdays "
-                "and longer ones on weekends. Recipes that use these soon-to-expire pantry foods should come first: "
+                "and longer ones on weekends. Give the best-rated recipes (rating out of 5) the best slots, like weekends. Recipes that use these soon-to-expire pantry foods should come first: "
                 + (", ".join(expiring) or "none") + ".\n\n" + json.dumps({
                     "dates": [{"date": iso(d), "weekday": d.strftime("%A")} for d in dates], "recipes": info},
                     ensure_ascii=False))}], "plan_arrange", ARRANGE_SCHEMA, "arrange", f"{len(info)} recipes")
@@ -6161,10 +6175,264 @@ def recipe_cooked(slug, b):
                       (now, "cooked-plan", json.dumps({"token": token, "plan_id": plan_id, "before": prev})))
         c.execute("INSERT INTO pantry_events(item_id, at, action, detail) VALUES (NULL,?,?,?)",
                   (now, "cooked-recipe", json.dumps({"token": token, "recipe_id": rec["id"]})))
+        did = c.execute("INSERT INTO diary(recipe_id, plan_entry_id, kind, cooked_at, servings, undo_token, created_at) "
+                        "VALUES (?,?,?,?,?,?,?)", (rec["id"], plan_id, "cooked", now, servings or (base * factor if base else None),
+                                                   token, now)).lastrowid
         if NATIVE:
             sync_plan_list(c)   # the meal's allocations are spent; the rest of the plan re-claims what's left
     return {"ok": True, "deducted": deducted, "unknown": sorted(set(unknown), key=str.lower),
-            "finished": sorted(set(finished), key=str.lower), "undo_token": token, "plan_id": plan_id}
+            "finished": sorted(set(finished), key=str.lower), "undo_token": token, "plan_id": plan_id, "diary_id": did}
+
+
+# ============================================================ cooking diary (cooked meals, ratings, notes, photos)
+
+def _diary_photo_remove(name):
+    if name and re.fullmatch(r"\d{1,12}\.(jpg|png|webp|gif)", name):
+        try:
+            os.remove(os.path.join(IMG_DIR, "diary", name))
+        except OSError:
+            pass
+
+
+def diary_json(r):
+    return {"id": r["id"], "recipe_id": r["recipe_id"], "plan_entry_id": r["plan_entry_id"], "kind": r["kind"],
+            "cooked_at": r["cooked_at"], "date": r["cooked_at"][:10], "rating": r["rating"], "note": r["note"] or "",
+            "servings": r["servings"], "photo": f"/img/diary/{r['id']}?v={urllib.parse.quote(r['photo'])}" if r["photo"] else None,
+            "recipe_name": r["name"] if "name" in r.keys() else None, "slug": r["slug"] if "slug" in r.keys() else None}
+
+
+def diary_list(flt="all", limit=60, recipe_id=None):
+    where, args = ["1=1"], []
+    if flt == "top":
+        where.append("d.rating >= 4")
+    elif flt == "notes":
+        where.append("d.note <> ''")
+    if recipe_id:
+        where.append("d.recipe_id = ?"); args.append(recipe_id)
+    with db() as c:
+        rows = c.execute(f"SELECT d.*, r.name, r.slug, r.data AS rdata FROM diary d LEFT JOIN recipes r ON r.id=d.recipe_id "
+                         f"WHERE {' AND '.join(where)} ORDER BY d.cooked_at DESC, d.id DESC LIMIT ?", (*args, int(limit))).fetchall()
+    out = []
+    for r in rows:
+        j = diary_json(r)
+        try:
+            img = (json.loads(r["rdata"] or "{}") or {}).get("image")
+        except ValueError:
+            img = None
+        j["recipe_image"] = f"/img/{r['recipe_id']}?size=min&v={urllib.parse.quote(str(img))}" if img and UUID_RE.fullmatch(r["recipe_id"] or "") else None
+        out.append(j)
+    return out
+
+
+def diary_ratings():
+    """{recipe_id: (average rating, count)} from the diary."""
+    with db() as c:
+        return {r[0]: (round(r[1], 1), r[2]) for r in c.execute(
+            "SELECT recipe_id, AVG(rating), COUNT(rating) FROM diary WHERE rating IS NOT NULL GROUP BY recipe_id")}
+
+
+def diary_add(b):
+    """A note at any time, without cooking: POST /api/diary {slug, note, rating?}."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, _s(b.get("slug"), 200))
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        note = _s(b.get("note"), 2000).strip()
+        rating = _rating_arg(b.get("rating"))
+        if not note and rating is None:
+            raise ApiError(400, "Write a note or pick a rating.")
+        now = datetime.now().isoformat(timespec="seconds")
+        did = c.execute("INSERT INTO diary(recipe_id, kind, cooked_at, rating, note, created_at) VALUES (?,?,?,?,?,?)",
+                        (rec["id"], _s(b.get("kind"), 20) if b.get("kind") in ("note", "adjusted") else "note", now, rating, note, now)).lastrowid
+    _recipe_cache["at"] = 0
+    return next(x for x in diary_list(recipe_id=rec["id"]) if x["id"] == did)
+
+
+def _rating_arg(v):
+    if v in (None, "", 0):
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 1 <= v <= 5:
+        raise ApiError(400, "Ratings are 1 to 5 stars.")
+    return int(round(v))
+
+
+def diary_update(did, b):
+    require_native()
+    with db() as c:
+        r = c.execute("SELECT * FROM diary WHERE id=?", (did,)).fetchone()
+        if not r:
+            raise ApiError(404, "Diary entry not found")
+        rating = _rating_arg(b["rating"]) if "rating" in b else r["rating"]
+        note = _s(b.get("note"), 2000).strip() if "note" in b else r["note"]
+        c.execute("UPDATE diary SET rating=?, note=? WHERE id=?", (rating, note, did))
+    _recipe_cache["at"] = 0
+    return next((x for x in diary_list(limit=500) if x["id"] == did), {"id": did})
+
+
+def diary_photo(did, b):
+    blob, ctype = decode_upload(b.get("data"))
+    with db() as c:
+        r = c.execute("SELECT * FROM diary WHERE id=?", (did,)).fetchone()
+        if not r:
+            raise ApiError(404, "Diary entry not found")
+    d = os.path.join(IMG_DIR, "diary")
+    os.makedirs(d, exist_ok=True)
+    name = f"{int(did)}.{_ext(ctype)}"
+    _diary_photo_remove(r["photo"])
+    with open(os.path.join(d, name), "wb") as f:
+        f.write(blob)
+    with db() as c:
+        c.execute("UPDATE diary SET photo=? WHERE id=?", (name, did))
+    return next((x for x in diary_list(limit=500) if x["id"] == did), {"id": did})
+
+
+def diary_delete(did):
+    with db() as c:
+        r = c.execute("SELECT photo FROM diary WHERE id=?", (did,)).fetchone()
+        if not r:
+            raise ApiError(404, "Diary entry not found")
+        c.execute("DELETE FROM diary WHERE id=?", (did,))
+    _diary_photo_remove(r["photo"])
+    _recipe_cache["at"] = 0
+    return {"ok": True}
+
+
+# ============================================================ "Make it my way": AI adjustments with a diff, and versions
+
+ADJUST_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["summary", "ingredients", "steps"],
+    "properties": {
+        "summary": {"type": "string"},
+        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                                   "required": ["status", "was", "line", "reason"],
+                                                   "properties": {"status": {"type": "string", "enum": ["same", "changed", "added", "removed"]},
+                                                                  "was": {"type": "string"}, "line": {"type": "string"},
+                                                                  "reason": {"type": "string"}}}},
+        "steps": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                             "required": ["status", "was", "text", "reason"],
+                                             "properties": {"status": {"type": "string", "enum": ["same", "changed", "added", "removed"]},
+                                                            "was": {"type": "string"}, "text": {"type": "string"},
+                                                            "reason": {"type": "string"}}}},
+    },
+}
+
+
+def recipe_adjust(slug, b):
+    """POST /api/recipe/{slug}/adjust {request}: propose a version of the recipe changed only as the cook asked."""
+    require_native()
+    if not cfg("openai_key"):
+        raise ApiError(400, "Adjusting a recipe needs AI. Add your OpenAI key in Settings → AI recipe import, or edit the recipe yourself.")
+    req = " ".join(_s(b.get("request"), 300).split())
+    if not req:
+        raise ApiError(400, "Say how you'd like it changed.")
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    if not rec:
+        raise ApiError(404, "Recipe not found")
+    lines = [_ing_line(g) for g in rec.get("recipeIngredient") or [] if _ing_line(g)]
+    steps = [(st.get("text") or "").strip() for st in rec.get("recipeInstructions") or [] if (st.get("text") or "").strip()]
+    out = openai_chat([{"role": "user", "content": (
+        "Adjust this recipe the way the cook asks. Make only the changes needed for the request, with sensible real-world "
+        "amounts; adding, removing or changing ingredients and steps is allowed here because the cook asked for it. Never "
+        "change anything unrelated to the request. Return EVERY original ingredient and step in order: status 'same' (copy "
+        "it exactly), 'changed' (new text in line/text, the original in 'was'), or 'removed' (original in 'was'); insert "
+        "'added' items where they belong (empty 'was'). Give each change a one-line reason; 'same' items get an empty reason. "
+        "summary: one short phrase naming the main changes (e.g. 'spicier: +1 tsp chili flakes').\n\n"
+        + json.dumps({"request": req, "name": rec.get("name"), "servings": rec.get("recipeServings"), "ingredients": lines,
+                      "steps": steps}, ensure_ascii=False))}], "recipe_adjust", ADJUST_SCHEMA, "adjust", req[:60])
+    ings = [x for x in out.get("ingredients") or [] if isinstance(x, dict)]
+    sts = [x for x in out.get("steps") or [] if isinstance(x, dict)]
+    if not ings or not sts:
+        raise ApiError(502, "The adjustment came back empty. Try again.")
+    return {"request": req, "summary": (out.get("summary") or req)[:120], "ingredients": ings, "steps": sts}
+
+
+def _version_of(rec):
+    return {"at": datetime.now().isoformat(timespec="seconds"), "name": rec.get("name"),
+            "description": rec.get("description") or "",
+            "ingredients": [{"title": g.get("title"), "line": _ing_line(g)} for g in rec.get("recipeIngredient") or [] if _ing_line(g)],
+            "steps": [(st.get("text") or "").strip() for st in rec.get("recipeInstructions") or [] if (st.get("text") or "").strip()]}
+
+
+def _apply_version(rec, ingredients, steps):
+    ings = []
+    for x in ingredients:
+        line = " ".join(str(x.get("line") if isinstance(x, dict) else x).split())[:300]
+        if line:
+            ings.append({"referenceId": str(uuid.uuid4()), "title": (x.get("title") if isinstance(x, dict) else None) or None,
+                         "note": line, "display": line, "originalText": line, "quantity": 0, "unit": None, "food": None})
+    return dict(rec, recipeIngredient=ings, recipeInstructions=[
+        {"id": str(uuid.uuid4()), "title": "", "text": " ".join(str(t).split())[:3000], "ingredientReferences": []}
+        for t in steps if str(t).strip()])
+
+
+def recipe_adjust_save(slug, b):
+    """Save an adjustment as the main recipe; the text before it goes to extras.versions and a diary note is added."""
+    require_native()
+    ings = [x for x in (b.get("ingredients") or []) if isinstance(x, dict) and x.get("status") != "removed"]
+    steps = [x.get("text") for x in (b.get("steps") or []) if isinstance(x, dict) and x.get("status") != "removed"]
+    if not ings or not steps or len(ings) > 200 or len(steps) > 100:
+        raise ApiError(400, "Nothing to save.")
+    summary = " ".join(_s(b.get("summary"), 160).split()) or " ".join(_s(b.get("request"), 160).split())
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        extras = dict(rec.get("extras") or {})
+        versions = list(extras.get("versions") or [])
+        v = _version_of(rec)
+        v["label"] = "Before: " + (summary or "adjustment")
+        versions.append(v)
+        extras["versions"] = versions[-20:]
+        new = _apply_version(rec, [{"line": x.get("line")} for x in ings], steps)
+        new["extras"] = extras
+        slug = n_recipes.update(c, rec["id"], _annotate_foods(c, new))
+        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+        now = datetime.now().isoformat(timespec="seconds")
+        changes = [x.get("line") or x.get("text") for x in (b.get("ingredients") or []) + (b.get("steps") or [])
+                   if isinstance(x, dict) and x.get("status") in ("changed", "added")]
+        note = f"Adjusted: {summary}" + (f" ({'; '.join(str(x) for x in changes[:2])}…)" if changes else "")
+        c.execute("INSERT INTO diary(recipe_id, kind, cooked_at, note, created_at) VALUES (?,?,?,?,?)",
+                  (rec["id"], "adjusted", now, note[:500], now))
+    _recipe_cache["at"] = 0
+    return recipe_detail(slug)
+
+
+def recipe_versions(slug):
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    if not rec:
+        raise ApiError(404, "Recipe not found")
+    vs = (rec.get("extras") or {}).get("versions") or []
+    return {"versions": [{"n": i, "at": v.get("at"), "label": v.get("label") or "Earlier version",
+                          "ingredients": len(v.get("ingredients") or []), "steps": len(v.get("steps") or [])}
+                         for i, v in enumerate(vs)][::-1]}
+
+
+def recipe_version_restore(slug, n):
+    """Go back to an earlier version; the current text is kept as a version too, so this can be undone the same way."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        extras = dict(rec.get("extras") or {})
+        vs = list(extras.get("versions") or [])
+        if not 0 <= n < len(vs):
+            raise ApiError(404, "Version not found")
+        v = vs.pop(n)
+        cur = _version_of(rec)
+        cur["label"] = "Before going back to: " + (v.get("label") or "an earlier version")
+        vs.append(cur)
+        extras["versions"] = vs[-20:]
+        new = _apply_version(rec, v.get("ingredients") or [], v.get("steps") or [])
+        new["description"] = v.get("description") or rec.get("description") or ""
+        new["extras"] = extras
+        slug = n_recipes.update(c, rec["id"], _annotate_foods(c, new))
+        c.execute("DELETE FROM guided_cache WHERE recipe_id=?", (rec["id"],))
+    _recipe_cache["at"] = 0
+    return recipe_detail(slug)
 
 
 def cooked_undo(b):
@@ -6194,6 +6462,9 @@ def cooked_undo(b):
                 except KeyError:
                     pass
             c.execute("UPDATE pantry_events SET action=action || ' (undone)' WHERE id=?", (r["id"],))
+        for d in c.execute("SELECT id, photo FROM diary WHERE undo_token=?", (token,)).fetchall():
+            _diary_photo_remove(d["photo"])
+            c.execute("DELETE FROM diary WHERE id=?", (d["id"],))
         sync_plan_list(c)
     return {"ok": True, "restored": restored}
 
@@ -7067,7 +7338,7 @@ def scheduler():
 # Request body limits: screenshots/PDFs and photo uploads are big, everything else is small JSON.
 BODY_LIMITS = [
     (re.compile(r"/api/import/images|/api/receipt|/api/trip/apply"), 36_000_000),   # ~25 MB of files once base64-encoded
-    (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload|/api/scan/photo"), 12_000_000),   # 8 MB image
+    (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload|/api/scan/photo|/api/diary/\d+/photo"), 12_000_000),   # 8 MB image
 ]
 BODY_LIMIT_DEFAULT = 1_000_000
 
@@ -7075,7 +7346,7 @@ BODY_LIMIT_DEFAULT = 1_000_000
 EXPENSIVE = [
     (re.compile(r"/api/import/(url|text|images)"), "import"),
     (re.compile(r"/api/setup/import-mealie"), "import"),
-    (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish)"), "ai"),
+    (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish|adjust)"), "ai"),
     (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
     (re.compile(r"/api/scan/photo|/api/receipt"), "ai"),
@@ -7521,9 +7792,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, recipe_update(urllib.parse.unquote(mm.group(1)), self.body()))
         if m == "DELETE" and mm:
             return self.send(200, recipe_delete(urllib.parse.unquote(mm.group(1))))
-        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all|cooked|polish|restore-original)", path)
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all|cooked|polish|restore-original|adjust|adjust/save|versions|versions/\d{1,3}/restore)", path)
         if mm:
             slug, act = urllib.parse.unquote(mm.group(1)), mm.group(2)
+            if act == "adjust" and m == "POST":
+                return self.send(200, recipe_adjust(slug, self.body()))
+            if act == "adjust/save" and m == "POST":
+                return self.send(200, recipe_adjust_save(slug, self.body()))
+            if act == "versions" and m == "GET":
+                return self.send(200, recipe_versions(slug))
+            if act.startswith("versions/") and m == "POST":
+                return self.send(200, recipe_version_restore(slug, int(act.split("/")[1])))
             if act == "polish" and m == "POST":
                 return self.send(200, recipe_polish(slug))
             if act == "restore-original" and m == "POST":
@@ -7607,6 +7886,32 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, foods_merge(self.body()))
         if m == "POST" and path == "/api/foods/unmerge":
             return self.send(200, foods_unmerge(self.body()))
+        if path == "/api/diary":
+            require_native()
+            if m == "GET":
+                f = q.get("filter", "all")
+                return self.send(200, {"entries": diary_list(f if f in ("all", "top", "notes") else "all", min(500, int(q.get("limit") or 60) if str(q.get("limit") or "60").isdigit() else 60))})
+            if m == "POST":
+                return self.send(200, diary_add(self.body()))
+        mm = re.fullmatch(r"/api/diary/(\d{1,12})(/photo)?", path)
+        if mm:
+            require_native()
+            did = int(mm.group(1))
+            if mm.group(2) and m == "POST":
+                return self.send(200, diary_photo(did, self.body()))
+            if m == "PATCH" and not mm.group(2):
+                return self.send(200, diary_update(did, self.body()))
+            if m == "DELETE" and not mm.group(2):
+                return self.send(200, diary_delete(did))
+        mm = re.fullmatch(r"/img/diary/(\d{1,12})", path)
+        if m == "GET" and mm:
+            with db() as c:
+                r = c.execute("SELECT photo FROM diary WHERE id=?", (int(mm.group(1)),)).fetchone()
+            fn = r["photo"] if r else None
+            if not fn or not re.fullmatch(r"\d{1,12}\.(jpg|png|webp|gif)", fn):
+                return self.send(404, b"", "image/jpeg", {"Cache-Control": "no-cache"})
+            with open(os.path.join(IMG_DIR, "diary", fn), "rb") as f:
+                return self.send(200, f.read(), mimetypes.guess_type(fn)[0] or "image/jpeg", {"Cache-Control": "private, max-age=86400"})
         if m == "POST" and path == "/api/staples/add":
             return self.send(200, staples_add(self.body()))
         if m == "POST" and path == "/api/staples/remove":
@@ -7987,7 +8292,7 @@ class Handler(BaseHTTPRequestHandler):
 # Changes to inventory or recipes that can change what the planned meals still need from the store.
 SYNC_PATHS = re.compile(r"/api/pantry(/\d+)?|/api/list/items/[A-Za-z0-9-]{1,64}(/have)?|/api/lists/[^/]+/items/[^/]+/(bought|undo)"
                         r"|/api/scan(/.*)?|/api/trip/.*|/api/recipe/[^/]+(/have-all|/polish|/restore-original)?|/api/plan/(save|generate)"
-                        r"|/api/recipes/bulk|/api/staples/.*")
+                        r"|/api/recipes/bulk|/api/staples/.*|/api/recipe/[^/]+/(adjust/save|versions/\d+/restore)")
 VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js")
 
 

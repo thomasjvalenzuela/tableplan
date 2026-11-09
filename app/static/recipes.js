@@ -39,13 +39,16 @@ const recipeImg = (r, size = "min") => (r && r.has_image ? `/img/${enc(r.id)}?si
 const rstate = { q: "", filter: "all", list: null, tags: [], sel: null, last: -1, shown: [] };
 async function renderRecipes() {
   rstate.sel = null;
-  app.innerHTML = topbar(`<button class="text-btn" id="btn-select">Select</button><button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
+  app.innerHTML = topbar(`<button class="text-btn" id="btn-select">Select</button><button class="round-btn" id="btn-rmore" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
     `<h1 class="title">All recipes</h1>
     <div class="search">${ic("search")}<input id="rq" placeholder="Search recipes" value="${esc(rstate.q)}" autocomplete="off"></div>
     <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div><div class="sel-bar" id="sel-bar" hidden></div>`;
   bindTopbar();
   $("#btn-add").onclick = openAddRecipe;
   $("#btn-select").onclick = () => setSelect(!rstate.sel);
+  $("#btn-rmore").onclick = () => popover($("#btn-rmore"), `<button data-a="diary">${ic("book")} Cooking diary</button>`, (el) => {
+    $("[data-a=diary]", el).onclick = () => { closePop(); location.hash = "diary"; };
+  });
   try { const d = await api("GET", "/api/recipes"); rstate.list = d.recipes; rstate.tags = d.tags; }
   catch (e) { $("#rlist").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
   drawRecipeChips();
@@ -162,6 +165,135 @@ function drawSelBar() {
   };
 }
 
+// ------------------------------------------------------------------ cooking diary
+const stars = (n) => (n ? "★".repeat(n) + "☆".repeat(5 - n) : "");
+const dayHead = (iso) => { const d = Math.round((today() - parseISO(iso)) / 864e5); return d === 0 ? "Today" : d === 1 ? "Yesterday" : d < 7 ? fmt(parseISO(iso), { weekday: "long" }) : fmt(parseISO(iso), { month: "short", day: "numeric", year: parseISO(iso).getFullYear() === today().getFullYear() ? undefined : "numeric" }); };
+function diaryTimeline(entries, { showRecipe = true } = {}) {
+  let html = "", last = "";
+  for (const e of entries) {
+    const h = dayHead(e.date);
+    if (h !== last) { html += `<div class="dy-h">${esc(h)}</div>`; last = h; }
+    const img = e.photo || (showRecipe ? e.recipe_image : null);
+    const time = (e.cooked_at || "").slice(11, 16);
+    html += `<button class="dy-row" data-dslug="${esc(e.slug || "")}" data-did="${esc(e.id)}">${img ? `<img class="dy-img" src="${esc(img)}" alt="">` : `<span class="dy-img emo">${e.kind === "adjusted" ? "✏️" : e.kind === "note" ? "📝" : "🍽️"}</span>`}
+      <span class="main">${showRecipe ? `<span class="a">${esc(e.recipe_name || "Recipe")}</span>` : ""}<span class="b">${esc(e.kind === "cooked" ? `Cooked${time ? ` at ${time}` : ""}` : e.kind === "adjusted" ? "Adjusted" : "Note")}${e.rating ? ` · <span class="stars" aria-label="${esc(e.rating)} stars">${stars(e.rating)}</span>` : ""}</span>
+      ${e.note ? `<span class="dy-note">${esc(e.note.split("\n")[0])}</span>` : ""}</span></button>`;
+  }
+  return `<div class="dy">${html}</div>`;
+}
+function bindDiaryTimeline(box) {
+  $$(".dy-row[data-dslug]", box).forEach((b) => (b.onclick = () => { if (b.dataset.dslug) { state.diaryFocus = true; openRecipe(b.dataset.dslug); } }));
+}
+async function renderDiary() {
+  state.tab = "recipes"; renderTabs();
+  const f = state.diaryFilter || "all";
+  app.innerHTML = `${topbar(`<button class="round-btn left" id="dy-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span>`)}
+    <h1 class="title">Cooking diary</h1>
+    <div class="chips" id="dy-f">${[["all", "All"], ["top", "★ 4+"], ["notes", "Has notes"]].map(([k, l]) => `<button class="filter ${f === k ? "on" : ""}" data-f="${k}">${esc(l)}</button>`).join("")}</div>
+    <div id="dy-list">${loading()}</div>`;
+  bindTopbar();
+  $("#dy-back").onclick = () => (history.length > 1 ? history.back() : go("home"));
+  $$("#dy-f [data-f]").forEach((b) => (b.onclick = () => { state.diaryFilter = b.dataset.f; renderDiary(); }));
+  try {
+    const d = await api("GET", `/api/diary?filter=${enc(f)}&limit=200`);
+    const box = $("#dy-list"); if (!box) return;
+    box.innerHTML = (d.entries || []).length ? `<div class="home-card">${diaryTimeline(d.entries)}</div>` : `<div class="empty"><div class="em">📔</div>Nothing here yet. Mark a meal as cooked and it shows up here.</div>`;
+    bindDiaryTimeline(box);
+  } catch (e) { fail(e); }
+}
+// "How was it?": stars, a note and a photo, right after cooking (inline, never a modal)
+function howWasItHtml() {
+  return `<div class="how" id="how"><div class="how-h"><b>How was it?</b><button class="link-btn" id="how-skip">Skip</button></div>
+    <div class="how-stars" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map((n) => `<button data-star="${n}" role="radio" aria-checked="false" aria-label="${n} star${n > 1 ? "s" : ""}">☆</button>`).join("")}</div>
+    <textarea id="how-note" rows="2" maxlength="2000" placeholder="What would you change next time?"></textarea>
+    <div class="how-acts"><label class="pill-btn how-photo" id="how-drop">${ic("camera")} <span>Add photo</span><input type="file" accept="image/*" id="how-file" hidden></label><span class="grow"></span><button class="btn small" id="how-save">Save</button></div></div>`;
+}
+function bindHowWasIt(diaryId, done) {
+  let rating = 0, photo = null;
+  $$("#how [data-star]").forEach((b) => (b.onclick = () => {
+    rating = +b.dataset.star;
+    $$("#how [data-star]").forEach((x) => { const on = +x.dataset.star <= rating; x.textContent = on ? "★" : "☆"; x.classList.toggle("on", on); x.setAttribute("aria-checked", String(+x.dataset.star === rating)); });
+  }));
+  const take = async (files) => { const f = files[0]; if (!f) return; photo = await shrink(f); $("#how-drop span").textContent = "Photo added ✓"; };
+  $("#how-file").onchange = (e) => take([...e.target.files]);
+  dropZone($("#how-drop"), take);
+  $("#how-skip").onclick = () => { state.justCooked = null; done(false); };
+  $("#how-save").onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const note = $("#how-note").value.trim();
+      if (rating || note) await api("PATCH", `/api/diary/${enc(diaryId)}`, { ...(rating ? { rating } : {}), note });
+      if (photo) await api("POST", `/api/diary/${enc(diaryId)}/photo`, { data: photo });
+      state.justCooked = null; toast("Saved to your cooking diary"); done(true);
+    } catch (x) { fail(x); e.currentTarget.disabled = false; }
+  };
+}
+function yourNotesHtml(rec) {
+  const list = rec.diary || [];
+  return `<div class="section-h" id="rd-diary"><h2>Your notes</h2><button class="link-btn" id="rd-note-add">Add a note</button></div>
+    <div id="rd-note-form"></div>
+    ${list.length ? `<div class="home-card">${diaryTimeline(list, { showRecipe: false })}</div>` : `<p class="hint">Nothing yet. Rate it after you cook, or add a note any time.</p>`}`;
+}
+function bindYourNotes(rec, slug) {
+  $("#rd-note-add").onclick = () => {
+    const box = $("#rd-note-form");
+    box.innerHTML = `<form class="how" id="note-f"><textarea id="note-t" rows="2" maxlength="2000" placeholder="A note for next time" required></textarea><div class="how-acts"><span class="grow"></span><button type="button" class="link-btn" id="note-x">Cancel</button><button class="btn small" type="submit">Save note</button></div></form>`;
+    $("#note-t").focus();
+    $("#note-x").onclick = () => { box.innerHTML = ""; };
+    $("#note-f").onsubmit = async (e) => {
+      e.preventDefault();
+      try { await api("POST", "/api/diary", { slug, note: $("#note-t").value }); toast("Note saved"); renderRecipe(slug); } catch (x) { fail(x); }
+    };
+  };
+}
+// ------------------------------------------------------------------ "Make it my way": AI adjustments shown as a diff
+const ADJ_CHIPS = ["Spicier", "Milder", "Less salt", "Healthier", "Dairy-free", "Gluten-free", "Vegetarian", "Kid-friendly", "Faster"];
+function openAdjust(rec) {
+  const box = $("#rd-adjust"); if (!box) return;
+  if (!state.cfg.ai_key) {
+    box.innerHTML = `<div class="adj"><b>Make it my way</b><p class="hint">Adjusting a recipe needs AI (Settings → AI recipe import). You can always edit it yourself.</p><button class="pill-btn" id="adj-edit">${ic("edit")} Edit recipe</button></div>`;
+    $("#adj-edit").onclick = () => { location.hash = "edit/" + encodeURIComponent(rec.slug); };
+    return;
+  }
+  const picked = new Set();
+  box.innerHTML = `<div class="adj"><div class="how-h"><b>Make it my way</b><button class="link-btn" id="adj-x">Close</button></div>
+    <div class="chips wrap" id="adj-chips">${ADJ_CHIPS.map((c) => `<button class="filter sm" data-c="${esc(c)}" aria-pressed="false">${esc(c)}</button>`).join("")}</div>
+    <input id="adj-text" maxlength="200" placeholder="e.g. spicier, and use chicken thighs">
+    <div class="how-acts"><span class="grow"></span><button class="btn small" id="adj-go">${ic("sparkle")} Adjust</button></div><div id="adj-out"></div></div>`;
+  $("#adj-x").onclick = () => { box.innerHTML = ""; };
+  $$("#adj-chips [data-c]").forEach((b) => (b.onclick = () => { picked.has(b.dataset.c) ? picked.delete(b.dataset.c) : picked.add(b.dataset.c); b.classList.toggle("on"); b.setAttribute("aria-pressed", String(picked.has(b.dataset.c))); }));
+  $("#adj-go").onclick = async (e) => {
+    const request = [...picked, $("#adj-text").value.trim()].filter(Boolean).join(", ").toLowerCase();
+    if (!request) return toast("Pick a change or type one");
+    const btn = e.currentTarget; btn.disabled = true; btn.textContent = "Adjusting…";
+    try {
+      const p = await api("POST", `/api/recipe/${encodeURIComponent(rec.slug)}/adjust`, { request });
+      const line = (x, key) => `<li class="df-${esc(x.status)}">${x.status === "added" ? "<b>+</b> " : ""}${x.status === "removed" ? `<s>${esc(x.was)}</s>` : esc(x[key])}${x.status === "changed" ? ` <span class="df-was">was: ${esc(x.was)}</span>` : ""}${x.reason ? ` <span class="df-why">${esc(x.reason)}</span>` : ""}</li>`;
+      $("#adj-out").innerHTML = `<div class="diff"><p><b>${esc(p.summary)}</b></p><div class="group-label">Ingredients</div><ul>${p.ingredients.map((x) => line(x, "line")).join("")}</ul>
+        <div class="group-label">Steps</div><ol>${p.steps.map((x) => line(x, "text")).join("")}</ol></div>
+        <div class="how-acts"><button class="link-btn" id="adj-discard">Discard</button><span class="grow"></span><button class="btn small" id="adj-save">Save as my version</button></div>`;
+      $("#adj-discard").onclick = () => { box.innerHTML = ""; };
+      $("#adj-save").onclick = async (ev) => {
+        ev.currentTarget.disabled = true;
+        try { const d = await api("POST", `/api/recipe/${encodeURIComponent(rec.slug)}/adjust/save`, { ...p }); toast("Saved as your version · earlier text kept in Versions"); location.replace("#recipe/" + encodeURIComponent(d.slug)); renderRecipe(d.slug); }
+        catch (x) { fail(x); ev.currentTarget.disabled = false; }
+      };
+    } catch (x) { fail(x); } finally { btn.disabled = false; btn.innerHTML = `${ic("sparkle")} Adjust`; }
+  };
+}
+async function openVersions(rec) {
+  let v;
+  try { v = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/versions`); } catch (e) { return fail(e); }
+  openSheet("Versions", `${(v.versions || []).length ? `<div class="group">${v.versions.map((x) => `<div class="row flush"><div class="main"><div class="a">${esc(x.label)}</div><div class="b">${esc(fmt(new Date(x.at), { month: "short", day: "numeric" }))} · ${esc(plural(x.ingredients, "ingredient"))} · ${esc(plural(x.steps, "step"))}</div></div><button class="pill-btn" data-n="${esc(x.n)}">Go back</button></div>`).join("")}</div>
+    <p class="hint">Going back keeps the current text as a version too, so nothing is lost.</p>` : `<p class="hint">No earlier versions yet. They're kept when you use “Make it my way”.</p>`}`, {
+    onMount() {
+      $$("[data-n]").forEach((b) => (b.onclick = async () => {
+        try { const d = await api("POST", `/api/recipe/${encodeURIComponent(rec.slug)}/versions/${enc(b.dataset.n)}/restore`); closeSheet(); toast("Restored"); renderRecipe(d.slug); } catch (e) { fail(e); }
+      }));
+    },
+  });
+}
+
 // ------------------------------------------------------------------ RECIPE page
 const R = { rec: null, servings: 0, style: "classic", guide: null };
 function openRecipe(slug) { location.hash = "recipe/" + encodeURIComponent(slug); }
@@ -204,20 +336,28 @@ async function renderRecipe(slug) {
       ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>` : ""}
     </div>
     <div class="rd-sheet"><div class="grabber" aria-hidden="true"></div>
+      ${state.justCooked && state.justCooked.slug === rec.slug ? howWasItHtml() : ""}
       ${rec.description ? `<p class="desc">${esc(rec.description)}</p>` : ""}
       <div class="seg" id="rd-style"><button data-v="classic">Classic</button><button data-v="steps">Step-by-step</button></div>
       <div id="rd-content"></div>
       <div class="toolbar" style="margin-top:18px">
         <button class="pill-btn" id="rd-plan">${ic("cal")} Plan it</button>
         ${rec.cook_entry ? "" : `<button class="pill-btn" id="rd-cooked">${ic("check")} Mark as cooked</button>`}
+        <button class="pill-btn" id="rd-adj">${ic("sparkle")} Make it my way</button>
       </div>
+      <div id="rd-adjust"></div>
+      ${yourNotesHtml(rec)}
       <div id="rd-miss"></div>
       <div class="cta-bar"><button class="btn" id="rd-cook">${ic("play")} Start cooking</button></div>
     </div></div>`;
   $("#rd-share2").onclick = () => openRecipeExport();
-  $("#rd-menu").onclick = () => popover($("#rd-menu"), `<button data-a="edit">${ic("edit")} Edit</button><button data-a="missing">${ic("cart")} Add missing to list</button><button data-a="share">${ic("share")} Share & export</button>`, (el) => {
-    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ edit: () => { location.hash = "edit/" + encodeURIComponent(slug); }, missing: addMissing, share: openRecipeExport })[b.dataset.a](); }));
+  $("#rd-menu").onclick = () => popover($("#rd-menu"), `<button data-a="edit">${ic("edit")} Edit</button><button data-a="missing">${ic("cart")} Add missing to list</button><button data-a="share">${ic("share")} Share & export</button>${rec.versions ? `<button data-a="versions">${ic("refresh")} Versions</button>` : ""}`, (el) => {
+    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ edit: () => { location.hash = "edit/" + encodeURIComponent(slug); }, missing: addMissing, share: openRecipeExport, versions: () => openVersions(rec) })[b.dataset.a](); }));
   });
+  $("#rd-adj").onclick = () => openAdjust(rec);
+  bindYourNotes(rec, slug);
+  if ($("#how")) bindHowWasIt(state.justCooked.diary_id, () => renderRecipe(slug));
+  if (state.diaryFocus) { state.diaryFocus = false; setTimeout(() => $("#rd-diary")?.scrollIntoView({ block: "start" }), 50); }
   $("#rd-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
   $("#rd-fav").onclick = async (e) => {
     const on = !R.rec.favorite, btn = e.currentTarget;
@@ -517,12 +657,16 @@ function drawCook() {
   $("#ck-done") && ($("#ck-done").onclick = async (e) => {
     e.currentTarget.disabled = true;
     const rec = R.rec, ce = rec && rec.cook_entry;
-    endCook();
-    if (!rec) return toast("Enjoy your meal! 🍽️");
+    if (!rec) { endCook(); return toast("Enjoy your meal! 🍽️"); }
     const body = { servings: R.servings };
     if (ce && ce.today) body.plan_id = ce.id;
-    try { await markCooked(rec.slug, body, () => { if (location.hash === "#recipe/" + encodeURIComponent(rec.slug)) renderRecipe(rec.slug); }); }
-    catch (x) { fail(x); }
+    let r;
+    try { r = await markCooked(rec.slug, body); } catch (x) { endCook(); return fail(x); }
+    const back = () => { endCook(); if (location.hash === "#recipe/" + encodeURIComponent(rec.slug)) renderRecipe(rec.slug); };
+    if (!r.diary_id || !$("#cook")) return back();
+    $("#cook").innerHTML = `<div class="ck-finish"><div class="ck-cheers">🎉</div><h2>${esc(rec.name)}</h2><p class="muted">${esc(cookedMessage(r))}</p>${howWasItHtml()}<button class="btn sec" id="ck-close">Close</button></div>`;
+    bindHowWasIt(r.diary_id, back);
+    $("#ck-close").onclick = () => { state.justCooked = null; back(); };
   });
   $("#ck-start") && ($("#ck-start").onclick = () => { unlockAudio(); C.timers.push({ step: C.i, label: s.timer_label || `Step ${C.i + 1}`, left: s.timer_sec, done: false }); drawCook(); });
   $("#ck-stop") && ($("#ck-stop").onclick = () => { C.timers = C.timers.filter((t) => t.step !== C.i); drawCook(); });
