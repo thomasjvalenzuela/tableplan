@@ -514,6 +514,17 @@ class HttpRoutes(Base):
         c.close()
         return out
 
+    def test_versioned_assets_and_no_store_index(self):
+        st, h, body = self.req("GET", "/")
+        v = S.urllib.parse.quote(S.APP_VERSION, safe="")
+        self.assertEqual((st, h.get("Cache-Control")), (200, "no-store"))
+        for a in S.VERSIONED_ASSETS:
+            self.assertIn(f'"/static/{a}?v={v}"'.encode(), body)
+        st, h, _ = self.req("GET", f"/static/app.js?v={v}")
+        self.assertEqual((st, h.get("Cache-Control")), (200, "public, max-age=31536000, immutable"))
+        self.assertEqual(self.req("GET", "/static/app.js?v=0.0.1")[1].get("Cache-Control"), "no-cache")
+        self.assertEqual(self.req("GET", "/static/app.js")[1].get("Cache-Control"), "no-cache")
+
     def test_contract_over_http(self):
         (tslug, tid), _ = Fixtures.recipes()
         st, _, body = self.req("POST", "/api/plan/assign", {"date": day(1), "recipe_id": tid})

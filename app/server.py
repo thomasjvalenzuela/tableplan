@@ -4507,6 +4507,89 @@ def plan_delete(eid):
     return {"ok": True, "removed": removed, "undo": undo}
 
 
+ARRANGE_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["assignments"],
+    "properties": {"assignments": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["date", "recipe_id"],
+        "properties": {"date": {"type": "string"}, "recipe_id": {"type": "string"}}}}},
+}
+
+
+def _arrange_fallback(recs, dates):
+    """Deterministic spread: the longest recipes go to weekends, the quickest to weekdays, in the given order."""
+    weekend = [d for d in dates if d.weekday() >= 5]
+    by_len = sorted(range(len(recs)), key=lambda i: (-(recs[i].get("minutes") or 0), i))
+    pick_weekend = set(by_len[:len(weekend)]) if any(r.get("minutes") for r in recs) else set()
+    long_q = [recs[i] for i in range(len(recs)) if i in pick_weekend]
+    rest = [recs[i] for i in range(len(recs)) if i not in pick_weekend]
+    out = []
+    for d in dates:
+        src = long_q if (d.weekday() >= 5 and long_q) else rest if rest else long_q
+        out.append({"date": iso(d), "recipe_id": src.pop(0)["id"]})
+    return out
+
+
+def plan_arrange(b):
+    """POST /api/plan/arrange {recipe_ids, start, end, entry_type?}: spread chosen recipes over the empty days.
+    Uses AI for variety (falls back to a deterministic spread). Only proposes; the client applies with /plan/assign."""
+    require_native()
+    ids = b.get("recipe_ids")
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 60 or not all(isinstance(x, str) and 0 < len(x) <= 200 for x in ids):
+        raise ApiError(400, "Pick between 1 and 60 recipes.")
+    start, end = _strict_date(b.get("start"), "start"), _strict_date(b.get("end"), "end")
+    if end < start or (end - start).days > 60:
+        raise ApiError(400, "Pick a range of at most 60 days.")
+    et = _entry_type_arg(b.get("entry_type"))
+    with db() as c:
+        taken = {e["date"] for e in n_plans.get_plans(c, iso(start), iso(end), lambda rid: None) if e["entry_type"] == et}
+        recs = []
+        for x in dict.fromkeys(ids):
+            r = n_recipes.get(c, x)
+            if not r:
+                raise ApiError(404, "Recipe not found")
+            if r["id"] not in (y["id"] for y in recs):
+                recs.append(r)
+        expiring = sorted({clean_food(i["name"]) for i in expiring_items(c, 4)})
+    dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    dates = [d for d in dates if iso(d) not in taken]
+    if not dates:
+        return {"assignments": [], "ai": False, "dropped": len(recs), "empty_days": 0}
+    pool = {r["id"]: r for r in recipe_pool()}
+    info = [{"id": r["id"], "name": r.get("name") or "", "minutes": (pool.get(r["id"]) or {}).get("minutes") or 0,
+             "ingredients": [_ing_line(g) for g in r.get("recipeIngredient") or []][:25]} for r in recs]
+    n_empty = len(dates)
+    dropped = max(0, len(info) - len(dates))
+    info = info[:len(dates)]
+    dates = dates[:len(info)]
+    out, used_ai = None, False
+    if cfg("openai_key"):
+        try:
+            res = openai_chat([{"role": "user", "content": (
+                "Assign each recipe to exactly one of the dates (one recipe per date, use every recipe once). Aim for "
+                "variety: don't put similar proteins or cuisines on back-to-back days. Put quicker recipes on weekdays "
+                "and longer ones on weekends. Recipes that use these soon-to-expire pantry foods should come first: "
+                + (", ".join(expiring) or "none") + ".\n\n" + json.dumps({
+                    "dates": [{"date": iso(d), "weekday": d.strftime("%A")} for d in dates], "recipes": info},
+                    ensure_ascii=False))}], "plan_arrange", ARRANGE_SCHEMA, "arrange", f"{len(info)} recipes")
+            seen_d, seen_r, cand = set(), set(), []
+            ok_dates, ok_ids = {iso(d) for d in dates}, {r["id"] for r in info}
+            for a in res.get("assignments") or []:
+                d, rid = a.get("date"), a.get("recipe_id")
+                if d in ok_dates and rid in ok_ids and d not in seen_d and rid not in seen_r:
+                    seen_d.add(d); seen_r.add(rid); cand.append({"date": d, "recipe_id": rid})
+            if cand:   # anything the AI left out goes to the remaining days, in order
+                left_r = [r for r in info if r["id"] not in seen_r]
+                for d in dates:
+                    if iso(d) not in seen_d and left_r:
+                        cand.append({"date": iso(d), "recipe_id": left_r.pop(0)["id"]})
+                out, used_ai = sorted(cand, key=lambda a: a["date"]), True
+        except Exception as e:
+            log("arrange: AI unavailable, using the simple spread:", getattr(e, "message", None) or e)
+    if out is None:
+        out = _arrange_fallback(info, dates)
+    return {"assignments": out, "ai": used_ai, "dropped": dropped, "empty_days": n_empty}
+
+
 def plan_skip(eid, skipped=True):
     """A past day that wasn't cooked: stop asking about it."""
     require_native()
@@ -5470,6 +5553,7 @@ EXPENSIVE = [
     (re.compile(r"/api/import/(url|text|images)"), "import"),
     (re.compile(r"/api/setup/import-mealie"), "import"),
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish)"), "ai"),
+    (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
     (re.compile(r"/api/(upc/\d+|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
@@ -5733,7 +5817,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # static
         if m == "GET" and (path == "/" or path.startswith("/static/") or path in ("/manifest.webmanifest", "/sw.js")):
-            return self.static(path)
+            return self.static(path, q)
 
         # ---- session / auth
         if m == "GET" and path == "/api/session":
@@ -5979,6 +6063,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, plan_status())
         if m == "POST" and path == "/api/plan/assign":
             return self.send(200, plan_assign(self.body()))
+        if m == "POST" and path == "/api/plan/arrange":
+            return self.send(200, plan_arrange(self.body()))
         if m == "POST" and path == "/api/plan/move":
             return self.send(200, plan_move(self.body()))
         if m == "POST" and path == "/api/plan/generate":
@@ -6285,7 +6371,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send(404, b"", "image/webp", {"Cache-Control": "public, max-age=600"})
 
-    def static(self, path):
+    def static(self, path, q=None):
         rel = {"/": "index.html", "/manifest.webmanifest": "manifest.webmanifest", "/sw.js": "sw.js"}.get(path) \
             or path[len("/static/"):]
         full = os.path.realpath(os.path.join(STATIC_DIR, rel))
@@ -6298,7 +6384,18 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         with open(full, "rb") as f:
             data = f.read()
+        if rel == "index.html":
+            # Versioned asset URLs: a Home Screen app picks up new code as soon as the server is updated.
+            v = urllib.parse.quote(APP_VERSION, safe="")
+            for a in VERSIONED_ASSETS:
+                data = data.replace(f'"/static/{a}"'.encode(), f'"/static/{a}?v={v}"'.encode())
+            return self.send(200, data, ctype, {"Cache-Control": "no-store"})
+        if rel in VERSIONED_ASSETS and (q or {}).get("v") == APP_VERSION:
+            return self.send(200, data, ctype, {"Cache-Control": "public, max-age=31536000, immutable"})
         return self.send(200, data, ctype, {"Cache-Control": "no-cache"})
+
+
+VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js")
 
 
 def _int_or_none(v):

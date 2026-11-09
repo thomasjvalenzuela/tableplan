@@ -192,3 +192,46 @@ class Cooked(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Arrange(unittest.TestCase):
+    def setUp(self):
+        with S.db() as c:
+            c.execute("DELETE FROM meal_plans")
+        S._recipe_cache["at"] = 0
+        self.r = [new_recipe(f"Arr {i} {id(self)}", 2, ["1 cup rice"])[1] for i in range(4)]
+
+    def test_validation(self):
+        for bad in ({"recipe_ids": [], "start": day(0), "end": day(3)}, {"recipe_ids": "x", "start": day(0), "end": day(3)},
+                    {"recipe_ids": self.r, "start": day(3), "end": day(0)}, {"recipe_ids": self.r, "start": "x", "end": day(1)},
+                    {"recipe_ids": self.r, "start": day(0), "end": day(90)}):
+            with self.assertRaises(S.ApiError) as cm:
+                S.plan_arrange(bad)
+            self.assertEqual(cm.exception.status, 400, bad)
+        with self.assertRaises(S.ApiError) as cm:
+            S.plan_arrange({"recipe_ids": ["nope"], "start": day(0), "end": day(1)})
+        self.assertEqual(cm.exception.status, 404)
+
+    def test_fallback_uses_only_empty_days_and_drops_extras(self):
+        S.plan_assign({"date": day(1), "recipe_id": self.r[0]})
+        with mock.patch.object(S, "cfg", side_effect=lambda k: "" if k == "openai_key" else S._cfg.get(k)):
+            out = S.plan_arrange({"recipe_ids": self.r, "start": day(0), "end": day(3)})
+        self.assertFalse(out["ai"])
+        self.assertEqual((out["empty_days"], out["dropped"]), (3, 1))
+        self.assertEqual([a["date"] for a in out["assignments"]], [day(0), day(2), day(3)])
+        self.assertEqual(len({a["recipe_id"] for a in out["assignments"]}), 3)
+
+    def test_ai_answer_is_filtered(self):
+        reply = {"assignments": [{"date": day(1), "recipe_id": self.r[1]}, {"date": day(9), "recipe_id": self.r[0]},
+                                 {"date": day(0), "recipe_id": "evil"}, {"date": day(0), "recipe_id": self.r[1]}]}
+        with mock.patch.object(S, "cfg", side_effect=lambda k: "sk" if k == "openai_key" else S._cfg.get(k)), \
+                mock.patch.object(S, "openai_chat", return_value=reply) as oc:
+            out = S.plan_arrange({"recipe_ids": self.r[:2], "start": day(0), "end": day(1)})
+        self.assertIn("variety", oc.call_args.args[0][0]["content"])
+        self.assertTrue(out["ai"])
+        self.assertEqual(out["assignments"], [{"date": day(0), "recipe_id": self.r[0]}, {"date": day(1), "recipe_id": self.r[1]}])
+        with mock.patch.object(S, "cfg", side_effect=lambda k: "sk" if k == "openai_key" else S._cfg.get(k)), \
+                mock.patch.object(S, "openai_chat", side_effect=S.ApiError(502, "down")):
+            out = S.plan_arrange({"recipe_ids": self.r[:2], "start": day(0), "end": day(1)})
+        self.assertFalse(out["ai"])
+        self.assertEqual(len(out["assignments"]), 2)

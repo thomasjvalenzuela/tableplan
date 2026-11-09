@@ -65,6 +65,7 @@ const cssUrl = (u) => { const s = safeUrl(u, true); return s ? `url('${esc(s.rep
 const bgStyle = (u) => { const c = cssUrl(u); return c ? `style="background-image:${c}"` : ""; };
 // External link attributes (href + target + rel), or "" when the URL isn't http(s)/same-origin.
 const extLink = (u) => { const s = safeUrl(u); return s ? `href="${esc(s)}" target="_blank" rel="noopener noreferrer"` : ""; };
+const BUILD = (() => { try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch (_) { return ""; } })();
 const app = $("#app");
 const state = { tab: "home", cfg: null, summary: null, listId: localStorage.getItem("tp.list") || null, pantryFilter: "all", plan: null };
 
@@ -192,10 +193,27 @@ function bindUpdateBar() {
   $("#upd-how") && ($("#upd-how").onclick = () => openUpdateHelp());
   $("#upd-later") && ($("#upd-later").onclick = () => { try { localStorage.setItem("tp.updSnooze", JSON.stringify({ v: state.update.latest, until: Date.now() + 864e5 })); } catch (_) {} $("#upd-bar")?.remove(); });
 }
+// The build this page loaded (index.html links app.js?v=<version>); when the server moves on, reload.
+function staleBuild(server) {
+  if (!BUILD || !server || server === BUILD) return;
+  const busy = !!$("#layer")?.firstChild || !!$("#cook");
+  let tried = "";
+  try { tried = sessionStorage.getItem("tp.reloadFor") || ""; } catch (_) {}
+  if (!busy && tried !== server) {
+    try { sessionStorage.setItem("tp.reloadFor", server); } catch (_) {}
+    location.reload();
+    return;
+  }
+  if (!$("#stale-pill")) {
+    document.body.insertAdjacentHTML("beforeend", `<button class="stale-pill" id="stale-pill">TablePlan was updated · Reload</button>`);
+    $("#stale-pill").onclick = () => location.reload();
+  }
+}
 async function checkUpdate() {
   try {
     const was = upd(), u = await api("GET", "/api/version");
     state.update = u;
+    staleBuild(u.version);
     if (u.update_available && !was) {
       if (!$("#upd-bar") && $(".topbar")) { $(".topbar").insertAdjacentHTML("beforebegin", updateBar()); bindUpdateBar(); }
       $("#btn-settings")?.classList.add("dot"); renderTabs();
@@ -285,7 +303,7 @@ async function renderHome() {
   $("#hero") && ($("#hero").onclick = () => openEntry(tonight));
   $("#fix-mealie") && ($("#fix-mealie").onclick = () => openSetupSection("mealie", "Recipe library", reloadCfg));
   $("#home-up") && ($("#home-up").onclick = () => openUpdateHelp());
-  $("#plan-now") && ($("#plan-now").onclick = () => openGenerate());
+  $("#plan-now") && ($("#plan-now").onclick = () => planSequential());
   $$("[data-entry]").forEach((b) => (b.onclick = () => openEntry(s.week.find((e) => String(e.id) === b.dataset.entry))));
   $$("[data-plan-day]").forEach((b) => (b.onclick = () => openPicker(b.dataset.planDay, "dinner")));
   $$("[data-item]").forEach((b) => (b.onclick = () => openPantryItem(exp.find((i) => String(i.id) === b.dataset.item), renderHome)));
@@ -319,16 +337,19 @@ const replan = () => (state.tab === "meals" && $("#board") ? drawBoard() : refre
 
 async function renderMeals() {
   const H = horizon(), start = isoDate(today()), end = isoDate(addDays(today(), H - 1));
-  app.innerHTML = topbar(`<button class="round-btn" id="btn-share" aria-label="Share or print the plan">${ic("share")}</button>`) +
+  app.innerHTML = topbar(`<button class="round-btn" id="btn-pmore" aria-label="More planning options" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-share" aria-label="Share or print the plan">${ic("share")}</button>`) +
     `<h1 class="title">Plan</h1><div class="subtitle" id="plan-sub">&nbsp;</div>
-    <div class="toolbar"><button class="pill-btn" id="fill">${ic("sparkle")} Fill empty days</button>
+    <div class="toolbar"><button class="pill-btn ink" id="fill">${ic("plus")} Plan my ${H === 14 ? "2 weeks" : `${H} days`}</button>
       <button class="pill-btn" id="to-list">${ic("cart")} Shopping list<span id="list-n"></span></button></div>
-    <div id="past" class="past"></div>
+    <div id="plan-cta"></div><div id="past" class="past"></div>
     <div id="board" class="board">${loading()}</div>
     <p class="hint board-hint"><span class="mobile-only">Touch and hold a meal, then drag it to another day.</span><span class="desktop-only">Drag a meal onto another day to move it. Dropping on a planned day swaps the two.</span></p>`;
   bindTopbar();
   $("#btn-share").onclick = () => openShare("plan", { start, end, label: `Next ${H} days` });
-  $("#fill").onclick = () => fillEmpty(start, H);
+  $("#fill").onclick = () => planSequential();
+  $("#btn-pmore").onclick = () => popover($("#btn-pmore"), `<button data-act="auto">${ic("sparkle")} Fill empty days automatically</button>`, (el) => {
+    $("[data-act=auto]", el).onclick = () => { closePop(); fillEmpty(start, H); };
+  });
   $("#to-list").onclick = () => go("list");
   await drawBoard();
 }
@@ -359,6 +380,11 @@ async function drawBoard() {
   $("#plan-sub").innerHTML = (through ? `<span class="${low ? "warn" : ""}">Planned through ${esc(fmt(parseISO(through), { weekday: "short", month: "short", day: "numeric" }))}</span>` : "Nothing planned yet") +
     (empty ? ` · ${esc(plural(empty, "empty day"))}` : "");
   $("#fill").disabled = !empty;
+  const cta = $("#plan-cta");
+  if (cta) {
+    cta.innerHTML = (data.entries || []).length ? "" : `<div class="plan-cta"><b>Nothing planned yet</b><span>Pick a recipe for each day, one at a time.</span><button class="btn" id="plan-cta-go">Plan my ${H === 14 ? "2 weeks" : `${H} days`}</button></div>`;
+    $("#plan-cta-go") && ($("#plan-cta-go").onclick = () => planSequential());
+  }
   const n = list && Array.isArray(list.items) ? list.items.filter((x) => !x.checked).length : null;
   $("#list-n").textContent = n === null ? "" : ` (${n})`;
   drawPast(((past && past.entries) || []).filter((e) => PLAN_TYPES.includes(e.entry_type) && e.recipe?.slug && !e.cooked && !e.skipped));
@@ -619,22 +645,52 @@ function entryMenu(anchor, e) {
   });
 }
 
-// ---------- recipe picker for a day (search, favorites, least recently planned first)
-async function openPicker(date, type = "dinner", replacing = null) {
-  const pk = { q: "", f: "fresh", recipes: null, last: {}, next: {} };
-  openSheet(`${replacing ? "Swap" : cap(type)} · ${dayLong(date)}, ${shortDate(date)}`,
+// ---------- recipe picker for a day: "Not on plan" first, one-by-one sequential mode, or pick several and arrange
+const horizonDates = () => Array.from({ length: horizon() }, (_, i) => isoDate(addDays(today(), i)));
+const recipeCats = (r) => r.categories || [];
+async function planSequential(type = "dinner") {
+  let data;
+  try { data = await api("GET", `/api/plan?start=${enc(horizonDates()[0])}&end=${enc(horizonDates().slice(-1)[0])}`); } catch (e) { return fail(e); }
+  const taken = new Set((data.entries || []).filter((e) => e.entry_type === type).map((e) => e.date));
+  const empty = horizonDates().filter((d) => !taken.has(d));
+  if (!empty.length) return toast("Every day is planned");
+  openPicker(empty[0], type, null, { seq: true });
+}
+async function openPicker(date, type = "dinner", replacing = null, opts = {}) {
+  const pk = { q: "", f: "open", cat: "", recipes: null, last: {}, inPlan: {}, taken: new Set(), multi: false, sel: [], seq: !!opts.seq && !replacing,
+    date, added: 0, items: 0, msg: "", preview: null };
+  const titleFor = (d) => pk.seq
+    ? `${fmt(parseISO(d), { weekday: "short", month: "short", day: "numeric" })} · day ${Math.round((parseISO(d) - today()) / 864e5) + 1} of ${horizon()}`
+    : `${replacing ? "Swap" : cap(type)} · ${dayLong(d)}, ${shortDate(d)}`;
+  openSheet(titleFor(date),
     `<div class="search">${ic("search")}<input id="pk-q" type="search" placeholder="Search recipes" autocomplete="off" enterkeyhint="search"></div>
-    <div class="chips pk-chips" id="pk-f">${[["fresh", "Not recently"], ["fav", "♥ Favorites"], ["all", "All"]].map(([k, l]) => `<button class="filter ${k === pk.f ? "on" : ""}" data-f="${k}">${l}</button>`).join("")}</div>
-    <div id="pk-list">${loading()}</div>`, {
+    <div class="chips pk-chips" id="pk-f">${[["open", "Not on plan"], ["all", "All"], ["fav", "♥ Favorites"]].map(([k, l]) => `<button class="filter ${k === pk.f ? "on" : ""}" data-f="${k}">${l}</button>`).join("")}</div>
+    <div class="chips pk-chips" id="pk-c"></div>
+    <div class="pk-tools">${replacing ? "" : `<button class="link-btn" id="pk-multi" aria-pressed="false">Select several</button>`}
+      ${pk.seq ? `<span class="grow"></span><button class="link-btn" id="pk-skip">Skip day</button><button class="link-btn strong" id="pk-done">Done</button>` : ""}</div>
+    <div class="pk-msg" id="pk-msg" role="status" aria-live="polite"></div>
+    <div id="pk-list">${loading()}</div>
+    <div class="pk-bar" id="pk-bar" hidden><span id="pk-n">0 selected</span><span class="grow"></span>
+      <button class="pill-btn" id="pk-order">Fill in order</button><button class="pill-btn ink" id="pk-ai">${ic("sparkle")} Arrange with AI</button></div>`, {
     onMount() {
       let t;
       $("#pk-q").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { pk.q = e.target.value; draw(); }, 100); };
       $("#pk-q").onkeydown = (e) => { if (e.key === "Enter") { const first = $("#pk-list [data-rid]"); if (first) first.click(); } };
       $$("#pk-f [data-f]").forEach((b) => (b.onclick = () => { pk.f = b.dataset.f; $$("#pk-f .filter").forEach((x) => x.classList.toggle("on", x === b)); draw(); }));
+      $("#pk-multi") && ($("#pk-multi").onclick = () => {
+        pk.multi = !pk.multi; pk.sel = []; pk.preview = null;
+        $("#pk-multi").textContent = pk.multi ? "Cancel selection" : "Select several";
+        $("#pk-multi").setAttribute("aria-pressed", String(pk.multi));
+        draw();
+      });
+      $("#pk-skip") && ($("#pk-skip").onclick = () => advance(`Skipped ${wkShort(pk.date)}`));
+      $("#pk-done") && ($("#pk-done").onclick = () => finishSeq());
+      $("#pk-order").onclick = () => arrange(false);
+      $("#pk-ai").onclick = () => arrange(true);
       if (matchMedia("(pointer:fine)").matches) setTimeout(() => $("#pk-q")?.focus(), 250);
     },
   });
-  const todayISO = isoDate(today());
+  const todayISO = isoDate(today()), hz = horizonDates(), lastDay = hz[hz.length - 1];
   try {
     const [rs, hist] = await Promise.all([
       api("GET", "/api/recipes"),
@@ -642,35 +698,116 @@ async function openPicker(date, type = "dinner", replacing = null) {
     ]);
     pk.recipes = rs.recipes || [];
     (hist.entries || []).forEach((e) => {
+      if (e.entry_type === type && e.date >= todayISO && e.date <= lastDay) pk.taken.add(e.date);
       const id = e.recipe?.id; if (!id) return;
       if (e.date < todayISO) { if (!pk.last[id] || e.date > pk.last[id]) pk.last[id] = e.date; }
-      else if (!pk.next[id] || e.date < pk.next[id]) pk.next[id] = e.date;
+      else if (e.date <= lastDay && (!pk.inPlan[id] || e.date < pk.inPlan[id])) pk.inPlan[id] = e.date;
     });
   } catch (e) { const l = $("#pk-list"); if (l) l.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  // category chips: only categories some recipe uses, in settings order; "Main dish" first pick for dinner
+  const cats = (state.cfg?.settings?.categories || []).filter((c) => pk.recipes.some((r) => recipeCats(r).includes(c)));
+  if (type === "dinner" && cats.includes("Main dish")) pk.cat = "Main dish";
+  const cbox = $("#pk-c");
+  if (cbox) {
+    cbox.innerHTML = cats.length ? [["", "Any category"], ...cats.map((c) => [c, c])].map(([k, l]) => `<button class="filter sm ${k === pk.cat ? "on" : ""}" data-c="${esc(k)}">${esc(l)}</button>`).join("") : "";
+    cbox.hidden = !cats.length;
+    $$("[data-c]", cbox).forEach((b) => (b.onclick = () => { pk.cat = b.dataset.c; $$("[data-c]", cbox).forEach((x) => x.classList.toggle("on", x === b)); draw(); }));
+  }
   const ago = (d) => { const n = Math.round((today() - parseISO(d)) / 864e5); return n < 14 ? `${plural(n, "day")} ago` : n < 60 ? `${Math.round(n / 7)} weeks ago` : `${Math.round(n / 30)} months ago`; };
+  const empties = () => hz.filter((d) => !pk.taken.has(d));
+  const setMsg = (m) => { const el = $("#pk-msg"); if (el) el.textContent = m || ""; };
+  const finishSeq = () => {
+    closeSheet(); replan();
+    if (pk.added) toast(`Plan filled · ${plural(pk.items, "item")} added to your list`, pk.items ? "View list" : null, () => go("list"));
+  };
+  const advance = (msg) => {
+    const rest = empties().filter((d) => d > pk.date);
+    const next = rest[0] || empties().find((d) => d !== pk.date);
+    if (!next) return finishSeq();
+    pk.date = next;
+    const h = $("#layer .sheet-h h3"); if (h) h.textContent = titleFor(next);
+    setMsg(msg); pk.q = ""; const qi = $("#pk-q"); if (qi) qi.value = "";
+    draw(); $("#pk-list")?.scrollTo?.(0, 0);
+  };
   const draw = () => {
     const box = $("#pk-list");
     if (!box || !pk.recipes) return;
+    const bar = $("#pk-bar");
+    if (bar) { bar.hidden = !pk.multi || !!pk.preview; $("#pk-n").textContent = `${pk.sel.length} selected`; $("#pk-order").disabled = $("#pk-ai").disabled = !pk.sel.length; }
+    if (pk.preview) return drawPreview();
     const q = pk.q.trim().toLowerCase();
-    let list = pk.recipes.filter((r) => (!q || r.name.toLowerCase().includes(q) || (r.tags || []).some((x) => x.toLowerCase().includes(q))) && (pk.f !== "fav" || r.favorite));
-    const key = (r) => (pk.next[r.id] ? "2" : "1") + (pk.last[r.id] || "0000");   // never planned, then oldest; already upcoming last
+    let list = pk.recipes.filter((r) => (!q || r.name.toLowerCase().includes(q) || (r.tags || []).some((x) => x.toLowerCase().includes(q)))
+      && (pk.f !== "fav" || r.favorite) && (pk.f !== "open" || !pk.inPlan[r.id]) && (!pk.cat || recipeCats(r).includes(pk.cat)));
+    const key = (r) => (pk.inPlan[r.id] ? "2" : "1") + (pk.last[r.id] || "0000");   // never planned, then oldest; already planned last
     if (pk.f === "all") list.sort((a, b) => a.name.localeCompare(b.name));
     else list.sort((a, b) => key(a).localeCompare(key(b)) || a.name.localeCompare(b.name));
     if (!pk.recipes.length) { box.innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet. Add one from the Recipes tab.</div>`; return; }
-    if (!list.length) { box.innerHTML = `<div class="empty">${pk.f === "fav" && !q ? "No favorites yet. Tap ♡ on a recipe to add it." : "No recipes match."}</div>`; return; }
+    if (!list.length) {
+      box.innerHTML = `<div class="empty">${pk.f === "fav" && !q ? "No favorites yet. Tap ♡ on a recipe to add it." : pk.f === "open" && !q ? "Every recipe is already on the plan. Tap All to plan one again." : "No recipes match."}</div>`;
+      return;
+    }
     box.innerHTML = `<div class="group pk-group">${list.slice(0, 150).map((r) => {
       const img = imgUrl(r), cur = replacing && replacing.recipe && String(replacing.recipe.id) === String(r.id);
-      const when = pk.next[r.id] ? `On the plan ${wkShort(pk.next[r.id])}` : pk.last[r.id] ? `Last had ${ago(pk.last[r.id])}` : "Not planned lately";
-      return `<button class="row" data-rid="${esc(r.id)}" ${cur ? "disabled" : ""}><div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
+      const on = pk.sel.includes(r.id);
+      const when = pk.inPlan[r.id] ? `On ${wkShort(pk.inPlan[r.id])}` : pk.last[r.id] ? `Last had ${ago(pk.last[r.id])}` : "Not planned lately";
+      return `<button class="row ${on ? "sel" : ""}" data-rid="${esc(r.id)}" ${cur ? "disabled" : ""} ${pk.multi ? `aria-pressed="${on}"` : ""}>${pk.multi ? `<span class="selc ${on ? "on" : ""}" aria-hidden="true">${on ? ic("check") : ""}</span>` : ""}<div class="thumb ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
         <div class="main"><div class="a">${esc(r.name)}${r.favorite ? ' <span class="heart-s">♥</span>' : ""}</div><div class="b">${r.minutes ? `${esc(r.minutes)} min · ` : ""}${esc(cur ? "Planned now" : when)}</div></div></button>`;
     }).join("")}</div>`;
     $$("#pk-list [data-rid]").forEach((b) => (b.onclick = async () => {
       if (b.disabled) return;
+      const rid = b.dataset.rid;
+      if (pk.multi) {
+        pk.sel = pk.sel.includes(rid) ? pk.sel.filter((x) => x !== rid) : [...pk.sel, rid];
+        return draw();
+      }
       $$("#pk-list [data-rid]").forEach((x) => (x.disabled = true));
       b.classList.add("picked");
-      try { await assignRecipe(date, b.dataset.rid, type); closeSheet(); replan(); }
-      catch (e) { fail(e); $$("#pk-list [data-rid]").forEach((x) => (x.disabled = false)); b.classList.remove("picked"); }
+      try {
+        if (pk.seq) {
+          const r = await api("POST", "/api/plan/assign", { date: pk.date, recipe_id: rid, entry_type: type });
+          pk.added++; pk.items += (r && r.added) || 0; pk.taken.add(pk.date); pk.inPlan[rid] = pk.inPlan[rid] && pk.inPlan[rid] < pk.date ? pk.inPlan[rid] : pk.date;
+          const name = (pk.recipes.find((x) => x.id === rid) || {}).name || "it";
+          advance(`Added ${name} to ${wkShort(pk.date)}`);
+        } else { await assignRecipe(pk.date, rid, type); closeSheet(); replan(); }
+      } catch (e) { fail(e); $$("#pk-list [data-rid]").forEach((x) => (x.disabled = false)); b.classList.remove("picked"); }
     }));
+  };
+  const arrange = async (ai) => {
+    const days = empties();
+    if (!days.length) return toast("Every day is planned");
+    const ids = pk.sel.slice();
+    let plan;
+    if (ai) {
+      $("#pk-ai").disabled = true; $("#pk-ai").textContent = "Arranging…";
+      try { plan = (await api("POST", "/api/plan/arrange", { recipe_ids: ids, start: hz[0], end: hz[hz.length - 1], entry_type: type })).assignments; }
+      catch (e) { fail(e); } finally { $("#pk-ai").innerHTML = `${ic("sparkle")} Arrange with AI`; $("#pk-ai").disabled = false; }
+      if (!plan) return;
+    } else plan = days.slice(0, ids.length).map((d, i) => ({ date: d, recipe_id: ids[i] }));
+    pk.preview = { plan, extra: Math.max(0, ids.length - days.length) };
+    draw();
+  };
+  const drawPreview = () => {
+    const { plan, extra } = pk.preview, byId = Object.fromEntries(pk.recipes.map((r) => [r.id, r]));
+    $("#pk-list").innerHTML = `${extra ? `<p class="hint">${esc(plural(pk.sel.length, "recipe"))} selected but only ${esc(plural(plan.length, "empty day"))}: using the first ${esc(plan.length)}.</p>` : ""}
+      <div class="group pk-preview">${plan.map((a) => `<div class="row"><div class="main"><div class="a">${esc((byId[a.recipe_id] || {}).name || "Recipe")}</div><div class="b">${esc(dayLong(a.date))}, ${esc(shortDate(a.date))}</div></div></div>`).join("")}</div>
+      <div class="btn-row"><button class="btn sec" id="pv-back">Back</button><button class="btn" id="pv-apply">Apply</button></div>`;
+    $("#pv-back").onclick = () => { pk.preview = null; draw(); };
+    $("#pv-apply").onclick = async () => {
+      const btn = $("#pv-apply"); btn.disabled = true;
+      const made = []; let items = 0;
+      try {
+        for (const [i, a] of plan.entries()) {
+          btn.textContent = `Planning ${i + 1} of ${plan.length}…`;
+          const r = await api("POST", "/api/plan/assign", { date: a.date, recipe_id: a.recipe_id, entry_type: type });
+          if (r?.entry?.id != null) made.push(r.entry.id);
+          items += (r && r.added) || 0;
+        }
+      } catch (e) { fail(e); }
+      closeSheet(); replan();
+      toast(`Planned ${plural(made.length, "day")}${items ? ` · ${plural(items, "item")} on your list` : ""}`, made.length ? "Undo" : null, async () => {
+        try { for (const id of made) await api("DELETE", `/api/plan/${enc(id)}`); replan(); } catch (x) { fail(x); }
+      });
+    };
   };
   draw();
 }
