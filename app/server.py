@@ -181,6 +181,11 @@ CREATE TABLE IF NOT EXISTS pantry_events (
   item_id INTEGER REFERENCES pantry_items(id) ON DELETE CASCADE,
   at TEXT NOT NULL, action TEXT NOT NULL, detail TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS allocations (
+  plan_entry_id INTEGER NOT NULL, pantry_item_id INTEGER NOT NULL, food_key TEXT NOT NULL, qty REAL, unit TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_alloc_entry ON allocations(plan_entry_id);
+CREATE INDEX IF NOT EXISTS ix_alloc_item ON allocations(pantry_item_id);
 CREATE TABLE IF NOT EXISTS recipe_cache (
   id TEXT PRIMARY KEY, updated TEXT, foods TEXT
 );
@@ -4372,10 +4377,6 @@ def ensure_list(list_id=None):
     return mealie("POST", "/api/households/shopping/lists", {"name": "Groceries"})["id"]
 
 
-STAPLES = {"salt", "pepper", "black pepper", "water", "oil", "olive oil", "vegetable oil", "butter", "sugar", "flour",
-           "garlic", "baking soda", "baking powder", "vanilla", "vanilla extract", "soy sauce", "vinegar"}
-
-
 def ing_food(ing):
     """Food name for a Mealie ingredient, using the local parser when Mealie hasn't parsed it."""
     fname = (ing.get("food") or {}).get("name") or ""
@@ -4518,6 +4519,16 @@ def _int_id(v, what="entry"):
     return int(v)
 
 
+# ============================================================ allocation-aware shopping list
+# The planned part of the list is derived: for every upcoming, uncooked, unskipped meal (in date order) each ingredient
+# is first covered from pantry stock nobody else has claimed (soonest-expiring first); only the shortfall goes on the
+# list, keyed by plan entry. Typed-in items, ad-hoc recipe adds and checked items are never touched.
+
+DEFAULT_STAPLES = ["salt", "kosher salt", "black pepper", "pepper", "water", "olive oil", "vegetable oil", "cooking spray",
+                   "sugar", "all-purpose flour", "baking soda", "baking powder"]
+STAPLES = set(DEFAULT_STAPLES)   # the defaults; the household's own list is the `staples` setting
+
+
 def _pantry_have_keys():
     """Food keys the pantry covers: at least 25% left and not expired."""
     have = set()
@@ -4537,6 +4548,304 @@ def _drop_entry_items(c, list_id, entry):
     if n_plans.recipe_planned(c, rid, iso(t), iso(t + timedelta(days=PLAN_LOOKAHEAD_DAYS)), entry.get("id")):
         return 0
     return n_lists.remove_recipe_items(c, list_id, rid)
+
+
+def staple_keys():
+    try:
+        names = get_settings().get("staples") or DEFAULT_STAPLES
+    except Exception:
+        names = DEFAULT_STAPLES
+    return {food_key(clean_food(n)) for n in names} | {food_key(n) for n in names}
+
+
+def is_staple(food, keys=None):
+    keys = staple_keys() if keys is None else keys
+    return bool(food) and (food_key(clean_food(food)) in keys or food_key(food) in keys)
+
+
+def _ing_key(food):
+    return food_key(clean_food(food)) or food_key(food)
+
+
+def _recipe_needs(rec, scale, skeys):
+    """[{key, food, qty|None, unit, amount_text, note, line}] for one planned meal (staples left out)."""
+    out = []
+    for ing in rec.get("recipeIngredient") or []:
+        line = _ing_line(ing)
+        if not line:
+            continue
+        p = parse_ing_text(line)
+        if not p:
+            key = food_key(line)
+            if key and key not in skeys:
+                out.append({"key": key, "food": None, "qty": None, "unit": "", "amount_text": "", "note": line, "line": line})
+            continue
+        for q in split_foods(p):
+            food = q["food"].strip()
+            if is_staple(food, skeys):
+                continue
+            amt = q.get("amount_text") or ""
+            out.append({"key": _ing_key(food), "food": food, "qty": None if amt else float(q["quantity"]) * float(scale or 1),
+                        "unit": "" if amt else n_units.normalize(q["unit"]), "amount_text": amt, "note": q.get("note") or "",
+                        "line": line})
+    return out
+
+
+def _group_of(n):
+    """Lines that add up share a group: same food and a unit dimension that converts."""
+    if n["qty"] is None:
+        return (n["key"], "text")
+    dim = n_units.dimension(n["unit"])
+    if dim in ("volume", "weight"):
+        return (n["key"], dim)
+    u = n_units.normalize(n["unit"])
+    return (n["key"], "count:" + ("" if u in n_units.GENERIC_COUNT else u))
+
+
+_NICE = {"cup": 0.25, "tbsp": 0.5, "tsp": 0.125, "lb": 0.25, "oz": 0.5, "gallon": 0.25, "quart": 0.25}
+
+
+def _readable(total, unit, units_seen):
+    """Show a total in the most readable unit: keep a single shared unit; mixed volumes go to cups/tbsp/tsp, mixed
+    weights to lb/oz (metric stays metric)."""
+    seen = {n_units.normalize(u) for u in units_seen}
+    if len(seen) == 1:
+        return total, unit
+    dim = n_units.dimension(unit)
+    metric = bool(seen & {"ml", "l", "g", "kg"}) and not (seen - {"ml", "l", "g", "kg"})
+    if dim == "volume":
+        cands = ["l", "ml"] if metric else ["gallon", "cup", "tbsp", "tsp"]
+    elif dim == "weight":
+        cands = ["kg", "g"] if metric else ["lb", "oz"]
+    else:
+        return total, unit
+    for cu in cands:
+        v = n_units.convert(total, unit, cu)
+        if v is None or v < (1 if cu not in ("cup",) else 0.25):
+            continue
+        step = _NICE.get(cu)
+        if step is None or abs(v / step - round(v / step)) < 0.02 or cu == cands[-1]:
+            return v, cu
+    return total, unit
+
+
+def _contrib_map(row):
+    try:
+        d = json.loads(row["contrib"] or "{}")
+    except (ValueError, TypeError):
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def _entry_part(contrib):
+    """The plan-entry contributions (dict values) of an item; numeric values are ad-hoc recipe adds and stay."""
+    return {k: v for k, v in contrib.items() if isinstance(v, dict)}
+
+
+def _row_key(r):
+    return _ing_key(r["food"]) if r["food"] else food_key(r["note"] or r["text"])
+
+
+def sync_plan_list(c, now=None):
+    """Recompute allocations and the planned part of the shopping list. Returns {"removed": n, "entries": {...}}."""
+    t = (now or today())
+    start, end = iso(t), iso(t + timedelta(days=PLAN_LOOKAHEAD_DAYS))
+    lid = n_lists.single_list(c)
+    skeys = staple_keys()
+    entries = [e for e in c.execute(
+        "SELECT * FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL AND cooked_at IS NULL "
+        "AND skipped_at IS NULL ORDER BY date, " + n_plans._ORDER_SQL + ", id", (start, end)).fetchall()]
+    eids = {str(e["id"]) for e in entries}
+    # ---- pantry stock (active, not expired), soonest-expiring first
+    stock, free = {}, {}
+    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND (expires_on IS NULL OR expires_on>=?) "
+                       "ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id", (start,)):
+        if r["qty"] is not None and r["qty"] <= 0:
+            continue
+        for k in {food_key(clean_food(r["name"])), food_key(r["name"])}:
+            if k:
+                stock.setdefault(k, []).append(r)
+        free[r["id"]] = r["qty"]
+    # ---- what checked (bought / "have") items already satisfied: {(entry_id, key): (qty, unit)} + legacy recipe links
+    rows = c.execute("SELECT * FROM shopping_items WHERE list_id=?", (lid,)).fetchall()
+    sat, legacy = {}, set()
+    linked_pantry = {}
+    for r in rows:
+        if not r["checked"]:
+            continue
+        cm = _contrib_map(r)
+        for k, v in _entry_part(cm).items():
+            if k in eids:
+                sat[(k, _row_key(r))] = (v.get("qty"), r["unit"] or "")
+                linked_pantry.setdefault((k, _row_key(r)), r["id"])
+        if not _entry_part(cm):
+            for rid in json.loads(r["recipe_ids"] or "[]"):
+                legacy.add((str(rid), _row_key(r)))
+    pantry_by_item = {}
+    for r in c.execute("SELECT id, mealie_item_id FROM pantry_items WHERE mealie_item_id IS NOT NULL AND status='active'"):
+        pantry_by_item[r["mealie_item_id"]] = r["id"]
+    # ---- allocate, entry by entry
+    c.execute("DELETE FROM allocations")
+    want = {}   # group -> {"needs": [(entry, need, short_qty)], ...}
+    names = {}
+    for e in entries:
+        rec = n_recipes.get(c, e["recipe_id"])
+        if not rec:
+            continue
+        names[str(e["id"])] = rec.get("name") or ""
+        for n in _recipe_needs(rec, e["scale"], skeys):
+            k, eid = n["key"], str(e["id"])
+            need = n["qty"]
+            if (e["recipe_id"], k) in legacy:
+                continue
+            got = sat.get((eid, k))
+            if got is not None:
+                pid = pantry_by_item.get(linked_pantry.get((eid, k)))
+                if pid is not None and free.get(pid) is not None and got[0]:
+                    free[pid] = max(0.0, free[pid] - (n_units.convert(got[0], got[1], next(
+                        (x["unit"] for x in stock.get(k, []) if x["id"] == pid), got[1])) or 0))
+                if need is None or got[0] is None:
+                    continue
+                conv = n_units.convert(got[0], got[1], n["unit"])
+                if conv is None:
+                    continue
+                need -= conv
+                if need <= 1e-6:
+                    continue
+            for p in stock.get(k, []):
+                if need is not None and need <= 1e-6:
+                    break
+                if p["qty"] is None:   # amount unknown: it covers every planned use until it's used up or tossed
+                    c.execute("INSERT INTO allocations(plan_entry_id, pantry_item_id, food_key, qty, unit) VALUES (?,?,?,?,?)",
+                              (e["id"], p["id"], k, None, None))
+                    need = 0.0
+                    break
+                if need is None:       # "pinch", "to taste": any stock covers it
+                    c.execute("INSERT INTO allocations(plan_entry_id, pantry_item_id, food_key, qty, unit) VALUES (?,?,?,?,?)",
+                              (e["id"], p["id"], k, None, None))
+                    need = 0.0
+                    break
+                if free[p["id"]] <= 1e-9:
+                    continue
+                conv = n_units.convert(need, n["unit"], p["unit"])
+                if conv is None:
+                    continue
+                take = min(conv, free[p["id"]])
+                free[p["id"]] -= take
+                c.execute("INSERT INTO allocations(plan_entry_id, pantry_item_id, food_key, qty, unit) VALUES (?,?,?,?,?)",
+                          (e["id"], p["id"], k, take, p["unit"]))
+                need -= n_units.convert(take, p["unit"], n["unit"]) or 0
+            if need is not None and need <= 1e-6:
+                continue
+            g = want.setdefault(_group_of(n), [])
+            g.append((e, n, need))
+    # ---- reconcile unchecked items
+    removed, touched = 0, set()
+    unchecked = [r for r in rows if not r["checked"]]
+    state = {}
+    for r in unchecked:
+        cm = _contrib_map(r)
+        ent = _entry_part(cm)
+        planned = sum(float(v.get("qty") or 0) for v in ent.values())
+        base = (r["quantity"] or 0) - planned if r["quantity"] is not None else None
+        keep_rest = {k: v for k, v in cm.items() if not isinstance(v, dict)}
+        state[r["id"]] = {"row": r, "base": base if (r["manual"] or keep_rest) else None, "rest": keep_rest, "new": {},
+                          "total": None, "unit": r["unit"] or ""}
+    def fits(st, grp):
+        r = st["row"]
+        if _row_key(r) != grp[0]:
+            return False
+        if grp[1] == "text":
+            return r["quantity"] is None or not r["food"]
+        if r["quantity"] is None or not r["food"]:
+            return False
+        return _group_of({"key": grp[0], "qty": 1, "unit": r["unit"] or ""}) == grp
+    for grp, needs in want.items():
+        st = next((x for x in state.values() if x["row"]["id"] not in touched and fits(x, grp)), None)
+        first = needs[0][1]
+        if grp[1] == "text":
+            texts = list(dict.fromkeys(n["amount_text"] or n["note"] or "" for _, n, _ in needs if (n["amount_text"] or n["note"])))
+            contrib = {str(e["id"]): {"qty": None, "unit": "", "text": n["amount_text"]} for e, n, _ in needs}
+            if st:
+                touched.add(st["row"]["id"]); st["new"] = contrib; st["note"] = "; ".join(texts) if first["food"] else None
+            else:
+                iid = _new_list_item(c, lid, first["food"], "", "" if first["food"] else first["line"])
+                row = c.execute("SELECT * FROM shopping_items WHERE id=?", (iid,)).fetchone()
+                state[iid] = st = {"row": row, "base": None, "rest": {}, "new": contrib, "total": None, "unit": "",
+                                   "note": "; ".join(texts) if first["food"] else None, "created": True}
+                touched.add(iid)
+            continue
+        unit = first["unit"]
+        total = sum(n_units.convert(q, n["unit"], unit) or 0 for _, n, q in needs)
+        if st and st["base"]:
+            item_unit = st["row"]["unit"] or ""
+        else:
+            total, item_unit = _readable(total, unit, [n["unit"] for _, n, _ in needs])
+        contrib = {}
+        for e, n, q in needs:
+            v = n_units.convert(q, n["unit"], item_unit) or 0
+            prev = contrib.get(str(e["id"]), {}).get("qty") or 0
+            contrib[str(e["id"])] = {"qty": prev + v, "unit": item_unit}
+        notes = list(dict.fromkeys(n["note"] for _, n, _ in needs if n["note"]))
+        if st:
+            touched.add(st["row"]["id"]); st["new"] = contrib; st["unit"] = item_unit; st["note"] = None
+        else:
+            iid = _new_list_item(c, lid, first["food"], item_unit, ", ".join(notes))
+            row = c.execute("SELECT * FROM shopping_items WHERE id=?", (iid,)).fetchone()
+            state[iid] = {"row": row, "base": None, "rest": {}, "new": contrib, "unit": item_unit, "note": None, "created": True}
+            touched.add(iid)
+    for iid, st in state.items():
+        r, ent_new = st["row"], st["new"]
+        if not ent_new and st["base"] is None and not r["manual"] and not st["rest"]:
+            c.execute("DELETE FROM shopping_items WHERE id=?", (iid,))
+            removed += 0 if st.get("created") else 1
+            continue
+        cm = dict(st["rest"])
+        cm.update(ent_new)
+        rids = sorted({str(e["recipe_id"]) for e in entries if str(e["id"]) in ent_new} |
+                      {str(k) for k in st["rest"]} | (set(json.loads(r["recipe_ids"] or "[]")) if r["manual"] and not ent_new else set()))
+        if r["food"] and any(v.get("qty") is not None for v in ent_new.values()):
+            planned = sum(float(v.get("qty") or 0) for v in ent_new.values())
+            q = (st["base"] or 0) + planned
+            unit = st["unit"] or None
+            c.execute("UPDATE shopping_items SET quantity=?, unit=?, unit_plural=?, contrib=?, recipe_ids=? WHERE id=?",
+                      (q or None, unit, n_units._PLURAL.get(unit or "", unit) if unit else None, json.dumps(cm), json.dumps(rids), iid))
+        else:
+            sets, vals = ["contrib=?", "recipe_ids=?"], [json.dumps(cm), json.dumps(rids)]
+            if st.get("note") is not None:
+                sets.append("note=?"); vals.append(st["note"])
+            if r["food"] and not r["manual"] and not st["rest"] and ent_new:
+                sets.append("quantity=?"); vals.append(None)
+            c.execute(f"UPDATE shopping_items SET {', '.join(sets)} WHERE id=?", (*vals, iid))
+    return {"removed": removed, "names": names}
+
+
+def _new_list_item(c, lid, food, unit, note):
+    """Insert a planned line (quantity is filled in by the sync)."""
+    iid = str(uuid.uuid4())
+    pos = c.execute("SELECT coalesce(max(position), -1) + 1 FROM shopping_items WHERE list_id=?", (lid,)).fetchone()[0]
+    text = food or note
+    c.execute("INSERT INTO shopping_items (id, list_id, text, food, quantity, unit, unit_plural, note, label, checked, position, "
+              "recipe_ids, created_at, store_id, contrib, manual) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,0)",
+              (iid, lid, text, food or None, None, unit or None, n_units._PLURAL.get(unit, unit) if unit else None, note or "",
+               aisle_for(text) or None, pos, "[]", n_lists._now(), n_lists.store_for(c, food_key(text)), "{}"))
+    return iid
+
+
+def sync_list():
+    """Run the allocation sync in its own transaction (native backend only)."""
+    if not NATIVE:
+        return {"removed": 0}
+    with db() as c:
+        return sync_plan_list(c)
+
+
+def entry_missing_counts(c, lid):
+    out = {}
+    for r in c.execute("SELECT contrib FROM shopping_items WHERE list_id=? AND checked=0", (lid,)):
+        for k, v in _entry_part(_contrib_map(r)).items():
+            out[k] = out.get(k, 0) + 1
+    return out
 
 
 def missing_counts():
