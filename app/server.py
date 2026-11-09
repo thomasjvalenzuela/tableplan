@@ -216,6 +216,13 @@ def init_db():
             c.execute("INSERT INTO settings(key, value) VALUES ('stores_seeded', 'true')")
         if NATIVE:
             n_lists.single_list(c)   # one ongoing list; older installs with several get merged once
+        if not c.execute("SELECT 1 FROM settings WHERE key='titlecase_migrated'").fetchone():
+            for row in c.execute("SELECT id, name FROM recipes").fetchall():   # one-time: names in title case
+                tc = title_case(row["name"])
+                if tc and tc != row["name"]:
+                    rec = n_recipes.get(c, row["id"])
+                    n_recipes.update(c, row["id"], dict(rec, name=tc))
+            c.execute("INSERT INTO settings(key, value) VALUES ('titlecase_migrated', 'true')")
         if c.execute("SELECT COUNT(*) FROM shelf_rules").fetchone()[0] == 0:
             seed = json.load(open(SEED_FILE, encoding="utf-8"))
             for r in seed["rules"]:
@@ -1258,8 +1265,9 @@ AI_RECIPE_SCHEMA = {
         "found": {"type": "boolean"}, "complete": {"type": "boolean"}, "missing": {"type": "string"}, "source_url": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"},
         "servings": {"type": "number"}, "prep_minutes": {"type": "integer"}, "cook_minutes": {"type": "integer"},
         "total_minutes": {"type": "integer"},
-        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["section", "line"],
-                                                    "properties": {"section": {"type": "string"}, "line": {"type": "string"}}}},
+        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["section", "quantity_text", "name", "note"],
+                                                    "properties": {"section": {"type": "string"}, "quantity_text": {"type": "string"},
+                                                                   "name": {"type": "string"}, "note": {"type": "string"}}}},
         "steps": {"type": "array", "items": {"type": "string"}},
         "tags": {"type": "array", "items": {"type": "string"}},
         "categories": {"type": "array", "items": {"type": "string"}},
@@ -1283,13 +1291,34 @@ def _pick_categories(names):
     return [{"name": c} for c in out[:2]]
 
 
+def ing_line_from(x):
+    """Rebuild one ingredient line from AI parts: {quantity_text, name, note} -> '1 ½ cups heavy cream, divided'.
+    Also accepts the older {line} shape."""
+    if not isinstance(x, dict):
+        return ""
+    if x.get("line") and not x.get("name"):
+        return " ".join(str(x["line"]).split())
+    qty, name, note = (" ".join(str(x.get(k) or "").split()) for k in ("quantity_text", "name", "note"))
+    if not name:
+        return qty
+    low = qty.lower()
+    if low in ("to taste", "as needed", "for serving", "for garnish", "optional"):
+        line = f"{name} {qty}"
+    elif low in _WORD_UNITS or low.rstrip("es") in _WORD_UNITS:
+        line = f"{qty} of {name}"
+    else:
+        line = " ".join(v for v in (qty, name) if v)
+    return line + (f", {note}" if note else "")
+
+
 def ai_recipe(text, images=None, feature="recipe import", detail=""):
     """Turn free text and/or images into a recipe (Mealie-shaped dict) with OpenAI."""
     if not cfg("openai_key"):
         raise ApiError(400, "This needs AI. Add your OpenAI key in Settings → AI recipe import.")
     content = [{"type": "text", "text": (
-        "Extract the single recipe from the material below. Clean up typos, spacing and formatting, but never change the recipe: keep every amount, ingredient, temperature, time and step exactly. Copy ingredient lines with amounts, amount first "
-        "(e.g. '1 1/2 cups heavy cream'); put section headings in 'section' (empty if none). Steps are the instructions "
+        "Extract the single recipe from the material below. Clean up typos, spacing and formatting, but never change the recipe: keep every amount, ingredient, temperature, time and step exactly. Give each ingredient as parts: "
+        "quantity_text (the amount with its unit exactly as written, e.g. '1 1/2 cups', 'pinch', 'to taste', or empty), name (the clean food name, "
+        "no amount, no 'of', e.g. 'heavy cream'), note (prep such as 'divided', 'minced', 'softened', or empty); put section headings in 'section' (empty if none). Steps are the instructions "
         "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content. Set complete=false when part of the recipe is clearly missing: no ingredient list, no instructions, text cut off mid-list or mid-step (e.g. a second page or screenshot wasn't included), or steps that use ingredients the list doesn't include; then explain what's missing in 'missing' (one short sentence). Missing amounts in a spoken video recipe do not count as incomplete. " + _category_prompt())
         + (f"\n\n{text[:30000]}" if text else "")}]
     for im in images or []:
@@ -1316,8 +1345,9 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
                        + " Add the missing part (another screenshot or the rest of the text) and try again.")
     if not out.get("found") or not (out.get("ingredients") or out.get("steps")):
         raise ApiError(422, "No recipe found there. Try a clearer screenshot that shows the ingredients and steps.")
-    ings = [{"referenceId": str(uuid.uuid4()), "title": (x.get("section") or None), "note": x["line"], "display": x["line"],
-             "originalText": x["line"], "quantity": 0, "unit": None, "food": None} for x in out["ingredients"] if x.get("line")]
+    ings = [{"referenceId": str(uuid.uuid4()), "title": (x.get("section") or None), "note": ln, "display": ln,
+             "originalText": ln, "quantity": 0, "unit": None, "food": None}
+            for x in out["ingredients"] for ln in [ing_line_from(x)] if ln]
     last = None
     for g in ings:   # only the first line of a section carries its title
         g["title"], last = (g["title"] if g["title"] != last else None), g["title"] or last
@@ -1338,17 +1368,18 @@ POLISH_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["description", "ingredients", "steps", "categories"],
     "properties": {
         "description": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}},
-        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-                                                    "required": ["section", "line"],
-                                                    "properties": {"section": {"type": "string"}, "line": {"type": "string"}}}},
+        "ingredients": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["section", "quantity_text", "name", "note"],
+                                                    "properties": {"section": {"type": "string"}, "quantity_text": {"type": "string"},
+                                                                   "name": {"type": "string"}, "note": {"type": "string"}}}},
         "steps": {"type": "array", "items": {"type": "string"}},
     },
 }
 POLISH_PROMPT = (
     "You are editing a recipe for a home cook. Return the same recipe with clearer wording.\n"
     "- description: 1-2 appetizing, factual sentences about the dish.\n"
-    "- ingredients: exactly the same number of lines, in the same order, with the same section headings. Tidy the "
-    "wording and spell out units (e.g. '2 c. flour' -> '2 cups all-purpose flour', 'tbs' -> 'tablespoons').\n"
+    "- ingredients: exactly the same number of items, in the same order, with the same section headings. Return each "
+    "as parts: quantity_text (amount with unit, spelled out, e.g. '2 cups', '1 tablespoon', 'pinch', 'to taste'), name (clean "
+    "food name, no amount and no 'of', e.g. 'all-purpose flour' for '2 c. flour'), note (prep like 'minced', 'divided').\n"
     "- steps: rewrite each step as clear, complete, descriptive sentences. Name the pan or vessel, the heat level, "
     "temperatures, times and doneness cues (e.g. 'until golden and 165°F inside') when the source gives them.\n"
     "NEVER change ingredients, amounts, temperatures, times or the order of the method. Never add or remove "
@@ -1358,8 +1389,11 @@ _NUM_TOKEN = re.compile(r"\d+(?:[.,/]\d+)?|[½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜
 
 
 def _num_tokens(line):
-    """Digit and fraction tokens of a line ('1 ½ cups' -> {'1', '½'}), to check a rewrite kept every number."""
-    return set(_NUM_TOKEN.findall(line or ""))
+    """Digit and fraction tokens of a line ('1 ½ cups' -> {'1', '1/2'}), to check a rewrite kept every number."""
+    t = line or ""
+    for k, v in _UFRAC.items():
+        t = t.replace(k, " " + v)
+    return set(_NUM_TOKEN.findall(t))
 
 
 def _polish_on():
@@ -1385,7 +1419,8 @@ def polish_recipe(data, extra=""):
         section = g.get("title") or section
         sections.append(section or "")
     source = {"name": data.get("name") or "", "description": data.get("description") or "",
-              "ingredients": [{"section": sec, "line": ln} for sec, ln in zip(sections, orig_lines)], "steps": orig_steps}
+              "ingredients": [{"section": sec, "line": ln} for sec, ln in zip(sections, orig_lines)], "steps": orig_steps,
+              }
     out = openai_chat([{"role": "system", "content": POLISH_PROMPT + "\n- " + _category_prompt()
                         + (("\n" + extra) if extra else "")},
                        {"role": "user", "content": json.dumps(source, ensure_ascii=False)}],
@@ -1394,7 +1429,7 @@ def polish_recipe(data, extra=""):
     if len(new_steps) < len(orig_steps) - 1 or not new_steps and orig_steps:
         log(f"polish discarded for {data.get('name')!r}: steps {len(orig_steps)} -> {len(new_steps)}")
         return data
-    new_lines = [(x.get("line") or "").strip() for x in out.get("ingredients") or [] if isinstance(x, dict)]
+    new_lines = [ing_line_from(x) for x in out.get("ingredients") or [] if isinstance(x, dict)]
     lines_ok = len(new_lines) == len(orig_lines) and all(
         nl and _num_tokens(ol) <= _num_tokens(nl) for ol, nl in zip(orig_lines, new_lines))
     if not lines_ok:
@@ -1424,6 +1459,7 @@ def polish_recipe(data, extra=""):
 
 
 def _save_new_recipe(data, image_url=None):
+    data = dict(data, name=title_case(data.get("name") or "") or "Untitled Recipe")
     if _polish_on():
         try:
             data = polish_recipe(data)
@@ -2781,6 +2817,7 @@ for _sing, _plur, _aliases in [
     ("gallon", "gallons", "gallon gallons gal"), ("bunch", "bunches", "bunch bunches"), ("sprig", "sprigs", "sprig sprigs"),
     ("head", "heads", "head heads"), ("jar", "jars", "jar jars"), ("bag", "bags", "bag bags"), ("box", "boxes", "box boxes"),
     ("handful", "handfuls", "handful handfuls"), ("piece", "pieces", "piece pieces pc pcs"), ("stalk", "stalks", "stalk stalks"),
+    ("splash", "splashes", "splash splashes"), ("drizzle", "drizzles", "drizzle drizzles"),
 ]:
     for _a in _aliases.split():
         _UNITS[_a if _a in ("T", "t") else _a.lower()] = (_sing, _plur)
@@ -2801,14 +2838,32 @@ def _qty_val(s):
     return float(s)
 
 
+# Amounts without a number: "pinch of salt", "a dash of hot sauce", "salt to taste", "a few sprigs of thyme".
+_WORD_UNITS = ("pinch", "dash", "handful", "splash", "drizzle", "sprinkle")
+_WORD_AMT_RE = re.compile(r"^\s*(?:an?\s+)?(pinch(?:es)?|dash(?:es)?|handful(?:s)?|splash(?:es)?|drizzle|sprinkle)\s+(?:of\s+)?(.+)$", re.I)
+_VAGUE_RE = re.compile(r"^\s*(some|a few|a couple(?: of)?|a little|a bit of|several)\s+(?:of\s+)?(.+)$", re.I)
+_TO_TASTE_RE = re.compile(r"^(.*?)[,\s]*\b(to taste|as needed|for serving|for garnish|optional)\s*\.?$", re.I)
+_PREP_WORDS = re.compile(r"^(minced|chopped|diced|sliced|grated|shredded|softened|melted|divided|crushed|peeled|beaten|cubed|"
+                         r"halved|quartered|julienned|drained|rinsed|thinly sliced|finely chopped|roughly chopped|at room temperature|"
+                         r"room temperature|cut into [^,]+|plus more[^,]*|or to taste)$", re.I)
+
+
+def _split_note(rest):
+    """'heavy cream, divided' -> ('heavy cream', 'divided'); trailing '(optional)' style notes too."""
+    food, _, note = rest.partition(",")
+    return food.strip(" -"), note.strip()
+
+
 def parse_ing_text(text):
-    """'1 ½ cups heavy cream, divided' -> {quantity:1.5, unit:'cup', unit_plural:'cups', food:'heavy cream', note:'divided'}."""
+    """'1 ½ cups heavy cream, divided' -> {quantity:1.5, unit:'cup', unit_plural:'cups', food:'heavy cream', note:'divided'}.
+    Number-less amounts set amount_text: 'pinch of salt' -> {quantity:1, unit:'pinch', food:'salt', amount_text:'pinch'},
+    'salt to taste' -> {quantity:0, unit:'', food:'salt', amount_text:'to taste'}. Scaling never touches amount_text."""
     t = (text or "").strip()
     for k, v in _UFRAC.items():
         t = re.sub(rf"(\d)\s*{k}", rf"\1 {v}", t).replace(k, v)
     m = _ING_RE.match(t)
     if not m:
-        return None
+        return _parse_wordy(t)
     try:
         q = _qty_val(m.group(1))
     except (ValueError, ZeroDivisionError):
@@ -2821,12 +2876,92 @@ def parse_ing_text(text):
         rest = (word + " " + rest).strip() if word else rest
     if paren and not unit:
         rest = f"({paren}) {rest}".strip()
-    food, _, note = rest.partition(",")
-    food = food.strip(" -")
+    rest = re.sub(r"^of\s+", "", rest, flags=re.I)
+    food, note = _split_note(rest)
     if not food:
         return None
     return {"quantity": q, "unit": unit[0] if unit else "", "unit_plural": unit[1] if unit else "",
-            "food": food, "note": note.strip(), "size": (paren or "") if unit else ""}
+            "food": food, "note": note, "size": (paren or "") if unit else "", "amount_text": ""}
+
+
+def _parse_wordy(t):
+    """Lines with no number: word amounts ("pinch of"), vague ones ("some"), or "to taste"."""
+    if not t:
+        return None
+    m = _WORD_AMT_RE.match(t)
+    if m:
+        u = _UNITS.get(m.group(1).lower(), (m.group(1).lower(), m.group(1).lower()))
+        tt = _TO_TASTE_RE.match(m.group(2))
+        food, note = _split_note(tt.group(1) if tt and tt.group(1).strip() else m.group(2))
+        if food:
+            return {"quantity": 1.0, "unit": u[0], "unit_plural": u[1], "food": food, "note": note, "size": "",
+                    "amount_text": u[0]}
+    m = _VAGUE_RE.match(t)
+    if m:
+        rest = m.group(2)
+        unit = None
+        w = rest.split(None, 1)
+        if len(w) == 2 and w[0].lower() in _UNITS:   # "a few sprigs of thyme"
+            unit, rest = _UNITS[w[0].lower()], re.sub(r"^of\s+", "", w[1], flags=re.I)
+        food, note = _split_note(rest)
+        if food:
+            amt = m.group(1).lower().replace(" of", "") + (f" {unit[1]}" if unit else "")
+            return {"quantity": 0, "unit": "", "unit_plural": "", "food": food, "note": note, "size": "", "amount_text": amt}
+    m = _TO_TASTE_RE.match(t)
+    if m and m.group(1).strip():
+        food, note = _split_note(m.group(1))
+        if food:
+            return {"quantity": 0, "unit": "", "unit_plural": "", "food": food, "note": note, "size": "",
+                    "amount_text": m.group(2).lower()}
+    return None
+
+
+def split_foods(p):
+    """'salt and pepper' (no amount) -> two parses, 'salt' and 'pepper', sharing the amount text."""
+    if not p or p.get("quantity") and not p.get("amount_text"):
+        return [p] if p else []
+    parts = [x.strip() for x in re.split(r"\s+(?:and|&)\s+", p["food"]) if x.strip()]
+    if len(parts) == 2 and all(len(x.split()) <= 2 for x in parts):
+        return [dict(p, food=x) for x in parts]
+    return [p]
+
+
+def sentence_case(s):
+    """'all-purpose flour' -> 'All-purpose flour'; keeps words with capitals inside (e.g. 'Dijon', 'BBQ')."""
+    s = " ".join((s or "").split())
+    return s[:1].upper() + s[1:] if s else s
+
+
+_SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "with", "en", "de", "e"}
+
+
+def title_case(name):
+    """Recipe names in title case: 'chicken tikka masala with naan' -> 'Chicken Tikka Masala with Naan'.
+    Small words stay lowercase unless first or last; acronyms (BBQ) and inner capitals (McDonald's, iPhone) are kept;
+    hyphenated parts ('Slow-Cooker') and apostrophes ("Grandma's") are handled."""
+    words = " ".join(str(name or "").split()).split(" ")
+    if words == [""]:
+        return ""
+    out = []
+    for i, w in enumerate(words):
+        first, last = i == 0, i == len(words) - 1
+        parts = w.split("-")
+        fixed = []
+        for j, part in enumerate(parts):
+            m = re.match(r"^([^A-Za-z]*)([A-Za-z][A-Za-z']*)(.*)$", part)
+            if not m:
+                fixed.append(part)
+                continue
+            pre, core, post = m.groups()
+            low = core.lower()
+            if (core.isupper() and len(core) > 1) or any(ch.isupper() for ch in core[1:]):
+                fixed.append(part)            # BBQ, BLT, McDonald's, iPhone
+            elif low in _SMALL_WORDS and not (first and j == 0) and not (last and j == len(parts) - 1) and not pre:
+                fixed.append(pre + low + post)
+            else:
+                fixed.append(pre + low[:1].upper() + low[1:] + post)
+        out.append("-".join(fixed))
+    return " ".join(out)
 
 
 def clean_food(name):
@@ -2948,7 +3083,7 @@ def recipe_update(slug, b):
         name = (b.get("name") or "").strip()
         if not name:
             raise ApiError(400, "Give the recipe a name.")
-        r["name"] = name[:200]
+        r["name"] = title_case(name[:200])
     if "description" in b:
         r["description"] = (b.get("description") or "").strip()[:2000]
     if b.get("servings") not in (None, ""):
@@ -3436,8 +3571,9 @@ def recipe_detail(slug):
         if ing.get("referenceId"):
             ref_index[ing["referenceId"]] = i
         if local:
-            ings.append({"i": i, "section": ing.get("title") or "", "quantity": local["quantity"], "parsed": True, "local": True,
+            ings.append({"i": i, "section": ing.get("title") or "", "quantity": local["quantity"] or None, "parsed": True, "local": True,
                          "unit": local["unit"], "unit_plural": local["unit_plural"], "food": local["food"], "food_plural": "",
+                         "name": sentence_case(local["food"]), "amount_text": local.get("amount_text") or "",
                          "note": local["note"], "size": local["size"],
                          "display": (ing.get("display") or ing.get("note") or "").strip(),
                          "raw": (ing.get("originalText") or ing.get("display") or ing.get("note") or "").strip(),
@@ -3450,7 +3586,7 @@ def recipe_detail(slug):
             "unit": unit.get("abbreviation") if unit.get("useAbbreviation") and unit.get("abbreviation") else unit.get("name") or "",
             "unit_plural": unit.get("pluralAbbreviation") if unit.get("useAbbreviation") and unit.get("pluralAbbreviation")
             else unit.get("pluralName") or "",
-            "food": fname, "food_plural": food.get("pluralName") or "",
+            "food": fname, "food_plural": food.get("pluralName") or "", "name": sentence_case(fname), "amount_text": "",
             "note": ing.get("note") or "", "display": (ing.get("display") or ing.get("originalText") or ing.get("note") or "").strip(),
             "emoji": food_emoji(fname or ing.get("note") or ing.get("display")),
             "img": f"/img/ing?name={urllib.parse.quote(clean_food(fname))}" if fname else None,
@@ -4622,15 +4758,18 @@ def _cook_needs(rec, factor):
         line = _ing_line(ing)
         if not line:
             continue
-        p = parse_ing_text(line)
-        if p:
-            name, q, unit = clean_food(p["food"]), p["quantity"] * factor, p["unit"] or ""
-        else:
-            name, q, unit = clean_food(line), None, ""
-        key = food_key(name)
-        if not key or name.lower() in STAPLES or key in _STAPLE_KEYS:
-            continue
-        out.append((name, q, unit))
+        parsed = split_foods(parse_ing_text(line)) or [None]
+        for p in parsed:
+            if p and not p.get("amount_text"):
+                name, q, unit = clean_food(p["food"]), p["quantity"] * factor, p["unit"] or ""
+            elif p:
+                name, q, unit = clean_food(p["food"]), None, ""   # "to taste", "pinch": amount unknown
+            else:
+                name, q, unit = clean_food(line), None, ""
+            key = food_key(name)
+            if not key or name.lower() in STAPLES or key in _STAPLE_KEYS:
+                continue
+            out.append((name, q, unit))
     return out
 
 
@@ -6150,7 +6289,7 @@ class Handler(BaseHTTPRequestHandler):
             name = (self.body().get("name") or "").strip()[:200]
             if not name:
                 raise ApiError(400, "Give the recipe a name.")
-            slug = mealie("POST", "/api/recipes", {"name": name})
+            slug = mealie("POST", "/api/recipes", {"name": title_case(name)})
             _recipe_cache["at"] = 0
             return self.send(200, {"slug": slug.strip('"') if isinstance(slug, str) else slug})
         if m == "POST" and path == "/api/lists":

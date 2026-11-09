@@ -17,14 +17,22 @@ function fmtQty(q) {
   if (bd > 0.06) return (Math.round(q * 100) / 100).toString();
   return (whole ? whole : "") + best[1];
 }
+// One ingredient for display: name (sentence case) as the title, the amount as the subtitle, prep note muted.
+// Number-less amounts ("pinch", "to taste") never scale.
+const sentence = (t) => { t = String(t || "").trim(); return t ? t.charAt(0).toUpperCase() + t.slice(1) : ""; };
 function ingLine(x, factor, portion = 1) {
-  if (!x.parsed || x.quantity == null) return { amt: factor !== 1 && x.display ? `${x.display}` : x.display, name: x.display ? "" : x.food, scaled: false };
+  const name = sentence(x.name || x.food);
+  if (!name) return { amt: "", name: x.display || x.raw || "", note: "", text: x.display || x.raw || "" };
+  if (x.amount_text) return { amt: x.amount_text, name, note: x.note || "", text: `${name}${x.note ? `, ${x.note}` : ""}, ${x.amount_text}` };
+  if (!x.parsed || x.quantity == null) return { amt: "", name: x.display || name, note: "", text: x.display || name };
   const q = x.quantity * factor * portion;
   let unit = q > 1 && x.unit_plural ? x.unit_plural : x.unit;
   if (x.size) unit = `(${x.size}) ${unit}`;
-  const food = q > 1 && x.food_plural && !x.unit ? x.food_plural : x.food;
-  return { amt: [fmtQty(q), unit].filter(Boolean).join(" "), name: food + (x.note ? `, ${x.note}` : ""), scaled: true };
+  const food = q > 1 && x.food_plural && !x.unit ? sentence(x.food_plural) : name;
+  const amt = [fmtQty(q), unit].filter(Boolean).join(" ");
+  return { amt, name: food, note: x.note || "", text: [amt, food.toLowerCase() === food ? food : food.charAt(0).toLowerCase() + food.slice(1)].filter(Boolean).join(" ") + (x.note ? `, ${x.note}` : "") };
 }
+const ingTitle = (l) => `${esc(l.name)}${l.note ? ` <span class="ing-note">${esc(l.note)}</span>` : ""}`;
 const recipeImg = (r, size = "min") => (r && r.has_image ? `/img/${enc(r.id)}?size=${enc(size)}&v=${enc(r.image_v || "")}` : null);
 
 // ------------------------------------------------------------------ RECIPES list
@@ -234,7 +242,7 @@ async function drawContent() {
     rec.ingredients.forEach((x) => {
       if (x.section && x.section !== sec) { sec = x.section; html += `</div><div class="group-label">${esc(sec)}</div><div class="group ing">`; }
       const l = ingLine(x, f);
-      html += `<div class="row">${ingPic(x)}<div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="qty">${esc(l.amt)}</div>` : ""}</div><div class="tags">${pantryTag(x)}</div></div>`;
+      html += `<div class="row">${ingPic(x)}<div class="main"><div class="a">${ingTitle(l)}</div>${l.amt ? `<div class="qty">${esc(l.amt)}</div>` : ""}</div><div class="tags">${pantryTag(x)}</div></div>`;
     });
     html += `</div><div class="section-h"><h2>Instructions</h2><span class="sh-actions">${rec.original ? `<button class="link-btn" id="rd-orig" aria-pressed="${!!R.showOrig}">${R.showOrig ? "Show reworded" : "Show original"}</button>` : ""}<button class="pill-btn sm" id="rd-reword">${ic("sparkle")} Reword with AI</button></span></div>`;
     if (R.showOrig && rec.original) {
@@ -264,7 +272,7 @@ async function drawContent() {
     const g = R.guide;
     let html = `<div class="section-h" style="margin-top:20px"><h2>Step by step</h2><span class="muted" style="font-size:13px">${g.source === "ai" ? "✨ AI-arranged" : "Auto-arranged"} · ${esc(state.cfg.settings.stove)} stove</span></div>`;
     g.steps.forEach((s, n) => {
-      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${esc(x.emoji)} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
+      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
       html += `<div class="step-card"><div class="num">${n + 1}. ${esc(s.title || "")}</div><div class="txt">${esc(s.text)}</div>
         ${uses ? `<div class="uses">${uses}</div>` : ""}
         <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${s.timer_sec ? `<span class="badge2 blue">⏱ ${esc(s.timer_label || fmtDur(s.timer_sec))}</span>` : ""}</div>
@@ -289,7 +297,7 @@ async function addMissing() {
   const missing = R.rec.ingredients.filter((x) => !x.pantry && (x.food || x.display));
   if (!missing.length) return toast("You have everything in the pantry 🎉");
   openSheet("Add to shopping list", `<p class="hint" style="margin:0 4px 10px">Untick anything you already have.</p>
-    <div class="group">${missing.map((x) => { const l = ingLine(x, f); return `<label class="row"><span class="emo">${esc(x.emoji)}</span><div class="main"><div class="a">${esc(l.scaled ? l.name : l.amt)}</div>${l.scaled ? `<div class="b">${esc(l.amt)}</div>` : ""}</div><input type="checkbox" checked data-t="${esc(l.scaled ? `${l.amt} ${l.name}` : l.amt)}" style="width:22px;height:22px;accent-color:var(--tint)"></label>`; }).join("")}</div>
+    <div class="group">${missing.map((x) => { const l = ingLine(x, f); return `<label class="row"><span class="emo">${esc(x.emoji)}</span><div class="main"><div class="a">${ingTitle(l)}</div>${l.amt ? `<div class="b">${esc(l.amt)}</div>` : ""}</div><input type="checkbox" checked data-t="${esc(l.text)}" style="width:22px;height:22px;accent-color:var(--tint)"></label>`; }).join("")}</div>
     <div style="height:14px"></div><button class="btn" id="am-go">${ic("cart")} Add to list</button>`, {
     onMount() { $("#am-go").onclick = async () => {
       const items = $$("[data-t]").filter((c) => c.checked).map((c) => c.dataset.t);
@@ -468,7 +476,7 @@ function cookKeys(e) { if (e.key === "ArrowRight") cookMove(1); if (e.key === "A
 function cookMove(d) { C.i = Math.max(0, Math.min(C.steps.length - 1, C.i + d)); drawCook(); }
 function drawCook() {
   const s = C.steps[C.i], rec = R.rec, f = factor(), n = C.steps.length;
-  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${esc(x.emoji)} <b>${esc(l.scaled ? l.amt : "")}</b> ${esc(l.scaled ? l.name : l.amt)}</span>`; }).join("");
+  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
   const running = C.timers.find((t) => t.step === C.i);
   $("#cook").innerHTML = `
     <div class="cook-top"><button class="round-btn" id="ck-x" aria-label="Close">${ic("x")}</button><div class="prog"><i style="width:${((C.i + 1) / n) * 100}%"></i></div><span class="count">${C.i + 1}/${n}</span></div>

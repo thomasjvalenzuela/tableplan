@@ -182,6 +182,10 @@ def _add_one(c, list_id, text, parse, categorize, scale=1.0, recipe_id=None, sto
     if food:
         unit, plural, note = p.get("unit") or "", p.get("unit_plural") or "", (p.get("note") or "").strip()
         qty = float(p.get("quantity") or 0) * scale or None
+        if p.get("amount_text"):   # "pinch", "to taste": no number to add up; the words go in the note
+            unit = plural = ""
+            qty = None
+            note = "; ".join(x for x in (p["amount_text"], note) if x)
         dup = c.execute("SELECT id, quantity, note, recipe_ids, contrib, manual FROM shopping_items WHERE list_id=? "
                         "AND checked=0 AND food IS NOT NULL AND lower(food)=? AND coalesce(unit,'')=?",
                         (list_id, food.lower(), unit)).fetchone()

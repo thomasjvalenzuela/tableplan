@@ -42,8 +42,9 @@ def imported(name="Pancakes"):
 
 
 GOOD = {"description": "Fluffy pancakes.",
-        "ingredients": [{"section": "Batter", "line": "2 cups all-purpose flour"},
-                        {"section": "Batter", "line": "1 ½ cups milk"}, {"section": "Batter", "line": "1 large egg"}],
+        "ingredients": [{"section": "Batter", "quantity_text": "2 cups", "name": "all-purpose flour", "note": ""},
+                        {"section": "Batter", "quantity_text": "1 1/2 cups", "name": "milk", "note": ""},
+                        {"section": "Batter", "quantity_text": "1", "name": "large egg", "note": ""}],
         "steps": ["Whisk everything in a large bowl until smooth.",
                   "Cook ladlefuls in a buttered skillet over medium heat for 3 minutes, until golden.",
                   "Serve warm."]}
@@ -63,7 +64,7 @@ class Polish(unittest.TestCase):
         rec, oc = self.save(GOOD)
         self.assertEqual(oc.call_args.args[3], "polish")
         self.assertEqual([g["note"] for g in rec["recipeIngredient"]],
-                         ["2 cups all-purpose flour", "1 ½ cups milk", "1 large egg"])
+                         ["2 cups all-purpose flour", "1 1/2 cups milk", "1 large egg"])
         self.assertEqual(rec["recipeIngredient"][0]["title"], "Batter")
         self.assertEqual(rec["recipeInstructions"][1]["text"], GOOD["steps"][1])
         self.assertEqual(rec["description"], "Fluffy pancakes.")
@@ -72,7 +73,7 @@ class Polish(unittest.TestCase):
         self.assertEqual(S.recipe_detail(rec["slug"])["original"]["steps"], ["mix", "cook 3 min", "serve"])
 
     def test_changed_number_reverts_ingredients_only(self):
-        bad = dict(GOOD, ingredients=[{"section": "", "line": "3 cups flour"}] + GOOD["ingredients"][1:])
+        bad = dict(GOOD, ingredients=[{"section": "", "quantity_text": "3 cups", "name": "flour", "note": ""}] + GOOD["ingredients"][1:])
         rec, _ = self.save(bad, "Pancakes 2")
         self.assertEqual([g["note"] for g in rec["recipeIngredient"]], ["2 c. flour", "1 ½ cups milk", "1 egg"])
         self.assertEqual(rec["recipeInstructions"][2]["text"], "Serve warm.")
@@ -130,6 +131,23 @@ class Polish(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TitleCaseOnSave(unittest.TestCase):
+    def test_import_edit_and_migration(self):
+        S.save_settings({"polish_imports": False})
+        slug = S._save_new_recipe(dict(imported("french toast with berries")))
+        self.assertEqual(S.recipe_detail(slug)["name"], "French Toast with Berries")
+        S.recipe_update(slug, {"name": "grandma's slow-cooker chili"})
+        with S.db() as c:
+            rid = S.n_recipes.get(c, "grandma-s-slow-cooker-chili")["id"]
+            self.assertEqual(S.n_recipes.get(c, rid)["name"], "Grandma's Slow-Cooker Chili")
+            rec = S.n_recipes.get(c, rid)
+            S.n_recipes.update(c, rid, dict(rec, name="old lower name"))
+            c.execute("DELETE FROM settings WHERE key='titlecase_migrated'")
+        S.init_db()
+        with S.db() as c:
+            self.assertEqual(S.n_recipes.get(c, rid)["name"], "Old Lower Name")
 
 
 class Categories(unittest.TestCase):

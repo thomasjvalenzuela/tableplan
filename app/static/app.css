@@ -686,3 +686,4 @@ body.selecting .toast{bottom:calc(176px + var(--safe-b))}
 .ed-cats{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 4px}
 .link-btn.inline{padding:0 2px;font-size:inherit;border:0;background:none;cursor:pointer}
 .section-h .pill-btn{color:var(--text)}
+.ing-note{color:var(--sub);font-weight:400;font-size:.9em}
