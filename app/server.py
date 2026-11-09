@@ -53,6 +53,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("application/manifest+json", ".webmanifest")
+mimetypes.add_type("font/woff2", ".woff2")
 STATIC_DIR = os.path.join(HERE, "static")
 SEED_FILE = os.path.join(HERE, "seed", "starter_shelf_life.json")
 
@@ -120,6 +121,7 @@ DEFAULT_SETTINGS = {
     "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
     "polish_imports": True,           # AI rewrites imported steps clearly (never amounts); needs an OpenAI key
     "whatsnew_seen": [],              # ids from static/whatsnew.json already shown (on any device)
+    "theme": "system",                # system | light | dark (a device's own choice wins)
     "staples": ["Table salt", "Kosher salt", "Black pepper", "Water", "Olive oil", "Vegetable oil", "Cooking spray",
                 "Granulated sugar", "All-purpose flour", "Baking soda", "Baking powder"],   # "always have": never on the list
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
@@ -690,6 +692,7 @@ SETTINGS_VALIDATORS = {
     "polish_imports": _v_bool,
     "categories": _v_categories,
     "whatsnew_seen": _v_ids(500),
+    "theme": _v_enum("system", "light", "dark"),
     "staples": lambda v: _v_names(v, 100, 40),
 }
 

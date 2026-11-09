@@ -1,3 +1,9 @@
+/* Theme: System / Light / Dark, chosen per device (falls back to the household setting). */
+(function () {
+  let t = "";
+  try { t = localStorage.getItem("tp.theme") || ""; } catch (_) {}
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+})();
 /* TablePlan — sign-in, first-run setup wizard, and the setup sections reused by Settings. Loaded before app.js. */
 "use strict";
 
@@ -31,7 +37,7 @@ function renderLogin(onDone, sess) {
   const code = sess && sess.needs_setup_code;
   const root = document.getElementById("app");
   root.innerHTML = `<div class="wiz"><div class="wiz-card fade-in" style="max-width:380px">
-    <div class="wiz-logo"><img src="/static/icon.svg" alt=""></div>
+    <div class="wiz-logo"><img class="brand-logo" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."></div>
     <h2 class="wiz-title">TablePlan</h2><p class="wiz-sub">${code ? "This server is on the internet, so setup is locked. Enter the one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs)." : "Enter the household password."}</p>
     <form id="lg"><div class="wfield"><input type="${code ? "text" : "password"}" id="lg-pw" placeholder="${code ? "Setup code" : "Password"}" autocomplete="${code ? "one-time-code" : "current-password"}" autofocus></div>
     <div class="wiz-err" id="lg-err"></div>
@@ -317,7 +323,7 @@ async function runWizard(onFinish) {
     const dots = WIZ_STEPS.map((_, n) => `<i class="${n === i ? "on" : n < i ? "past" : ""}"></i>`).join("");
     root.innerHTML = `<div class="wiz"><div class="wiz-card fade-in">
       <div class="wiz-dots">${dots}</div>
-      ${step.key === "welcome" || step.key === "done" ? `<div class="wiz-logo"><img src="/static/icon.svg" alt=""></div>` : ""}
+      ${step.key === "welcome" || step.key === "done" ? `<div class="wiz-logo"><img class="brand-logo" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."></div>` : ""}
       <h2 class="wiz-title">${_esc(step.title)}</h2>${step.sub ? `<p class="wiz-sub">${_esc(step.sub)}</p>` : ""}
       <div id="wiz-body"></div><div class="wiz-err" id="wiz-err"></div>
       <div class="wiz-actions">

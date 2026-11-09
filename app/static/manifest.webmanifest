@@ -1,14 +1,15 @@
 {
   "name": "TablePlan",
   "short_name": "TablePlan",
+  "description": "Plan meals. Shop smarter.",
   "start_url": "/",
   "display": "standalone",
   "share_target": {"action": "/", "method": "GET", "params": {"title": "share_title", "text": "share_text", "url": "share_url"}},
-  "background_color": "#4a3e7a",
-  "theme_color": "#e9906b",
+  "background_color": "#F3FAF6",
+  "theme_color": "#176B50",
   "icons": [
-    {"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
     {"src": "/static/icon-180.png", "sizes": "180x180", "type": "image/png"},
-    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"}
+    {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
   ]
 }

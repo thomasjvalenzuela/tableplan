@@ -1,5 +1,21 @@
 [
  {
+  "id": "new-look",
+  "date": "2026-11-11",
+  "icon": "sparkle",
+  "color": "green",
+  "title": "A fresh green look",
+  "text": "TablePlan has a new green look with clearer type. Pick Light, Dark or System in Settings, under Appearance."
+ },
+ {
+  "id": "iphone-fit",
+  "date": "2026-11-11",
+  "icon": "check",
+  "color": "blue",
+  "title": "Fits your iPhone better",
+  "text": "From the Home Screen, buttons now sit below the status bar and Dynamic Island, and typing no longer zooms the page."
+ },
+ {
   "id": "danger-zone",
   "date": "2026-11-10",
   "icon": "trash",

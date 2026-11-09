@@ -65,6 +65,15 @@ const cssUrl = (u) => { const s = safeUrl(u, true); return s ? `url('${esc(s.rep
 const bgStyle = (u) => { const c = cssUrl(u); return c ? `style="background-image:${c}"` : ""; };
 // External link attributes (href + target + rel), or "" when the URL isn't http(s)/same-origin.
 const extLink = (u) => { const s = safeUrl(u); return s ? `href="${esc(s)}" target="_blank" rel="noopener noreferrer"` : ""; };
+// Theme: this device's choice, else the household default, else the system setting
+const currentTheme = () => { try { return localStorage.getItem("tp.theme") || state.cfg?.settings?.theme || "system"; } catch (_) { return "system"; } };
+function applyTheme(t) {
+  const root = document.documentElement;
+  if (t === "light" || t === "dark") root.dataset.theme = t; else delete root.dataset.theme;
+  const dark = t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+  $$('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", dark ? "#091B15" : "#F3FAF6"));
+}
+function setTheme(t) { try { localStorage.setItem("tp.theme", t); } catch (_) {} applyTheme(t); }
 const BUILD = (() => { try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch (_) { return ""; } })();
 const app = $("#app");
 const state = { tab: "home", cfg: null, summary: null, listId: localStorage.getItem("tp.list") || null, pantryFilter: "all", plan: null };
@@ -165,7 +174,9 @@ function go(tab) {
   lastHash = location.hash;
   renderTabs();
   window.scrollTo(0, 0);
-  ({ home: renderHome, recipes: renderRecipes, meals: renderMeals, list: renderList, pantry: renderPantry }[tab] || renderHome)();
+  const done = ({ home: renderHome, recipes: renderRecipes, meals: renderMeals, list: renderList, pantry: renderPantry }[tab] || renderHome)();
+  // async renders can leave the old page's scroll offset behind (scroll anchoring); start each tab at the top
+  Promise.resolve(done).then(() => { if (location.hash.slice(1) === tab || (!location.hash && tab === "home")) window.scrollTo(0, 0); }, () => {});
 }
 let lastHash = null;
 function route() {
@@ -639,6 +650,12 @@ function closePop() {
   p.el.classList.remove("on"); setTimeout(() => p.el.remove(), 150);
   p.anchor?.setAttribute("aria-expanded", "false");
 }
+// Height of the status-bar inset (env(safe-area-inset-top)), measured via a hidden probe.
+function safeTop() {
+  let p = document.querySelector(".safe-probe");
+  if (!p) { p = document.createElement("div"); p.className = "safe-probe"; p.setAttribute("aria-hidden", "true"); document.body.appendChild(p); }
+  return p.offsetHeight || 0;
+}
 function popover(anchor, html, onMount) {
   if (POP && POP.anchor === anchor) return closePop();
   closePop();
@@ -649,7 +666,8 @@ function popover(anchor, html, onMount) {
   p.place = () => {
     const r = anchor.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
     el.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + "px";
-    el.style.top = (r.bottom + 6 + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 6) : r.bottom + 6) + "px";
+    const top = safeTop() + 8;
+    el.style.top = (r.bottom + 6 + h > window.innerHeight - 8 ? Math.max(top, r.top - h - 6) : r.bottom + 6) + "px";
   };
   p.place();
   p.outside = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closePop(); };
@@ -1316,7 +1334,7 @@ async function renderPantry() {
   app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="text-btn" id="p-select">${INV.sel ? "Cancel" : "Select"}</button><button class="round-btn" id="p-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
     `<h1 class="title">Inventory</h1>
     <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button></div>
-    <div id="pantry">${loading()}</div><div class="sel-bar" id="inv-bar" hidden></div>`;
+    <div id="inv-items">${loading()}</div><div class="sel-bar" id="inv-bar" hidden></div>`;
   bindTopbar();
   $("#p-select").onclick = () => { INV.sel = INV.sel ? null : new Set(); state.invKeepSel = true; renderPantry(); };
   $("#p-scan").onclick = () => startStockUp(renderPantry);
@@ -1326,8 +1344,8 @@ async function renderPantry() {
   $("#btn-addp").onclick = () => openAddPantry(renderPantry);
   $$("#inv-view [data-v]").forEach((b) => (b.onclick = () => { try { localStorage.setItem("tp.invView", b.dataset.v); } catch (_) {} renderPantry(); }));
   let items;
-  try { items = (await api("GET", "/api/pantry")).items; } catch (e) { if ($("#pantry")) $("#pantry").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
-  if (!$("#pantry")) return;   // navigated away while loading
+  try { items = (await api("GET", "/api/pantry")).items; } catch (e) { if ($("#inv-items")) $("#inv-items").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  if (!$("#inv-items")) return;   // navigated away while loading
   const f = state.pantryFilter;
   const counts = { all: items.length, fridge: 0, freezer: 0, pantry: 0 };
   items.forEach((i) => counts[i.location]++);
@@ -1353,9 +1371,9 @@ async function renderPantry() {
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
   }
-  $("#pantry").innerHTML = html;
+  $("#inv-items").innerHTML = html;
   $$("[data-f]").forEach((b) => (b.onclick = () => { state.pantryFilter = b.dataset.f; renderPantry(); }));
-  $$("#pantry [data-id]").forEach((b) => (b.onclick = () => {
+  $$("#inv-items [data-id]").forEach((b) => (b.onclick = () => {
     const it = items.find((i) => String(i.id) === b.dataset.id);
     if (!INV.sel) return openPantryItem(it, renderPantry);
     INV.sel.has(it.id) ? INV.sel.delete(it.id) : INV.sel.add(it.id);
@@ -1726,6 +1744,8 @@ async function openSettings() {
         <button class="row" data-sec="notify"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Notifications</div><div class="b">${Object.entries(c.channels || {}).filter(([, v]) => v).map(([k]) => esc(cap(CH_LABEL[k] || k))).join(", ") || "Not set up · Telegram, ntfy or email"}</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="password"><span class="ic bg-gray" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("open")}</span><div class="main"><div class="a">Password</div><div class="b">${c.auth_required ? "On" : "Off (anyone on your Wi-Fi)"}</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
+      <div class="group-label">Appearance</div>
+      <div class="group"><div class="field"><label>Theme<small class="lh">Saved on this device. “System” follows your phone or computer.</small></label><select id="st-theme">${[["system", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<option value="${v}" ${currentTheme() === v ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
       <div class="group-label">Cooking</div>
       <div class="group">
         <div class="field"><label>Recipe style</label><select id="st-style"><option value="classic" ${s.recipe_style !== "steps" ? "selected" : ""}>Classic</option><option value="steps" ${s.recipe_style === "steps" ? "selected" : ""}>Step-by-step</option></select></div>
@@ -1809,6 +1829,7 @@ async function openSettings() {
     $("#st-hz").onchange = async (e) => { await save({ plan_horizon_days: +e.target.value }); if (state.tab === "meals") replan(); };
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $("#st-stores").onclick = () => storesManager(draw);
+    $("#st-theme").onchange = (e) => { setTheme(e.target.value); save({ theme: e.target.value }); };
     bindDanger();
     $("#st-cats").onclick = () => categoriesManager(draw);
     $("#st-staples").onclick = () => staplesManager(draw);
@@ -2207,6 +2228,8 @@ function openUpdateHelp() {
   if (!sess.setup_complete) return runWizard(() => location.reload());
   try { state.cfg = await api("GET", "/api/config"); }
   catch (e) { app.innerHTML = `<h1 class="title">TablePlan</h1><div class="banner">${esc(e.message)}</div>`; return; }
+  applyTheme(currentTheme());
+  matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => applyTheme(currentTheme()));
   checkUpdate(); setInterval(checkUpdate, 3600e3);
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ai: a }; }).catch(() => {});
   route();
