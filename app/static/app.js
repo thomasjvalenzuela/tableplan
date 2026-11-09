@@ -1789,6 +1789,9 @@ async function openSettings() {
         <button class="row" id="st-wn"><div class="main"><div class="a">What's new</div><div class="b">Everything added recently</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
+      ${c.backend === "native" ? `<div class="group-label danger-label">Danger zone</div>
+      <div class="group danger-zone" id="st-danger">${DANGER.map(([k, l, d]) => `<button class="row" data-reset="${k}"><div class="main"><div class="a">${k === "everything" ? "Reset everything" : k === "demo" ? "Wipe demo data" : `Reset ${esc(l.toLowerCase())}`}</div><div class="b">${esc(d)}</div></div><span class="chev">${ic("chevR")}</span></button><div class="danger-confirm" data-for="${k}" hidden></div>`).join("")}</div>
+      <p class="hint">A backup is saved first every time, under Settings → Backups.</p>` : ""}
       <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server<span class="desktop-only"><br><a ${extLink(c.repo_url) || extLink(REPO)} style="color:var(--sub)">Source code (AGPL-3.0)</a></span></p>`;
     $$("#st-types .tag").forEach((b) => (b.onclick = async () => { const t = b.dataset.t; const mt = s.meal_types.includes(t) ? s.meal_types.filter((x) => x !== t) : [...s.meal_types, t]; if (!mt.length) return; await save({ meal_types: mt }); b.classList.toggle("on"); }));
     $("#st-nr").onchange = (e) => save({ no_repeat_days: +e.target.value || 0 });
@@ -1806,6 +1809,7 @@ async function openSettings() {
     $("#st-hz").onchange = async (e) => { await save({ plan_horizon_days: +e.target.value }); if (state.tab === "meals") replan(); };
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $("#st-stores").onclick = () => storesManager(draw);
+    bindDanger();
     $("#st-cats").onclick = () => categoriesManager(draw);
     $("#st-staples").onclick = () => staplesManager(draw);
     $("#st-foods") && ($("#st-foods").onclick = () => foodsManager(draw));
@@ -1975,6 +1979,38 @@ function staplesManager(back) {
     $("#sp-add").onsubmit = (e) => { e.preventDefault(); const v = $("#sp-new").value.trim(); if (v) alwaysHave(v, draw); };
   };
   draw();
+}
+
+// ---------- Settings → Danger zone: type the section's name to confirm; the server backs up first
+const DANGER = [["inventory", "Inventory", "Every inventory item, its history and photos"],
+  ["recipes", "Recipes", "All recipes, their photos and notes, and the meals planned with them"],
+  ["plan", "Meal plan", "Every planned meal (the list drops what they needed)"],
+  ["list", "Shopping list", "Everything on the shopping list (stores are kept)"],
+  ["trips", "Grocery trips", "Logged trips, receipts and prices"],
+  ["diary", "Cooking diary", "Every diary entry, rating and photo"],
+  ["demo", "Demo data", "Only the sample recipes and items, if any"],
+  ["everything", "Everything", "All of the above. Settings, stores and foods stay"]];
+function bindDanger() {
+  $$("#st-danger [data-reset]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.reset, label = DANGER.find((x) => x[0] === k)[1];
+    const box = $(`#st-danger [data-for="${k}"]`);
+    if (!box.hidden) { box.hidden = true; return; }
+    $$("#st-danger .danger-confirm").forEach((x) => { x.hidden = true; });
+    box.hidden = false;
+    box.innerHTML = `<form class="danger-f"><label>Type <b>${esc(label)}</b> to confirm</label><input autocomplete="off" aria-label="Type ${esc(label)} to confirm"><button class="btn red small" type="submit" disabled>${k === "everything" ? "Reset everything" : `Reset ${esc(label.toLowerCase())}`}</button></form>`;
+    const inp = $("input", box), go = $("button", box);
+    inp.focus();
+    inp.oninput = () => { go.disabled = inp.value.trim().toLowerCase() !== label.toLowerCase(); };
+    $("form", box).onsubmit = async (e) => {
+      e.preventDefault(); if (go.disabled) return;
+      go.disabled = true; go.textContent = "Backing up…";
+      try {
+        const r = await api("POST", `/api/reset/${enc(k)}`, { confirm: inp.value.trim() });
+        box.innerHTML = `<div class="wstatus ok"><b>Done.</b><span>Backup saved as ${esc(r.backup)} (Settings → Backups).</span></div>`;
+        toast(`${label} reset · backup saved`);
+      } catch (x) { fail(x); go.disabled = false; go.textContent = "Try again"; }
+    };
+  }));
 }
 
 // ---------- Settings → Categories (add, rename everywhere, delete with Undo, reorder; every change saves right away)

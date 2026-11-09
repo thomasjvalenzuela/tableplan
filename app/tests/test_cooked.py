@@ -462,3 +462,61 @@ class PantryBulk(unittest.TestCase):
         S.pantry_bulk({"ids": self.ids[:1], "action": "delete"})
         S.pantry_bulk({"ids": self.ids[:1], "action": "purge"})
         self.assertNotIn(self.ids[0], self.rows())
+
+
+class DangerZone(unittest.TestCase):
+    def setUp(self):
+        with S.db() as c:
+            for t in ("meal_plans", "shopping_items", "pantry_items", "allocations", "diary", "trips", "purchases"):
+                c.execute(f"DELETE FROM {t}")
+        self.slug, self.rid = new_recipe(f"Reset Me {id(self)}", 2, ["1 cup rice", "2 eggs"])
+        S.plan_assign({"date": day(1), "recipe_id": self.rid})
+        S.list_add({"items": ["paper towels"]})
+        with S.db() as c:
+            S.add_pantry_item(c, "Eggs", "fridge", None, "", None, 12, "")
+            S.sync_plan_list(c)
+        S.recipe_cooked(self.slug, {})
+        S.trip_record_scans({"pantry_item_ids": [self.pid()], "store_name": "Aldi"})
+
+    def pid(self):
+        with S.db() as c:
+            return c.execute("SELECT id FROM pantry_items LIMIT 1").fetchone()[0]
+
+    def count(self, table, where="1=1"):
+        with S.db() as c:
+            return c.execute(f"SELECT count(*) FROM {table} WHERE {where}").fetchone()[0]
+
+    def test_confirm_required_and_backup_made(self):
+        with self.assertRaises(S.ApiError) as cm:
+            S.danger_reset("inventory", {"confirm": "inv"})
+        self.assertEqual(cm.exception.status, 400)
+        with self.assertRaises(S.ApiError):
+            S.danger_reset("nope", {"confirm": "x"})
+        out = S.danger_reset("inventory", {"confirm": " inventory "})
+        self.assertTrue(os.path.isfile(out["backup_path"]))
+        self.assertTrue(out["backup"].startswith("pre-reset-inventory-"))
+        self.assertEqual((self.count("pantry_items"), self.count("allocations")), (0, 0))
+        self.assertEqual(self.count("meal_plans"), 1)   # other sections untouched
+
+    def test_each_section(self):
+        S.danger_reset("plan", {"confirm": "Meal plan"})
+        self.assertEqual((self.count("meal_plans"), self.count("allocations")), (0, 0))
+        self.assertEqual([i["text"] for i in S.ongoing_list()["items"]], ["paper towels"])   # planned lines went with the plan
+        S.danger_reset("list", {"confirm": "Shopping list"})
+        self.assertEqual(self.count("shopping_items"), 0)
+        S.danger_reset("trips", {"confirm": "Grocery trips"})
+        self.assertEqual((self.count("trips"), self.count("purchases")), (0, 0))
+        S.danger_reset("diary", {"confirm": "Cooking diary"})
+        self.assertEqual(self.count("diary"), 0)
+        S.danger_reset("demo", {"confirm": "Demo data"})
+        self.assertGreater(self.count("recipes"), 0)
+        S.danger_reset("recipes", {"confirm": "Recipes"})
+        self.assertEqual(self.count("recipes"), 0)
+        self.assertEqual(self.count("pantry_items"), 1)
+
+    def test_everything(self):
+        S.danger_reset("everything", {"confirm": "Everything"})
+        for t in ("recipes", "meal_plans", "shopping_items", "pantry_items", "allocations", "diary", "trips", "purchases"):
+            self.assertEqual(self.count(t), 0, t)
+        self.assertGreater(self.count("stores"), 0)
+        self.assertGreater(self.count("foods"), 0)

@@ -1,5 +1,13 @@
 [
  {
+  "id": "danger-zone",
+  "date": "2026-11-10",
+  "icon": "trash",
+  "color": "red",
+  "title": "Start a section over",
+  "text": "Settings → Danger zone resets your inventory, recipes, plan, list, trips or diary, always after saving a backup first."
+ },
+ {
   "id": "inventory-select",
   "date": "2026-11-10",
   "icon": "check",

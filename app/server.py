@@ -7130,6 +7130,89 @@ def make_backup():
     return _backup_info(name)
 
 
+# ============================================================ Settings → Danger zone (resets, each after a backup)
+
+RESET_SECTIONS = {   # key: label the user must type
+    "inventory": "Inventory", "recipes": "Recipes", "plan": "Meal plan", "list": "Shopping list",
+    "trips": "Grocery trips", "diary": "Cooking diary", "demo": "Demo data", "everything": "Everything",
+}
+
+
+def _reset_backup(section):
+    """A backup taken right before a reset, kept apart from the daily ones (the last 5 are kept)."""
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    name = f"pre-reset-{section}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+    with _backup_lock:
+        _snapshot(os.path.join(BACKUP_DIR, name))
+        old = sorted(n for n in os.listdir(BACKUP_DIR) if n.startswith("pre-reset-") and n.endswith(".db"))
+        for n in old[:-5]:
+            try:
+                os.remove(os.path.join(BACKUP_DIR, n))
+            except OSError:
+                pass
+    return name
+
+
+def _reset_rows(c, section):
+    """Delete one section's rows (and what depends on them) inside the caller's transaction. Returns counts and
+    folders to remove once the transaction has committed."""
+    n, dirs = {}, []
+    dele = lambda table, where="1=1", args=(): n.__setitem__(table, n.get(table, 0) + c.execute(f"DELETE FROM {table} WHERE {where}", args).rowcount)  # noqa: E731
+    if section in ("inventory", "everything"):
+        dele("allocations"); dele("pantry_events"); dele("pantry_items")
+        dirs.append(os.path.join(IMG_DIR, "pantry"))
+    if section in ("plan", "everything"):
+        dele("allocations"); dele("meal_plans")
+    if section in ("list", "everything"):
+        dele("shopping_items")
+    if section in ("trips", "everything"):
+        dele("purchases"); dele("trips")
+        dirs.append(os.path.join(IMG_DIR, "trips"))
+    if section in ("diary", "everything"):
+        dele("diary")
+        dirs.append(os.path.join(IMG_DIR, "diary"))
+    if section in ("recipes", "demo", "everything"):
+        if section == "demo":
+            ids = [r["id"] for r in c.execute("SELECT id, data FROM recipes")
+                   if (json.loads(r["data"] or "{}").get("extras") or {}).get("demo")]
+        else:
+            ids = [r["id"] for r in c.execute("SELECT id FROM recipes")]
+        for rid in ids:
+            for table, col in (("diary", "recipe_id"), ("guided_cache", "recipe_id"), ("recipe_cache", "id"),
+                               ("favorites", "recipe_id"), ("aliases", "recipe_id"), ("recipes", "id")):
+                dele(table, f"{col}=?", (rid,))
+            for e in c.execute("SELECT id FROM meal_plans WHERE recipe_id=?", (rid,)).fetchall():
+                dele("allocations", "plan_entry_id=?", (e["id"],))
+            dele("meal_plans", "recipe_id=?", (rid,))
+            for lst in n_lists.list_lists(c):   # list lines added from this recipe outside the plan
+                n_lists.remove_recipe_items(c, lst["id"], rid)
+            if UUID_RE.fullmatch(rid):
+                dirs.append(os.path.join(IMG_DIR, rid))
+        n["recipes_removed"] = len(ids)
+        if section == "demo":
+            dele("pantry_items", "product='Demo'")
+    return n, dirs
+
+
+def danger_reset(section, b):
+    """POST /api/reset/{section} {confirm}: back up, then clear one part of TablePlan in one transaction."""
+    require_native()
+    if section not in RESET_SECTIONS:
+        raise ApiError(404, "Unknown section")
+    label = RESET_SECTIONS[section]
+    if " ".join(_s(b.get("confirm"), 40).split()).lower() != label.lower():
+        raise ApiError(400, f"Type {label} to confirm.")
+    backup = _reset_backup(section)
+    with db() as c:
+        counts, dirs = _reset_rows(c, section)
+        sync_plan_list(c)
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    _recipe_cache["at"] = 0
+    log(f"reset {section}: " + ", ".join(f"{k} {v}" for k, v in counts.items()) + f"; backup {backup}")
+    return {"ok": True, "section": section, "backup": backup, "backup_path": os.path.join(BACKUP_DIR, backup), "removed": counts}
+
+
 def backup_path(name):
     """Path of an existing backup, or 404. Only plain names inside the backups folder are accepted."""
     if not isinstance(name, str) or not BACKUP_NAME_RE.fullmatch(name):
@@ -7956,6 +8039,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, b"", "image/jpeg", {"Cache-Control": "no-cache"})
             with open(os.path.join(IMG_DIR, "diary", fn), "rb") as f:
                 return self.send(200, f.read(), mimetypes.guess_type(fn)[0] or "image/jpeg", {"Cache-Control": "private, max-age=86400"})
+        mm = re.fullmatch(r"/api/reset/([a-z]{2,12})", path)
+        if m == "POST" and mm:
+            self.require_admin()
+            return self.send(200, danger_reset(mm.group(1), self.body()))
         if m == "POST" and path == "/api/staples/add":
             return self.send(200, staples_add(self.body()))
         if m == "POST" and path == "/api/staples/remove":
@@ -8245,6 +8332,12 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             out.update(mealie_ok=False, error=e.message, week=[], lists=[], list_count=0, recipe_count=0)
         return out
+
+    def require_admin(self):
+        """Resets and member management are for the household admin once accounts exist (always allowed before)."""
+        user = getattr(self, "user", None)
+        if user is not None and not user.get("admin"):
+            raise ApiError(403, "Only the household admin can do that.")
 
     def patch_item(self, it, b):
         """PATCH /api/list/items/{id}: store_id (remembered per food), text, checked (the bought / undo flow)."""
