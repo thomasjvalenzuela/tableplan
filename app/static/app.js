@@ -147,7 +147,7 @@ function closeSheet(instant) {
 const sheetBody = () => $("#layer .sheet-body");
 
 // ------------------------------------------------------------------ tabs / router
-const TABS = [["home", "Home", "home"], ["recipes", "Recipes", "book"], ["meals", "Plan", "cal"], ["list", "Shopping", "cart"], ["pantry", "Pantry", "box"]];
+const TABS = [["home", "Home", "home"], ["recipes", "Recipes", "book"], ["meals", "Plan", "cal"], ["list", "Shopping", "cart"], ["pantry", "Inventory", "box"]];
 const REPO = "https://github.com/thomasjvalenzuela/tableplan";
 function renderTabs() {
   const v = state.cfg?.version || "";
@@ -250,7 +250,7 @@ async function renderHome() {
     `<button class="chip" data-go="${t}"><span class="dot ${c}">${ic(i)}</span><span>${esc(a)}<small>${esc(b)}</small></span></button>`).join("")}</div>`;
   if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie" style="width:100%;text-align:left">${esc(s.error)}</button>`;
   html += zoomNudge();
-  if (s.pantry_checkin?.due) html += `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Time for a pantry check-in</b><small>${s.pantry_checkin.last ? `Last checked ${esc(s.pantry_checkin.days_since)} days ago.` : "Takes a minute."} Confirm what's still in the fridge and pantry so plans and lists stay accurate.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+  if (s.pantry_checkin?.due) html += `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Time for an inventory check-in</b><small>${s.pantry_checkin.last ? `Last checked ${esc(s.pantry_checkin.days_since)} days ago.` : "Takes a minute."} Confirm what's still in the fridge and pantry so plans and lists stay accurate.</small></span><span class="chev">${ic("chevR")}</span></button>`;
 
   // Tonight hero
   html += `<div class="section-h"><h2>Tonight</h2></div>`;
@@ -296,7 +296,7 @@ async function renderHome() {
     <button class="tile" id="qa-import"><span class="ic bg-purple">${ic("camera")}</span><span><div class="t-title">Add Recipe</div><div class="t-sub">Screenshot or link</div></span></button>
     <button class="tile" id="qa-plan"><span class="ic bg-orange">${ic("sparkle")}</span><span><div class="t-title">Plan My Meals</div><div class="t-sub">Week or month</div></span></button>
     <button class="tile" id="qa-list"><span class="ic bg-blue">${ic("mail")}</span><span><div class="t-title">Send List</div><div class="t-sub">Telegram, email or print</div></span></button>
-    <button class="tile" id="qa-pantry"><span class="ic bg-green">${ic("scan")}</span><span><div class="t-title">Scan to Pantry</div><div class="t-sub">Barcode or type it in</div></span></button>
+    <button class="tile" id="qa-pantry"><span class="ic bg-green">${ic("scan")}</span><span><div class="t-title">Stock Up</div><div class="t-sub">Barcode or type it in</div></span></button>
   </div>`;
 
   app.querySelector(".spinner").outerHTML = html;
@@ -312,7 +312,7 @@ async function renderHome() {
   $("#qa-import").onclick = openAddRecipe;
   $("#qa-plan").onclick = () => openGenerate();
   $("#qa-list").onclick = async () => { const l = s.lists[0]; if (!l) return toast("No shopping list yet"); openShare("list", { id: l.id, name: l.name }); };
-  $("#qa-pantry").onclick = () => openScanner(renderHome);
+  $("#qa-pantry").onclick = () => startStockUp(renderHome);
 }
 const entryName = (e) => (e.recipe && e.recipe.name) || e.title || "Note";
 function relExpiry(it) {
@@ -1216,19 +1216,40 @@ async function saveStores(list) {
   return out.slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 }
 
-// ------------------------------------------------------------------ PANTRY
+// ------------------------------------------------------------------ INVENTORY (the "pantry" route): list or slot grid
+const isPhone = () => matchMedia("(max-width: 700px)").matches;
+const invView = () => { try { return localStorage.getItem("tp.invView") || (isPhone() ? "grid" : "list"); } catch (_) { return "list"; } };
+function stackText(it) {
+  if (it.qty != null) return it.unit ? (it.left_text || "").replace(/ left$/, "") : `×${+(+it.qty).toFixed(2)}`;
+  return "";
+}
+function durability(it) {
+  const left = Math.max(0, Math.min(1, +it.amount_left || 0));
+  const exp = it.days_left != null && it.days_left <= 1;
+  const color = exp || left <= 0.25 ? "var(--red)" : left <= 0.5 || (it.days_left != null && it.days_left <= 3) ? "var(--orange)" : "var(--green)";
+  return `<span class="dura" aria-hidden="true"><i style="width:${Math.round(left * 100)}%;background:${color}"></i></span>`;
+}
+function slotHtml(it) {
+  const st = stackText(it);
+  return `<button class="slot" data-id="${esc(it.id)}" aria-label="${esc(it.name)}${st ? `, ${esc(st)}` : ""}${it.days_left != null ? `, ${esc(relExpiry(it))}` : ""}">
+    ${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span class="slot-emo">${esc(it.emoji || "🥫")}</span>`}
+    ${st ? `<b class="stack">${esc(st)}</b>` : ""}${durability(it)}<span class="slot-name">${esc(it.name)}</span></button>`;
+}
 async function renderPantry() {
-  app.innerHTML = topbar(`<button class="round-btn" id="btn-share" aria-label="Share">${ic("share")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
-    `<h1 class="title">Pantry</h1>
-    <div class="toolbar"><button class="pill-btn" id="p-scan">${ic("scan")} Scan barcodes</button><button class="pill-btn" id="p-ci">${ic("check")} Check-in</button></div>
+  const view = invView();
+  app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="round-btn" id="btn-share" aria-label="Share">${ic("share")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
+    `<h1 class="title">Inventory</h1>
+    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button><button class="pill-btn" id="p-ci">${ic("check")} Check-in</button></div>
     <div id="pantry">${loading()}</div>`;
   bindTopbar();
-  $("#p-scan").onclick = () => openScanner(renderPantry);
+  $("#p-scan").onclick = () => startStockUp(renderPantry);
   $("#p-ci").onclick = () => openCheckin(renderPantry);
   $("#btn-addp").onclick = () => openAddPantry(renderPantry);
   $("#btn-share").onclick = () => openShare("pantry", {});
+  $$("#inv-view [data-v]").forEach((b) => (b.onclick = () => { try { localStorage.setItem("tp.invView", b.dataset.v); } catch (_) {} renderPantry(); }));
   let items;
-  try { items = (await api("GET", "/api/pantry")).items; } catch (e) { $("#pantry").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  try { items = (await api("GET", "/api/pantry")).items; } catch (e) { if ($("#pantry")) $("#pantry").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  if (!$("#pantry")) return;   // navigated away while loading
   const f = state.pantryFilter;
   const counts = { all: items.length, fridge: 0, freezer: 0, pantry: 0 };
   items.forEach((i) => counts[i.location]++);
@@ -1238,19 +1259,25 @@ async function renderPantry() {
     <div class="seg">${[["all", "All"], ["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([k, l]) =>
       `<button data-f="${k}" class="${f === k ? "on" : ""}">${l}${counts[k] ? ` ${counts[k]}` : ""}</button>`).join("")}</div>`;
   if (!shown.length) {
-    html += `<div class="empty"><div class="em">🥬</div>${items.length ? "Nothing here." : "Your pantry is empty.<br>Check items off your shopping list and they'll show up here with use-by dates."}</div>`;
+    html += `<div class="empty"><div class="em">🥬</div>${items.length ? "Nothing here." : "Your inventory is empty.<br>Scan what you have, or check items off your shopping list and they'll show up here with use-by dates."}</div>`;
+  } else if (view === "grid") {
+    const hot = shown.filter((i) => i.days_left != null).sort((a, b) => a.days_left - b.days_left).slice(0, 9);
+    if (hot.length >= 3) html += `<div class="hotbar-h">Use soonest</div><div class="hotbar">${hot.map(slotHtml).join("")}</div>`;
+    for (const [k, l] of [["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]]) {
+      const its = shown.filter((i) => i.location === k);
+      if (its.length) html += `<div class="slots-h">${esc(l)} <span>${its.length}</span></div><div class="slots">${its.map(slotHtml).join("")}</div>`;
+    }
   } else {
     html += `<div class="group" style="margin-top:12px">${shown.map((it) => {
-      const [i, c] = locIcon[it.location] || locIcon.fridge;
       const left = Math.round(it.amount_left * 100);
-      return `<button class="row" data-id="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🥫")}</span>
-        <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
+      return `<button class="row" data-id="${esc(it.id)}">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
+        <div class="main"><div class="a">${esc(it.name)}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
   }
   $("#pantry").innerHTML = html;
   $$("[data-f]").forEach((b) => (b.onclick = () => { state.pantryFilter = b.dataset.f; renderPantry(); }));
-  $$("#pantry .row[data-id]").forEach((b) => (b.onclick = () => openPantryItem(items.find((i) => String(i.id) === b.dataset.id), renderPantry)));
+  $$("#pantry [data-id]").forEach((b) => (b.onclick = () => openPantryItem(items.find((i) => String(i.id) === b.dataset.id), renderPantry)));
 }
 
 const PANTRY_UNITS = [["", "count"], ["tsp", "tsp"], ["tbsp", "tbsp"], ["cup", "cup"], ["fl oz", "fl oz"], ["pint", "pint"],
@@ -1343,7 +1370,7 @@ function pickRule(it, cb) {
 
 function openAddPantry(after) {
   const f = { name: "", location: "", package_date: "", quantity_text: "" };
-  openSheet("Add to Pantry", `
+  openSheet("Add to Inventory", `
     <div class="group"><div class="field"><input class="full" type="text" id="ap-name" placeholder="Item (e.g. Heavy cream)" autocomplete="off"></div>
       <div class="field"><input class="full" type="text" id="ap-qty" placeholder="Size (optional, e.g. 1 pint)"></div></div>
     <p class="hint" id="ap-match">Shelf life is looked up automatically.</p>
@@ -1550,7 +1577,7 @@ function openShare(kind, o) {
       ["cal", "Add to calendar (.ics)", `/export/plan.ics?${q}`], ["file", "Spreadsheet (CSV)", `/export/plan.csv?${q}`]];
     if (navigator.share) items.unshift(["share", "Send via…", () => shareText(`/export/plan.txt?${q}`, "Meal plan")]);
   } else if (kind === "pantry") {
-    title = "Pantry";
+    title = "Inventory";
     items = [...sendItems({ kind: "pantry" }), ["print", "Print", () => printIt("/print/pantry")], ["file", "Spreadsheet (CSV)", "/export/pantry.csv"]];
   }
   openSheet(title, `<div class="share-grid">${items.map(([i, l, a], n) =>
@@ -1610,10 +1637,10 @@ async function openSettings() {
 
       <div class="group-label">Recipes</div>
       <div class="group"><button class="row" id="st-cats"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Categories</div><div class="b">${esc((s.categories || []).slice(0, 4).join(", "))}${(s.categories || []).length > 4 ? "…" : ""}</div></div><span class="chev">${ic("chevR")}</span></button>
-        ${c.backend === "native" ? `<button class="row" id="st-foods"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("leaf")}</span><div class="main"><div class="a">Foods</div><div class="b">One name per food, so recipes, list and pantry match</div></div><span class="chev">${ic("chevR")}</span></button>` : ""}</div>
+        ${c.backend === "native" ? `<button class="row" id="st-foods"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("leaf")}</span><div class="main"><div class="a">Foods</div><div class="b">One name per food, so recipes, list and inventory match</div></div><span class="chev">${ic("chevR")}</span></button>` : ""}</div>
       <div class="group-label">Shopping</div>
       <div class="group"><button class="row" id="st-stores"><span class="ic bg-teal" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("store")}</span><div class="main"><div class="a">Stores</div><div class="b" id="st-stores-b">Rename, reorder or remove the stores on your list</div></div><span class="chev">${ic("chevR")}</span></button></div>
-      <div class="group-label">Pantry</div>
+      <div class="group-label">Inventory</div>
       <div class="group">
         <div class="field"><label>Check-in reminder</label><select id="st-ci">${[[0, "Off"], [7, "Weekly"], [14, "Every 2 weeks"], [30, "Monthly"]].map(([v, l]) => `<option value="${v}" ${+s.pantry_check_days === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       </div>
@@ -1639,6 +1666,7 @@ async function openSettings() {
       <div class="group">
         ${c.backend === "native" ? `<button class="row" id="st-mimport"><div class="main"><div class="a">Import from Mealie</div><div class="b">Copy recipes, photos, plans and lists from an old Mealie</div></div><span class="chev">${ic("chevR")}</span></button>` : `<a class="row" ${extLink(c.mealie_url)} style="text-decoration:none"><div class="main"><div class="a">Mealie admin</div><div class="b">Not needed day to day. TablePlan handles everything.</div></div><span class="chev">${ic("ext")}</span></a>`}
         <button class="row" id="st-wizard"><div class="main"><div class="a">Run setup wizard again</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-wn"><div class="main"><div class="a">What's new</div><div class="b">Everything added recently</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
       <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server<span class="desktop-only"><br><a ${extLink(c.repo_url) || extLink(REPO)} style="color:var(--sub)">Source code (AGPL-3.0)</a></span></p>`;
@@ -1668,6 +1696,7 @@ async function openSettings() {
     $$("[data-sec]").forEach((b) => (b.onclick = () => openSetupSection(b.dataset.sec, titles[b.dataset.sec], reloadCfg)));
     $("#st-mimport") && ($("#st-mimport").onclick = () => openMealieImport());
     $("#st-share").onclick = () => openShareSetup();
+    $("#st-wn").onclick = () => openWhatsNewAll(draw);
     $("#st-wizard").onclick = () => { closeSheet(true); runWizard(() => location.reload()); };
     $("#st-logout") && ($("#st-logout").onclick = async () => { await api("POST", "/api/logout"); location.reload(); });
     $("#st-up") && ($("#st-up").onclick = () => openUpdateHelp());
@@ -1747,7 +1776,7 @@ function foodsManager(back) {
       <div class="search">${ic("search")}<input id="fm-q" type="search" placeholder="Search foods" autocomplete="off" value="${esc(F.q)}"></div>
       <div class="pk-tools"><span class="muted small" id="fm-n"></span><span class="grow"></span><button class="link-btn" id="fm-merge" aria-pressed="false">Merge duplicates</button></div>
       <div id="fm-list">${loading()}</div><div class="pk-bar" id="fm-bar" hidden></div>
-      <p class="hint">Every ingredient, list item and pantry item points at one of these foods, so “Morton iodized salt” and “table salt” match while sea salt stays separate.</p>`;
+      <p class="hint">Every ingredient, list item and inventory item points at one of these foods, so “Morton iodized salt” and “table salt” match while sea salt stays separate.</p>`;
     $("#fm-back").onclick = back;
     let t;
     $("#fm-q").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { F.q = e.target.value; load(); }, 200); };
@@ -1865,7 +1894,7 @@ function fmtWhen(isoTs) {
   return days === 0 ? `today ${t}` : days === 1 ? `yesterday ${t}` : fmt(d, { month: "short", day: "numeric" }) + ` ${t}`;
 }
 function backupSummary(st) {
-  if (!st || st.backups == null && !st.last_backup) return "Daily backups of your recipes, plans and pantry";
+  if (!st || st.backups == null && !st.last_backup) return "Daily backups of your recipes, plans and inventory";
   const parts = [st.last_backup ? `Last ${fmtWhen(st.last_backup)}` : "No backup yet", st.backups != null ? `${st.backups} kept` : ""];
   if (st.integrity && st.integrity !== "ok") parts.push("database check failed");
   if (st.persistent === false) parts.push("not on a persistent volume");
@@ -1986,7 +2015,7 @@ function openUpdateHelp() {
   const steps = zima ? [
     ["Open ZimaOS", "On any computer, go to your ZimaOS dashboard."],
     ["Open the App Store", "TablePlan shows an <b>Update</b> button there once ZimaOS checks the store (refresh the page if you don't see it yet)."],
-    ["Tap Update", "Your recipes, plans and pantry are kept. TablePlan restarts in about a minute."]]
+    ["Tap Update", "Your recipes, plans and inventory are kept. TablePlan restarts in about a minute."]]
     : [["Update TablePlan", esc(u.how || "Pull the new image and restart the container.")], ["That's it", "Your data lives in the data volume and is kept."]];
   openSheet("Update TablePlan", `<div class="whatsnew"><ul>${steps.map(([t, d], n) => `<li><span class="ic bg-blue">${n + 1}</span><span><b>${t}</b><span>${d}</span></span></li>`).join("")}</ul></div>
     ${u.notes ? `<p class="hint"><b>What's new:</b> ${esc(u.notes)}</p>` : ""}

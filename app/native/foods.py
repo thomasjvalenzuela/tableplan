@@ -47,6 +47,19 @@ KNOWN_BRANDS = set("""morton diamond kraft heinz hunt's hunts campbell's campbel
 ragu prego o'lakes tillamook kerrygold philadelphia chobani fage dannon yoplait hormel tyson perdue domino pillsbury
 mccormick goya dole stouffer's lipton folgers maxwell starbucks quaker nabisco ritz kroger safeway kirkland""".split())
 
+# Store brands (several words) that never change what the food is.
+STORE_BRANDS = ["kirkland signature", "great value", "simply nature", "friendly farms", "happy farms", "trader joe's",
+                "trader joes", "365 by whole foods market", "whole foods market", "365 everyday value", "good & gather",
+                "good and gather", "market pantry", "signature select", "signature farms", "member's mark", "members mark",
+                "o organics", "simple truth organic", "simple truth", "private selection", "archer farms", "up & up",
+                "specially selected", "baker's corner", "countryside creamery", "l'oven fresh", "sam's choice",
+                "marketside", "freshness guaranteed", "hill country fare", "h-e-b", "heb", "publix", "wegmans", "food lion",
+                "meijer", "true goodness", "lucerne", "open nature", "nature's promise", "great value organic",
+                "fit & active", "never any", "kroger", "aldi", "costco", "walmart", "target", "safeway", "albertsons",
+                "stop & shop", "giant eagle", "harris teeter", "hy-vee", "365"]
+_STORE_BRAND_RE = re.compile(r"(?<![a-z0-9])(" + "|".join(re.escape(b) for b in sorted(STORE_BRANDS, key=len, reverse=True))
+                             + r")(?![a-z0-9])")
+
 # Same food, different words (normalised keys on both sides).
 SYNONYMS = {
     "salt": "table salt", "iodized salt": "table salt", "fine salt": "table salt", "table salt": "table salt",
@@ -96,6 +109,7 @@ def normalize(text, brand=""):
     t = (text or "").lower()
     t = t.replace("&amp;", "&").replace("’", "'")
     t = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", t)
+    t = _STORE_BRAND_RE.sub(" ", t)
     # "Salt, table" / "Cheese, shredded": a short qualifier after the comma goes first
     if "," in t:
         head, _, tail = t.partition(",")

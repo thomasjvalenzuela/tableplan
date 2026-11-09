@@ -1,0 +1,162 @@
+[
+ {
+  "id": "inventory-grid",
+  "date": "2026-11-09",
+  "icon": "box",
+  "color": "green",
+  "title": "Inventory, with a grid view",
+  "text": "The Pantry tab is now Inventory, with a slot grid that shows how much is left and what to use first."
+ },
+ {
+  "id": "stock-up-methods",
+  "date": "2026-11-09",
+  "icon": "scan",
+  "color": "blue",
+  "title": "Stock up your way",
+  "text": "Choose scanner, camera or type it in, and pick the fridge, freezer or pantry before you start."
+ },
+ {
+  "id": "barcode-inventory",
+  "date": "2026-11-09",
+  "icon": "scan",
+  "color": "indigo",
+  "title": "Barcode scanning",
+  "text": "Scan with your camera or a USB/Bluetooth scanner: each item lands in your inventory with its size and brand, and gets ticked off your list."
+ },
+ {
+  "id": "produce-codes",
+  "date": "2026-11-09",
+  "icon": "leaf",
+  "color": "green",
+  "title": "Produce stickers and store brands",
+  "text": "Type the number on a fruit sticker (4011 is bananas), and store brands like Great Value or Kirkland match the right food."
+ },
+ {
+  "id": "canonical-foods",
+  "date": "2026-11-09",
+  "icon": "leaf",
+  "color": "teal",
+  "title": "One name per food",
+  "text": "Recipes, your list and your inventory now agree on what each food is, and you can merge duplicates in Settings → Foods."
+ },
+ {
+  "id": "clean-ingredients",
+  "date": "2026-11-08",
+  "icon": "list",
+  "color": "purple",
+  "title": "Cleaner recipes",
+  "text": "Recipe names use proper title case, and ingredients show the food first with the amount underneath, even for a pinch or “to taste”."
+ },
+ {
+  "id": "reword-ai",
+  "date": "2026-11-08",
+  "icon": "sparkle",
+  "color": "indigo",
+  "title": "Reword with AI",
+  "text": "Make a recipe's steps clearer in one tap, without changing amounts, and switch back to the original whenever you like."
+ },
+ {
+  "id": "categories",
+  "date": "2026-11-08",
+  "icon": "book",
+  "color": "orange",
+  "title": "Recipe categories",
+  "text": "Sort recipes into categories like Main dish or Soup, filter by them, and set them for many recipes at once."
+ },
+ {
+  "id": "multi-select",
+  "date": "2026-11-08",
+  "icon": "check",
+  "color": "blue",
+  "title": "Select several recipes",
+  "text": "Tap Select on the Recipes tab to delete or categorize many recipes at once."
+ },
+ {
+  "id": "mark-cooked",
+  "date": "2026-11-08",
+  "icon": "check",
+  "color": "green",
+  "title": "Mark as cooked",
+  "text": "Tick off a meal from the recipe page or the end of cook mode, and the ingredients come out of your inventory."
+ },
+ {
+  "id": "auto-refresh",
+  "date": "2026-11-08",
+  "icon": "refresh",
+  "color": "teal",
+  "title": "Always up to date",
+  "text": "When TablePlan is updated, your phone picks up the new version on its own."
+ },
+ {
+  "id": "arrange-ai",
+  "date": "2026-11-08",
+  "icon": "sparkle",
+  "color": "purple",
+  "title": "Arrange with AI",
+  "text": "Pick several recipes and let TablePlan spread them across your empty days, with quick meals on weeknights."
+ },
+ {
+  "id": "planning-flow",
+  "date": "2026-11-08",
+  "icon": "cal",
+  "color": "orange",
+  "title": "Plan one day at a time",
+  "text": "“Plan my 2 weeks” walks you through each empty day and shows recipes that aren't on the plan yet."
+ },
+ {
+  "id": "checked-stay",
+  "date": "2026-11-08",
+  "icon": "cart",
+  "color": "blue",
+  "title": "Ticked items stay put",
+  "text": "Items you tick off stay on the list, crossed out, for a few hours, so a mis-tap is easy to undo."
+ },
+ {
+  "id": "cooked-inventory",
+  "date": "2026-11-08",
+  "icon": "box",
+  "color": "green",
+  "title": "Amounts that update as you cook",
+  "text": "Your inventory knows “1 cup left”, and cooking a meal takes out what it used, with Undo."
+ },
+ {
+  "id": "print-cards",
+  "date": "2026-11-08",
+  "icon": "print",
+  "color": "purple",
+  "title": "Print recipe cards",
+  "text": "Print 3×5, 4×6 or 5×7 cards on regular Letter paper with dashed lines to cut out."
+ },
+ {
+  "id": "backups",
+  "date": "2026-11-07",
+  "icon": "shield",
+  "color": "teal",
+  "title": "Nightly backups",
+  "text": "Your data is backed up every night, and you can download everything from Settings → Backups."
+ },
+ {
+  "id": "missing-check",
+  "date": "2026-11-07",
+  "icon": "play",
+  "color": "green",
+  "title": "Ready to cook?",
+  "text": "Recipes show what's still on your list before you start, with one tap for “I have them all”."
+ },
+ {
+  "id": "one-list-stores",
+  "date": "2026-11-07",
+  "icon": "cart",
+  "color": "blue",
+  "title": "One list, sorted by store",
+  "text": "Planned meals add their ingredients to one list, and TablePlan remembers which store you buy each thing at."
+ },
+ {
+  "id": "plan-board",
+  "date": "2026-11-07",
+  "icon": "cal",
+  "color": "orange",
+  "title": "A two-week plan board",
+  "text": "See the next two weeks at a glance, tap an empty day to pick a recipe, or drag meals between days."
+ }
+]

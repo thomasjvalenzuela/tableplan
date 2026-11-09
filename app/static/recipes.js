@@ -295,7 +295,7 @@ function fmtDur(sec) { const m = Math.round(sec / 60); return m >= 60 ? `${Math.
 async function addMissing() {
   const f = factor();
   const missing = R.rec.ingredients.filter((x) => !x.pantry && (x.food || x.display));
-  if (!missing.length) return toast("You have everything in the pantry 🎉");
+  if (!missing.length) return toast("You have everything in your inventory 🎉");
   openSheet("Add to shopping list", `<p class="hint" style="margin:0 4px 10px">Untick anything you already have.</p>
     <div class="group">${missing.map((x) => { const l = ingLine(x, f); return `<label class="row"><span class="emo">${esc(x.emoji)}</span><div class="main"><div class="a">${ingTitle(l)}</div>${l.amt ? `<div class="b">${esc(l.amt)}</div>` : ""}</div><input type="checkbox" checked data-t="${esc(l.text)}" style="width:22px;height:22px;accent-color:var(--tint)"></label>`; }).join("")}</div>
     <div style="height:14px"></div><button class="btn" id="am-go">${ic("cart")} Add to list</button>`, {
@@ -617,45 +617,212 @@ function loadZXing() {
   return ZX;
 }
 const BC_OPTS = { formats: ["EAN13", "EAN8", "UPCA", "UPCE"], tryHarder: true, maxNumberOfSymbols: 1 };
+// ------------------------------------------------------------------ barcode scan sessions (camera, USB or Bluetooth scanner)
+// A keyboard-wedge scanner "types" the digits fast and ends with Enter. Every scan adds to the pantry at once (with
+// Undo), ticks it off the shopping list if it's there, and scanning the same code again adds one more.
+const SCAN_LOCS = [["pantry", "Pantry"], ["fridge", "Fridge"], ["freezer", "Freezer"]];
+const SS = { active: false, loc: (() => { try { return localStorage.getItem("tp.scanLoc") || ""; } catch (_) { return ""; } })(), rows: [], naming: null, queue: [], busy: false, foods: null, after: null };
+const scanCount = () => SS.rows.reduce((n, r) => n + r.count, 0);
+const STOCK_METHODS = [["scanner", "Scanner"], ["camera", "Camera"], ["type", "Type it"], ["receipt", "Receipt"]];
+const stockMethod = () => { try { return localStorage.getItem("tp.stockMethod") || "scanner"; } catch (_) { return "scanner"; } };
+function setStockMethod(m) { try { localStorage.setItem("tp.stockMethod", m); } catch (_) {} }
+// "How do you want to stock up?": scanner, camera, type it (receipt comes later); the choice is remembered
+function startStockUp(after) {
+  startScanSession(after);
+  if (stockMethod() === "camera") openScanner(after);
+}
+function startScanSession(after) {
+  if (after) SS.after = after;
+  if (SS.active) { drawSession(); $("#sb-code")?.focus(); return; }
+  SS.active = true; SS.rows = []; SS.naming = null; SS.queue = [];
+  document.body.classList.add("scanning");
+  document.body.insertAdjacentHTML("beforeend", `<div class="scan-bar" id="scan-bar" role="region" aria-label="Stock up">
+    <div class="sb-head"><b>How do you want to stock up?</b><span class="grow"></span><button class="text-btn strong" id="sb-done">Done</button></div>
+    <div class="seg sb-method" id="sb-method" role="radiogroup" aria-label="Method"></div>
+    <div class="chips sb-locs" id="sb-locs" role="radiogroup" aria-label="Put items in"></div>
+    <div id="sb-input"></div><div class="muted small" id="sb-n" aria-live="polite"></div>
+    <div id="sb-name"></div><div class="sb-rows" id="sb-rows"></div></div>`);
+  $("#sb-done").onclick = endScanSession;
+  drawSession();
+}
+function drawStockInput() {
+  const box = $("#sb-input"); if (!box) return;
+  const m = stockMethod();
+  $("#sb-method").innerHTML = STOCK_METHODS.map(([k, l]) => `<button data-m="${k}" class="${m === k ? "on" : ""}" role="radio" aria-checked="${m === k}" ${k === "receipt" ? 'aria-disabled="true"' : ""}>${esc(l)}${k === "receipt" ? '<small class="soon">Soon</small>' : ""}</button>`).join("");
+  $$("#sb-method [data-m]").forEach((b) => (b.onclick = () => {
+    if (b.dataset.m === "receipt") return toast("Receipt scanning is coming soon");
+    setStockMethod(b.dataset.m); drawSession();
+    if (b.dataset.m === "camera") openScanner(SS.after);
+  }));
+  if (box.dataset.m === m) return;
+  box.dataset.m = m;
+  if (m === "type") {
+    box.innerHTML = `<form class="sb-form" id="sb-type" autocomplete="off"><input id="sb-food" list="sb-foods-t" placeholder="Type a food, e.g. Greek yogurt" aria-label="Food name" maxlength="80"><input id="sb-size" placeholder="Size" aria-label="Size" maxlength="40" class="sz"><button class="pill-btn ink" type="submit">Add</button></form><datalist id="sb-foods-t"></datalist>`;
+    const fill = () => { const dl = $("#sb-foods-t"); if (dl && SS.foods) dl.innerHTML = SS.foods.map((n) => `<option value="${esc(n)}"></option>`).join(""); };
+    if (SS.foods) fill(); else api("GET", "/api/foods").then((d) => { SS.foods = (d.foods || []).map((x) => x.name); fill(); }).catch(() => {});
+    $("#sb-type").onsubmit = async (e) => {
+      e.preventDefault();
+      const name = $("#sb-food").value.trim(); if (!name) return;
+      try {
+        const it = await api("POST", "/api/pantry", { name, location: SS.loc || "pantry", quantity_text: $("#sb-size").value.trim() });
+        const row = { code: "", item: it, count: 1, list: false };
+        SS.rows.push(row); $("#sb-food").value = ""; $("#sb-size").value = ""; drawSession(); $("#sb-food").focus();
+        toast(`${it.name} added`, "Undo", async () => { try { await api("POST", "/api/scan/undo", { pantry_item_id: it.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); } catch (x) { fail(x); } });
+      } catch (x) { fail(x); }
+    };
+  } else {
+    box.innerHTML = `<form class="sb-form" id="sb-form" autocomplete="off"><input id="sb-code" inputmode="numeric" placeholder="${m === "camera" ? "Or type a barcode or produce code" : "Ready, scan away (or paste a code)"}" aria-label="Barcode or produce code" maxlength="20"><button class="pill-btn ink" type="submit">Add</button>${m === "camera" ? `<button class="pill-btn" type="button" id="sb-cam">${ic("camera")}</button>` : ""}</form>`;
+    $("#sb-form").onsubmit = (e) => { e.preventDefault(); const v = $("#sb-code").value.replace(/\D/g, ""); $("#sb-code").value = ""; if (v.length >= 4) sessionScan(v); else toast("Enter the numbers under the barcode, or a 4–5 digit produce code"); };
+    $("#sb-cam") && ($("#sb-cam").onclick = () => openScanner(SS.after));
+  }
+}
+function endScanSession() {
+  if (!SS.active) return;
+  SS.active = false;
+  $("#scan-bar")?.remove(); document.body.classList.remove("scanning");
+  const n = scanCount();
+  if (n) toast(`Added ${plural(n, "item")} to your inventory`);
+  if (SS.after) SS.after(); else if (state.tab === "pantry") renderPantry();
+  SS.after = null;
+}
+function scanRowHtml(r, i) {
+  if (r.naming) return "";
+  const it = r.item, sub = [it.product, it.quantity_text].filter(Boolean).join(" · ");
+  return `<div class="sb-row" data-i="${i}">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="sb-img emo">${esc(it.emoji || "🥫")}</span>`}
+    <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(sub || cap(it.location))}${r.list ? ` · <span class="ok-note">✓ Checked off your list</span>` : ""}</div></div>
+    <div class="sb-count"><button class="mini" data-less aria-label="One fewer ${esc(it.name)}">−</button><b>${esc(r.count)}</b><button class="mini" data-more aria-label="One more ${esc(it.name)}">+</button></div></div>`;
+}
+function drawSession() {
+  const bar = $("#scan-bar");
+  const loc = SS.loc || "pantry";
+  if (bar) {
+    drawStockInput();
+    $("#sb-locs").innerHTML = SCAN_LOCS.map(([k, l]) => `<button class="filter sm ${loc === k ? "on" : ""}" data-sl="${k}" role="radio" aria-checked="${loc === k}">${esc(l)}</button>`).join("");
+    $$("#sb-locs [data-sl]").forEach((b) => (b.onclick = () => { SS.loc = b.dataset.sl; try { localStorage.setItem("tp.scanLoc", SS.loc); } catch (_) {} drawSession(); }));
+    const n = scanCount();
+    $("#sb-n").textContent = n ? `${plural(n, "item")} added` : stockMethod() === "scanner" ? "Ready, scan away" : "";
+  }
+  const rowsHtml = SS.rows.map(scanRowHtml).reverse().join("");
+  [$("#sb-rows"), $("#sc-rows")].forEach((box) => {
+    if (!box) return;
+    box.innerHTML = rowsHtml;
+    $$("[data-more],[data-less]", box).forEach((b) => (b.onclick = () => bumpScan(SS.rows[+b.closest("[data-i]").dataset.i], b.hasAttribute("data-more") ? 1 : -1)));
+  });
+  [$("#sb-name"), $("#sc-name")].forEach((box) => { if (box) drawNaming(box); });
+}
+function drawNaming(box) {
+  if (!SS.naming) { box.innerHTML = ""; return; }
+  const code = SS.naming;
+  box.innerHTML = `<form class="sb-naming" autocomplete="off"><div class="muted small">Barcode ${esc(code)} isn't known yet. Name this item:</div>
+    <div class="sb-name-row"><input class="nm" list="sb-foods" placeholder="e.g. Greek yogurt" maxlength="80" aria-label="Item name" required>
+    <input class="sz" placeholder="Size (e.g. 32 oz)" maxlength="40" aria-label="Size"><button class="pill-btn ink" type="submit">Save</button></div>
+    <datalist id="sb-foods">${(SS.foods || []).map((f) => `<option value="${esc(f)}"></option>`).join("")}</datalist>
+    ${SS.queue.length ? `<div class="muted small">${esc(plural(SS.queue.length, "more scan"))} waiting</div>` : ""}
+    <div class="sb-name-row">${state.cfg?.ai_key ? `<label class="pill-btn sb-snap">${ic("camera")} Snap the product<input type="file" accept="image/*" capture="environment" hidden></label>` : ""}<button type="button" class="link-btn sb-skip">Skip this one</button></div></form>`;
+  const f = $("form", box);
+  if (!SS.foods) api("GET", "/api/foods").then((d) => { SS.foods = (d.foods || []).map((x) => x.name); const dl = $("#sb-foods", box); if (dl) dl.innerHTML = SS.foods.map((n) => `<option value="${esc(n)}"></option>`).join(""); }).catch(() => {});
+  setTimeout(() => $(".nm", f)?.focus(), 30);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const name = $(".nm", f).value.trim(); if (!name) return;
+    SS.naming = null;
+    await sessionScan(code, { name, quantity: $(".sz", f).value.trim() });
+    nextQueued();
+  };
+  $(".sb-skip", f).onclick = () => { SS.naming = null; drawSession(); nextQueued(); };
+  const snap = $(".sb-snap input", f);
+  if (snap) snap.onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const lbl = $(".sb-snap", f); lbl.classList.add("busy"); lbl.firstChild && (lbl.lastChild.previousSibling.textContent = " Reading…");
+    try {
+      const r = await api("POST", "/api/scan/photo", { code, image: await shrink(file), location: SS.loc || "pantry" });
+      SS.naming = null;
+      if (r.ok) {
+        const row = { code, item: r.item, count: 1, list: !!r.list_checked };
+        SS.rows.push(row);
+        toast(`${r.item.name} · remembered for next time`, "Undo", async () => { try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); } catch (x) { fail(x); } });
+      }
+      drawSession(); nextQueued();
+    } catch (x) { fail(x); lbl.classList.remove("busy"); }
+  };
+}
+function nextQueued() { const c = SS.queue.shift(); if (c) sessionScan(c); }
+async function sessionScan(code, named) {
+  if (!SS.active && !$("#sc-rows")) startScanSession();
+  if (SS.naming && !named) { if (code !== SS.naming) SS.queue.push(code); drawSession(); return; }
+  const prev = SS.rows.find((r) => r.code === code && !named);
+  if (prev) return bumpScan(prev, 1);
+  try { navigator.vibrate?.(40); } catch (_) {}
+  try {
+    const r = await api("POST", "/api/scan", { code, location: SS.loc || "pantry", ...(named || {}) });
+    if (!r.ok && r.needs_name) { SS.naming = code; drawSession(); return; }
+    const row = { code, item: r.item, count: 1, list: !!r.list_checked };
+    SS.rows.push(row);
+    drawSession();
+    toast(`${r.item.name}${r.list_checked ? " · checked off your list" : ""}`, "Undo", async () => {
+      try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); } catch (e) { fail(e); }
+    });
+  } catch (e) { fail(e); }
+}
+async function bumpScan(row, d) {
+  if (!row) return;
+  if (d < 0 && row.count <= 1) {
+    try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); toast(`Removed ${row.item.name}`); } catch (e) { fail(e); }
+    return;
+  }
+  try {
+    const r = await api("POST", `/api/scan/${enc(row.item.id)}/${d > 0 ? "more" : "less"}`, {});
+    row.item = { ...row.item, ...r.item }; row.count += d; drawSession();
+  } catch (e) { fail(e); }
+}
+// keyboard-wedge burst: >= 6 digits, < 50 ms apart, then Enter, while no text field is focused
+const WEDGE = { buf: "", last: 0 };
+document.addEventListener("keydown", (e) => {
+  const t = e.target, typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  if (typing) { WEDGE.buf = ""; return; }
+  const now = performance.now();
+  if (/^\d$/.test(e.key)) {
+    if (now - WEDGE.last > 50) WEDGE.buf = "";
+    WEDGE.buf += e.key; WEDGE.last = now;
+    return;
+  }
+  if (e.key === "Enter" && WEDGE.buf.length >= 6 && now - WEDGE.last <= 50) {
+    const code = WEDGE.buf; WEDGE.buf = "";
+    if (state.tab === "pantry" || SS.active || $("#sc-rows")) {
+      e.preventDefault();
+      if (stockMethod() !== "scanner" && !$("#sc-rows")) setStockMethod("scanner");   // a scanner just spoke: switch to it
+      sessionScan(code);
+    }
+    return;
+  }
+  WEDGE.buf = "";
+});
+
 async function openScanner(after) {
   const live = window.isSecureContext && navigator.mediaDevices?.getUserMedia;
-  openSheet("Scan to pantry", `
+  openSheet("Stock up", `
     ${live ? `<div class="scan-view"><video id="sc-v" playsinline muted></video><div class="aim"></div></div><p class="hint" style="text-align:center">Point at a barcode. It scans automatically.</p>` :
       `<label class="drop" style="padding:28px">${ic("camera")}<div style="margin-top:8px"><b>Take a photo of the barcode</b><br><span class="muted">Fill most of the photo with the barcode</span></div><input type="file" accept="image/*" capture="environment" id="sc-file" hidden></label>
        <p class="hint">Live scanning needs HTTPS. Set it up with Tailscale (see the README) to scan without taking photos.</p>`}
-    <div id="sc-res"></div>
-    <div class="group" style="margin-top:12px"><div class="field"><input class="full" id="sc-code" inputmode="numeric" placeholder="Or type the barcode number"></div></div>
-    <div style="height:10px"></div><button class="btn sec" id="sc-look">Look up</button>
-    <p class="hint">Product names come from Open Food Facts (free, open database).</p>`, {
+    <div id="sc-res"></div><div id="sc-name"></div><div class="sb-rows" id="sc-rows"></div>
+    <form class="group sb-form" id="sc-form" style="margin-top:12px"><div class="field"><input class="full" id="sc-code" inputmode="numeric" placeholder="Or type the barcode number" maxlength="20"></div></form>
+    <div style="height:10px"></div><div class="btn-row"><button class="btn sec" id="sc-look">Look up</button><button class="btn sec" id="sc-wedge">${ic("scan")} USB / Bluetooth scanner</button></div>
+    <p class="hint">Product names come from Open Food Facts (free, open database). A USB or Bluetooth scanner works anywhere on the Inventory tab too.</p>`, {
     async onMount(sheet) {
       let stream = null, stop = false, busy = false;
+      SS.rows = SS.active ? SS.rows : [];
       const found = async (code) => {
         if (busy) return; busy = true;
-        try { navigator.vibrate?.(60); } catch (_) {}
-        $("#sc-res").innerHTML = loading();
-        try { showProduct(await api("GET", `/api/upc/${enc(code)}`)); } catch (e) { $("#sc-res").innerHTML = `<div class="banner">${esc(e.message)}</div>`; }
+        $("#sc-res").innerHTML = "";
+        await sessionScan(code);
         busy = false;
+        after && after();
       };
-      const showProduct = (p) => {
-        const loc = p.rule?.location || "pantry";
-        $("#sc-res").innerHTML = p.found ? `<div class="group" style="margin-top:12px">
-            <div class="row flush"><div class="main"><div class="a">${esc(p.name)}</div><div class="b">${esc([p.brand, p.quantity].filter(Boolean).join(" · "))}${p.rule ? ` · shelf life: ${esc(p.rule.name)}` : ""}</div></div></div>
-            <div class="field"><label>Stored in</label><select id="sc-loc">${["fridge", "freezer", "pantry"].map((l) => `<option ${l === loc ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-            <div class="field"><label>Printed date (optional)</label><input type="date" id="sc-date"></div></div>
-            <div style="height:10px"></div><button class="btn" id="sc-add">${ic("plus")} Add to pantry</button>`
-          : `<div class="banner info" style="margin-top:12px">Barcode ${esc(p.code)} isn't in Open Food Facts yet.</div><div class="group"><div class="field"><input class="full" id="sc-name" placeholder="What is it? (e.g. Greek yogurt)"></div></div><div style="height:10px"></div><button class="btn" id="sc-add">${ic("plus")} Add to pantry</button>`;
-        $("#sc-add").onclick = async () => {
-          const name = p.found ? p.name : $("#sc-name").value.trim();
-          if (!name) return toast("Enter a name");
-          try {
-            const it = await api("POST", "/api/pantry", { name, location: $("#sc-loc")?.value, package_date: $("#sc-date")?.value || "", quantity_text: p.quantity || "" });
-            toast(`${it.name} → ${cap(it.location)}${it.expires_on ? ` · use by ${fmt(parseISO(it.expires_on), { month: "short", day: "numeric" })}` : ""}`);
-            $("#sc-res").innerHTML = `<div class="wstatus ok" style="margin-top:12px"><b>Added ${esc(it.name)}</b><span>Scan the next item, or close when you're done.</span></div>`;
-            after && after();
-          } catch (e) { fail(e); }
-        };
-      };
-      $("#sc-look").onclick = () => { const c = $("#sc-code").value.replace(/\D/g, ""); if (c.length >= 6) found(c); else toast("Enter the numbers under the barcode"); };
+      drawSession();
+      const look = () => { const c = $("#sc-code").value.replace(/\D/g, ""); $("#sc-code").value = ""; if (c.length >= 4) found(c); else toast("Enter the numbers under the barcode"); };
+      $("#sc-look").onclick = look;
+      $("#sc-form").onsubmit = (e) => { e.preventDefault(); look(); };
+      $("#sc-wedge").onclick = () => { closeSheet(); setStockMethod("scanner"); startScanSession(after); };
       let zx;
       try { zx = await loadZXing(); } catch (e) { $("#sc-res").innerHTML = `<div class="banner">${esc(e.message)}. Type the number instead.</div>`; return; }
       if ($("#sc-file")) $("#sc-file").onchange = async (e) => {
@@ -668,12 +835,14 @@ async function openScanner(after) {
           stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 } }, audio: false });
           const v = $("#sc-v"); v.srcObject = stream; await v.play();
           const cv = document.createElement("canvas"), ctx = cv.getContext("2d", { willReadFrequently: true });
+          let lastCode = "", lastAt = 0;
           const loop = async () => {
             if (stop || !document.body.contains(v)) { stream.getTracks().forEach((t) => t.stop()); return; }
             if (!busy && v.videoWidth) {
               cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0);
               const r = await zx.readBarcodes(ctx.getImageData(0, 0, cv.width, cv.height), BC_OPTS).catch(() => []);
-              if (r[0]?.text) await found(r[0].text);
+              const code = r[0]?.text;
+              if (code && (code !== lastCode || Date.now() - lastAt > 2500)) { lastCode = code; lastAt = Date.now(); await found(code); }
             }
             setTimeout(loop, 250);
           };
@@ -691,9 +860,9 @@ async function openCheckin(after) {
   let items = [];
   try { items = (await api("GET", "/api/pantry")).items; } catch (e) { return fail(e); }
   const acted = new Set();
-  openSheet("Pantry check-in", `<p class="hint" style="margin:0 4px 12px">Confirm what's still here. It takes a minute and keeps use-by dates and shopping lists accurate.</p>
+  openSheet("Inventory check-in", `<p class="hint" style="margin:0 4px 12px">Confirm what's still here. It takes a minute and keeps use-by dates and shopping lists accurate.</p>
     <div class="group">${items.map((it) => `<div class="row flush" data-id="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🥫")}</span><div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(cap(it.location))} · ${Math.round(it.amount_left * 100)}% left${it.expires_on ? ` · ${esc(relExpiry(it))}` : ""}</div></div>
-      <div style="display:flex;gap:6px"><button class="pill-btn" data-a="keep" style="box-shadow:none;background:var(--fill)">✓</button><button class="pill-btn" data-a="half" style="box-shadow:none;background:var(--fill)">½</button><button class="pill-btn" data-a="gone" style="box-shadow:none;background:var(--fill);color:var(--red)">✕</button></div></div>`).join("") || `<div class="row flush muted">Your pantry is empty. Scan or add items first.</div>`}</div>
+      <div style="display:flex;gap:6px"><button class="pill-btn" data-a="keep" style="box-shadow:none;background:var(--fill)">✓</button><button class="pill-btn" data-a="half" style="box-shadow:none;background:var(--fill)">½</button><button class="pill-btn" data-a="gone" style="box-shadow:none;background:var(--fill);color:var(--red)">✕</button></div></div>`).join("") || `<div class="row flush muted">Your inventory is empty. Scan or add items first.</div>`}</div>
     <div style="height:14px"></div><button class="btn" id="ci-done">${ic("check")} Done</button>`, {
     onMount() {
       $$("[data-a]").forEach((b) => (b.onclick = async () => {
@@ -705,56 +874,45 @@ async function openCheckin(after) {
           $$("[data-a]", row).forEach((x) => (x.style.background = x === b ? "var(--ink)" : "var(--fill)", x.style.color = x === b ? "var(--on-ink)" : ""));
         } catch (e) { fail(e); }
       }));
-      $("#ci-done").onclick = async () => { await api("POST", "/api/pantry/checked").catch(() => {}); closeSheet(); toast("Pantry checked ✓"); after && after(); };
+      $("#ci-done").onclick = async () => { await api("POST", "/api/pantry/checked").catch(() => {}); closeSheet(); toast("Inventory checked ✓"); after && after(); };
     },
   });
 }
 
 // ------------------------------------------------------------------ what's new (shown once per new version)
-const WHATS_NEW = {
-  "0.5": {
-    title: "Planning without the busywork",
-    items: [
-      ["cal", "bg-orange", "A two-week plan board", "See the next two weeks at a glance. Tap an empty day to pick a recipe, or drag meals between days."],
-      ["cart", "bg-blue", "One list that keeps going", "Planned meals add their ingredients automatically. Sort by store, and TablePlan remembers where you buy each thing."],
-      ["play", "bg-green", "Ready to cook?", "Recipes show what's still on your list before you start, with one tap for “I have them all”."],
-      ["print", "bg-purple", "Print & share recipes", "Index cards, half letter or full page, plus PDF, text and Markdown."],
-      ["shield", "bg-teal", "Nightly backups", "Your data is backed up every night. Download everything from Settings → Backups."],
-    ],
-  },
-  "0.4": {
-    title: "TablePlan stands on its own",
-    items: [
-      ["box", "bg-green", "One app, no Mealie", "Recipes, plans and lists now live in TablePlan itself. It's faster, simpler and there's nothing else to keep updated."],
-      ["link", "bg-blue", "Smarter link import", "TablePlan reads recipe pages itself and uses AI only when a page is messy."],
-      ["camera", "bg-purple", "Faster screenshot import", "Screenshots are read in a single AI step."],
-      ["refresh", "bg-orange", "Coming from Mealie?", "Settings → Advanced → Import from Mealie copies everything over, photos included."],
-    ],
-  },
-  "0.3": {
-    title: "What's new in TablePlan",
-    items: [
-      ["book", "bg-orange", "Recipes, beautifully", "Browse, search and favorite your recipes, with photos, cooking time and difficulty at a glance."],
-      ["list", "bg-indigo", "Step-by-step mode", "Ingredients appear right inside each step, in perfect order, tuned to your gas, electric or induction stove."],
-      ["play", "bg-green", "Cook mode with timers", "A hands-free walkthrough. Timers keep running while you move ahead, and alert you when it's time for the next step."],
-      ["scan", "bg-blue", "Scan your pantry", "Scan barcodes to stock the fridge and pantry, and get a gentle weekly reminder to check what's left."],
-      ["share", "bg-teal", "Telegram & push", "Get shopping lists, meal plans and use-soon alerts on Telegram or ntfy, with no Gmail needed."],
-      ["dollar", "bg-purple", "AI spending", "See what OpenAI costs you each month, with an optional budget alert."],
-    ],
-  },
-};
-function maybeWhatsNew() {
-  const v = (state.cfg.version || "").split(".").slice(0, 2).join(".");
-  const seen = (() => { try { return localStorage.getItem("tp.seen"); } catch (_) { return null; } })();
-  const mark = () => { try { localStorage.setItem("tp.seen", v); } catch (_) {} };
-  if (!WHATS_NEW[v] || seen === v) return mark();
-  if (!seen && !state.cfg.setup_complete) return mark();
-  const w = WHATS_NEW[v];
-  openSheet(w.title, `<div class="whatsnew"><ul>${w.items.map(([i, c, t, d]) => `<li><span class="ic ${c}">${ic(i)}</span><span><b>${esc(t)}</b><span>${esc(d)}</span></span></li>`).join("")}</ul></div>
-    <div style="height:14px"></div><button class="btn" id="wn-ok">Let's cook</button><p class="hint" style="text-align:center">Version ${esc(state.cfg.version)}</p>`, {
-    onMount() { $("#wn-ok").onclick = () => closeSheet(); },
+// ------------------------------------------------------------------ what's new: a feature feed (static/whatsnew.json);
+// what's been seen is kept server-side so it shows once across devices.
+async function loadWhatsNew() {
+  try { const r = await fetch("/static/whatsnew.json", { cache: "no-cache" }); const d = await r.json(); return Array.isArray(d) ? d : []; } catch (_) { return []; }
+}
+const wnItem = (e) => `<li><span class="ic bg-${esc(e.color || "orange")}">${ic(e.icon || "sparkle")}</span><span><b>${esc(e.title)}</b><span>${esc(e.text)}</span></span></li>`;
+async function maybeWhatsNew(tries = 0) {
+  if (!state.cfg?.setup_complete) return;
+  const busy = !!$("#layer")?.firstChild || !!$("#cook") || !!$(".wiz") || document.hidden;
+  if (busy) { if (tries < 60) setTimeout(() => maybeWhatsNew(tries + 1), 5000); return; }
+  const feed = await loadWhatsNew();
+  const seen = new Set(state.cfg.settings?.whatsnew_seen || []);
+  const unseen = feed.filter((e) => !seen.has(e.id));
+  if (!unseen.length || $("#layer")?.firstChild || $("#cook")) return;
+  const first = unseen.slice(0, 6), rest = unseen.slice(6);
+  openSheet("What's new", `<div class="whatsnew"><ul>${first.map(wnItem).join("")}</ul>
+      ${rest.length ? `<button class="link-btn" id="wn-more" aria-expanded="false">and ${esc(rest.length)} more</button><ul id="wn-rest" hidden>${rest.map(wnItem).join("")}</ul>` : ""}</div>
+    <div style="height:14px"></div><button class="btn" id="wn-ok">Got it</button>`, {
+    onMount() {
+      $("#wn-more") && ($("#wn-more").onclick = (e) => { $("#wn-rest").hidden = false; e.currentTarget.remove(); });
+      $("#wn-ok").onclick = async () => {
+        closeSheet();
+        const ids = [...new Set([...(state.cfg.settings?.whatsnew_seen || []), ...feed.map((e) => e.id)])].slice(-500);
+        try { state.cfg.settings = await api("PUT", "/api/settings", { whatsnew_seen: ids }); } catch (_) {}
+      };
+    },
   });
-  mark();
+}
+async function openWhatsNewAll(back) {
+  const feed = await loadWhatsNew();
+  sheetBody().innerHTML = `<div class="btn-row" style="margin-bottom:12px"><button class="btn sec small" id="wn-back">${ic("chevL")} Settings</button></div>
+    <div class="whatsnew"><ul>${feed.map(wnItem).join("")}</ul></div>`;
+  $("#wn-back").onclick = back;
 }
 
 // ------------------------------------------------------------------ zoom / Home Screen tip (iOS keeps Safari's per-site page zoom)

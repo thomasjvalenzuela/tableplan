@@ -153,7 +153,7 @@ const Setup = {
     const draw = (p) => {
       el.innerHTML = `
         ${e.configured ? `<div class="wstatus ok"><b>Email is set up</b><span>${_esc(e.from || e.user || "")} → ${_esc((e.to || []).join(", "))}</span></div>` : ""}
-        <p class="wlead">Send shopping lists, meal plans and pantry reports to your inbox.</p>
+        <p class="wlead">Send shopping lists, meal plans and inventory reports to your inbox.</p>
         <div class="wgroup">
           <div class="wfield"><label>Provider</label><select id="em-p">${presets.map(([k, l]) => `<option value="${k}" ${k === p ? "selected" : ""}>${l}</option>`).join("")}</select></div>
           ${p === "custom" ? `<div class="wfield"><label>SMTP server</label><input id="em-host" value="${_esc(e.host || "")}" placeholder="smtp.example.com"></div>
@@ -295,7 +295,7 @@ for (const k of Object.keys(Setup)) {
 
 // ------------------------------------------------------------------ first-run wizard
 const WIZ_STEPS = [
-  { key: "welcome", title: "Welcome to TablePlan", sub: "Recipes, meal plans, a smart pantry and grocery lists for your household. This takes about 3 minutes, and you can skip anything and finish it later in Settings." },
+  { key: "welcome", title: "Welcome to TablePlan", sub: "Recipes, meal plans, a smart inventory and grocery lists for your household. This takes about 3 minutes, and you can skip anything and finish it later in Settings." },
   { key: "household", title: "Your household", sub: "This sets how much every recipe makes." , section: "household" },
   { key: "mealie", title: "Recipe library", sub: "TablePlan keeps recipes in Mealie, which is included and runs on your server.", section: "mealie", skippable: true },
   { key: "ai", title: "Import from screenshots", sub: "Let AI read recipe photos, screenshots and tricky web pages.", section: "ai", skippable: true },
@@ -331,7 +331,7 @@ async function runWizard(onFinish) {
     if (step.key === "welcome") body.innerHTML = `<ul class="wiz-feats">
         <li><b>🍳 Recipes from anywhere</b><span>Links, screenshots and cookbook photos</span></li>
         <li><b>🗓️ Auto meal plans</b><span>A week or a month in one tap</span></li>
-        <li><b>🥛 Smart pantry</b><span>Real use-by dates that update as you cook</span></li>
+        <li><b>🥛 Smart inventory</b><span>Real use-by dates that update as you cook</span></li>
         <li><b>🛒 Shopping lists</b><span>Scaled to your household, emailed or printed</span></li></ul>`;
     if (step.key === "done") {
       const row = (ok, label, todo) => `<li class="${ok ? "ok" : ""}"><b>${ok ? "✓" : "○"} ${_esc(label)}</b><span>${ok ? "" : _esc(todo)}</span></li>`;

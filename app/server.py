@@ -119,6 +119,7 @@ DEFAULT_SETTINGS = {
     "plan_horizon_days": 14,          # how many days the planner board shows
     "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
     "polish_imports": True,           # AI rewrites imported steps clearly (never amounts); needs an OpenAI key
+    "whatsnew_seen": [],              # ids from static/whatsnew.json already shown (on any device)
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
                    "Drink"],          # recipe categories, in display order
 }
@@ -200,6 +201,7 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 );
 CREATE INDEX IF NOT EXISTS ix_ai_usage_at ON ai_usage(at);
 CREATE TABLE IF NOT EXISTS upc_cache (code TEXT PRIMARY KEY, data TEXT, at TEXT);
+CREATE TABLE IF NOT EXISTS upc_local (code TEXT PRIMARY KEY, food_id INTEGER, name TEXT NOT NULL, quantity TEXT DEFAULT '', at TEXT);
 CREATE TABLE IF NOT EXISTS image_picks (
   kind TEXT, key TEXT, idx INTEGER DEFAULT 0, file TEXT, credit TEXT, missing INTEGER DEFAULT 0, updated TEXT,
   PRIMARY KEY (kind, key)
@@ -445,9 +447,11 @@ def init_db():
     with db() as c:
         c.executescript(SCHEMA)
         n_recipes.init(c); n_plans.init(c); n_lists.init(c); n_foods.init(c)
-        for table, col in (("pantry_items", "food_id"), ("upc_cache", "food_id")):
+        for table, col, typ in (("pantry_items", "food_id", "INTEGER"), ("upc_cache", "food_id", "INTEGER"),
+                                ("pantry_items", "product", "TEXT"), ("pantry_items", "image", "TEXT"),
+                                ("pantry_items", "upc", "TEXT"), ("pantry_items", "pack_qty", "REAL")):
             if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
-                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER")
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pantry_items)")}
         for col, typ in (("qty", "REAL"), ("unit", "TEXT"), ("original_qty", "REAL")):
             if col not in cols:   # known amounts: qty left in `unit`, original_qty = the full package
@@ -550,6 +554,28 @@ def _v_enum(*choices):
     return f
 
 
+def _v_ids(max_items):
+    def f(v):
+        if not isinstance(v, list) or len(v) > max_items:
+            raise ValueError(f"must be a list of at most {max_items} ids")
+        out = []
+        for x in v:
+            if not isinstance(x, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", x):
+                raise ValueError("ids are short lowercase words")
+            if x not in out:
+                out.append(x)
+        return out
+    return f
+
+
+def whatsnew_ids():
+    try:
+        with open(os.path.join(STATIC_DIR, "whatsnew.json"), encoding="utf-8") as f:
+            return [e["id"] for e in json.load(f) if isinstance(e, dict) and e.get("id")]
+    except (OSError, ValueError):
+        return []
+
+
 def _v_categories(v):
     if not isinstance(v, list) or len(v) > MAX_CATEGORIES:
         raise ValueError(f"must be a list of at most {MAX_CATEGORIES} names")
@@ -607,6 +633,7 @@ SETTINGS_VALIDATORS = {
     "plan_reminder_days": _v_int(0, 7),
     "polish_imports": _v_bool,
     "categories": _v_categories,
+    "whatsnew_seen": _v_ids(500),
 }
 
 
@@ -1273,6 +1300,8 @@ def pantry_json(c, row):
         "expires_on": row["expires_on"], "expiry_source": row["expiry_source"],
         "days_left": (exp - t).days if exp else None, "status": row["status"], "emoji": food_emoji(row["name"]),
         "qty": row["qty"], "unit": row["unit"] or "", "left_text": pantry_left_text(row),
+        "product": row["product"] or "", "upc": row["upc"] or "", "food_id": row["food_id"],
+        "image": f"/img/pantry/{row['id']}?v={urllib.parse.quote(row['image'])}" if row["image"] else None,
         "rule": {"id": rule["id"], "name": rule["name"], "source": rule["source"],
                  **{f: rule[f] for f in RULE_FIELDS}, "tips": rule["tips"]} if rule else None,
     }
@@ -1414,6 +1443,7 @@ sys.path.insert(0, HERE) if HERE not in sys.path else None  # python -I omits th
 from native import lists as n_lists, plans as n_plans, recipes as n_recipes, scraper as n_scraper  # noqa: E402
 from native import units as n_units  # noqa: E402
 from native import foods as n_foods  # noqa: E402
+from native import plu as n_plu  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -4245,29 +4275,290 @@ def ai_spending():
 
 # ============================================================ barcode lookup & pantry check-ins
 
+_PACK_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:x|×|\*)\s*(\d+(?:[.,]\d+)?)\s*(fl\.?\s*oz|[a-zA-Z]+)")
+_SIZE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(fl\.?\s*oz|[a-zA-Z]+)")
+
+
+def parse_pack(text):
+    """Package size text -> {qty, unit, count, each_qty, each_unit}.
+    '26 oz' -> qty 26 oz; '1 L' -> 1 l; '12 × 355 ml' -> count 12 of 355 ml; '1 dozen' -> 12 count; '6 ct' -> 6."""
+    t = (text or "").strip().lower().replace(",", ".")
+    if not t:
+        return None
+    m = _PACK_RE.search(t)
+    if m:
+        n, each, u = float(m.group(1)), float(m.group(2)), n_units.normalize(m.group(3))
+        if n_units.dimension(u) in ("volume", "weight"):
+            return {"qty": n, "unit": "", "count": n, "each_qty": each, "each_unit": u}
+    m = re.search(r"(\d+(?:\.\d+)?)\s*dozen|\bdozen\b", t)
+    if m:
+        n = float(m.group(1)) if m.group(1) else 1.0
+        return {"qty": n * 12, "unit": "", "count": n * 12, "each_qty": None, "each_unit": None}
+    m = re.search(r"(\d+)\s*(?:ct|count|pk|pack|pcs|pieces|eggs)\b", t)
+    if m:
+        return {"qty": float(m.group(1)), "unit": "", "count": float(m.group(1)), "each_qty": None, "each_unit": None}
+    for m in _SIZE_RE.finditer(t):
+        u = n_units.normalize(m.group(2))
+        if n_units.dimension(u) in ("volume", "weight"):
+            return {"qty": float(m.group(1)), "unit": u, "count": 1, "each_qty": None, "each_unit": None}
+    return None
+
+
+def _product_food(c, name, generic, cats, brand):
+    """Canonical food for a product: its name, generic name or categories (most specific last), else a new food."""
+    for cand in [generic, name] + list(reversed(cats or [])):
+        if cand and n_foods.normalize(cand, brand):
+            fid = n_foods.lookup(c, cand, brand)
+            if fid is not None:
+                return fid
+    return n_foods.resolve(c, name or generic, brand)
+
+
 def upc_lookup(code):
     with db() as c:
+        local = c.execute("SELECT * FROM upc_local WHERE code=?", (code,)).fetchone()
+        if local:
+            f = n_foods.get(c, local["food_id"]) if local["food_id"] else None
+            return {"code": code, "found": True, "name": local["name"], "brand": "", "quantity": local["quantity"] or "",
+                    "categories": [], "source": "Saved by you", "food_id": local["food_id"],
+                    "food_name": f["name"] if f else local["name"], "pack": parse_pack(local["quantity"]), "image_url": "",
+                    "rule": None}
         row = c.execute("SELECT data FROM upc_cache WHERE code=?", (code,)).fetchone()
     if row:
         return json.loads(row["data"])
-    try:
-        res = _https_json(f"https://world.openfoodfacts.org/api/v2/product/{code}.json?" + urllib.parse.urlencode(
-            {"fields": "product_name,product_name_en,generic_name,brands,quantity,categories_tags"}), timeout=12)
-    except ApiError as e:
-        raise ApiError(502, f"Couldn't look up that barcode ({e.message}). You can type the item instead.")
-    p = res.get("product") or {}
-    name = (p.get("product_name_en") or p.get("product_name") or p.get("generic_name") or "").strip()
-    found = bool(res.get("status") == 1 and name)
-    cats = [c.split(":", 1)[-1].replace("-", " ") for c in (p.get("categories_tags") or []) if c.startswith("en:")]
-    data = {"code": code, "found": found, "name": name, "brand": (p.get("brands") or "").split(",")[0].strip(),
-            "quantity": p.get("quantity") or "", "categories": cats[-4:], "source": "Open Food Facts"}
-    if found:
+    data, errors = None, []
+    for source in UPC_SOURCES:   # Open Food Facts, then Open Products Facts, then UPCitemdb's free trial
+        try:
+            data = source(code)
+        except ApiError as e:
+            errors.append(e.message)
+            continue
+        if data and data.get("found"):
+            break
+    if data is None:
+        raise ApiError(502, f"Couldn't look up that barcode ({errors[0] if errors else 'no answer'}). You can type the item instead.")
+    fid = None
+    if data.get("found"):
+        name, cats, brand = data["name"], data.get("categories") or [], data.get("brand") or ""
         with db() as c:
             rule = match_rule(c, name) or next((match_rule(c, cat) for cat in reversed(cats) if match_rule(c, cat)), None)
+            fid = _product_food(c, name, data.pop("generic", ""), cats[-4:], brand)
+            f = n_foods.get(c, fid) if fid else None
         data["rule"] = {"id": rule["id"], "name": rule["name"], "location": rule["default_location"]} if rule else None
+        data["food_id"], data["food_name"] = fid, (f["name"] if f else name)
+    data.pop("generic", None)
     with db() as c:
-        c.execute("INSERT OR REPLACE INTO upc_cache(code, data, at) VALUES (?,?,?)", (code, json.dumps(data), iso(today())))
+        c.execute("INSERT OR REPLACE INTO upc_cache(code, data, at, food_id) VALUES (?,?,?,?)",
+                  (code, json.dumps(data), iso(today()), fid))
     return data
+
+
+def _off_like(host, source):
+    def lookup(code):
+        res = _https_json(f"https://{host}/api/v2/product/{code}.json?" + urllib.parse.urlencode(
+            {"fields": "product_name,product_name_en,generic_name,generic_name_en,brands,quantity,categories_tags,"
+                       "image_front_small_url,image_front_url"}), timeout=12)
+        p = res.get("product") or {}
+        name = (p.get("product_name_en") or p.get("product_name") or p.get("generic_name") or "").strip()
+        cats = [c.split(":", 1)[-1].replace("-", " ") for c in (p.get("categories_tags") or []) if c.startswith("en:")]
+        return {"code": code, "found": bool(res.get("status") == 1 and name), "name": name,
+                "generic": (p.get("generic_name_en") or p.get("generic_name") or "").strip(),
+                "brand": (p.get("brands") or "").split(",")[0].strip(), "quantity": p.get("quantity") or "",
+                "categories": cats[-4:], "source": source, "pack": parse_pack(p.get("quantity") or ""),
+                "image_url": p.get("image_front_small_url") or p.get("image_front_url") or "", "food_id": None, "food_name": ""}
+    return lookup
+
+
+_UPCITEMDB = {"until": 0.0}
+
+
+def _upcitemdb(code):
+    """UPCitemdb free trial (no key, rate-limited): backs off for an hour after a 429."""
+    if time.time() < _UPCITEMDB["until"]:
+        raise ApiError(429, "UPCitemdb is resting")
+    try:
+        res = _https_json("https://api.upcitemdb.com/prod/trial/lookup?" + urllib.parse.urlencode({"upc": code}), timeout=12)
+    except ApiError as e:
+        if "429" in (e.message or "") or e.status == 429:
+            _UPCITEMDB["until"] = time.time() + 3600
+        raise
+    item = (res.get("items") or [{}])[0] if isinstance(res, dict) else {}
+    title = (item.get("title") or "").strip()
+    size = (item.get("size") or "").strip()
+    if not size:
+        m = re.search(r"(\d+(?:\.\d+)?\s*(?:fl\.?\s*oz|oz|lb|lbs|g|kg|ml|l|ct|count)\b)", title, re.I)
+        size = m.group(1) if m else ""
+    images = item.get("images") or []
+    return {"code": code, "found": bool(title), "name": title, "generic": "", "brand": (item.get("brand") or "").strip(),
+            "quantity": size, "categories": [x.strip() for x in (item.get("category") or "").split(">") if x.strip()][-3:],
+            "source": "UPCitemdb", "pack": parse_pack(size), "image_url": images[0] if images else "", "food_id": None,
+            "food_name": ""}
+
+
+UPC_SOURCES = [_off_like("world.openfoodfacts.org", "Open Food Facts"),
+               _off_like("world.openproductsfacts.org", "Open Products Facts"), _upcitemdb]
+
+
+def plu_lookup(code):
+    """Produce sticker codes (4011 bananas, 94011 organic bananas)."""
+    hit = n_plu.lookup(code)
+    if not hit:
+        return None
+    with db() as c:
+        fid = n_foods.resolve(c, hit["food"])
+        f = n_foods.get(c, fid)
+        rule = match_rule(c, hit["food"])
+    label = ", ".join(x for x in ("Organic" if hit["organic"] else "", hit["variety"]) if x)
+    return {"code": code, "found": True, "name": hit["food"], "brand": "", "quantity": "", "categories": [],
+            "source": "Produce code", "pack": None, "image_url": "", "food_id": fid, "food_name": f["name"],
+            "variety": label, "rule": {"id": rule["id"], "name": rule["name"], "location": rule["default_location"]} if rule else None}
+
+
+def _pantry_image(pid, url):
+    """Save a product photo for a pantry item (public HTTPS only, real image bytes only)."""
+    try:
+        blob, ctype = _fetch_image(url)
+    except Exception as e:
+        log("product photo skipped:", e)
+        return None
+    d = os.path.join(IMG_DIR, "pantry")
+    os.makedirs(d, exist_ok=True)
+    fname = f"{int(pid)}.{_ext(ctype)}"
+    with open(os.path.join(d, fname), "wb") as f:
+        f.write(blob)
+    with db() as c:
+        c.execute("UPDATE pantry_items SET image=? WHERE id=?", (fname, pid))
+    return fname
+
+
+def scan_add(b):
+    """POST /api/scan {code, location?, name?, quantity?}: one barcode scan -> a pantry item (and the list ticked).
+    Unknown codes need a name; that name is remembered for next time (upc_local)."""
+    code = re.sub(r"\D", "", _s(b.get("code"), 20))
+    is_plu = len(code) in (4, 5) and n_plu.lookup(code) is not None
+    if not (6 <= len(code) <= 14 or is_plu):
+        raise ApiError(400, "That isn't a barcode or a produce code we know.")
+    loc = b.get("location") if b.get("location") in LOCATIONS else None
+    name = " ".join(_s(b.get("name"), 80).split())
+    size = " ".join(_s(b.get("quantity"), 40).split())
+    if name:
+        with db() as c:
+            fid = _food_id(c, name)
+            c.execute("INSERT OR REPLACE INTO upc_local(code, food_id, name, quantity, at) VALUES (?,?,?,?,?)",
+                      (code, fid, name, size, iso(today())))
+    try:
+        p = plu_lookup(code) if is_plu else upc_lookup(code)
+    except ApiError as e:   # offline or the lookup failed: ask for a name rather than losing the scan
+        if not name:
+            return {"ok": False, "code": code, "needs_name": True, "error": e.message}
+        p = {"found": False}
+    if not p.get("found"):
+        return {"ok": False, "code": code, "needs_name": True}
+    pack = p.get("pack") or {}
+    with db() as c:
+        f = n_foods.get(c, p["food_id"]) if p.get("food_id") else None
+        canon = f["name"] if f else p["name"]
+        product = " · ".join(x for x in (p.get("brand"), p.get("name") if p.get("name") and p.get("name") != canon else "",
+                                         p.get("variety")) if x)
+        qty = pack.get("qty") if pack else None
+        unit = pack.get("unit") if pack else None
+        loc = loc or (f["location"] if f and f.get("location") else None) or (p.get("rule") or {}).get("location")
+        pid = add_pantry_item(c, canon, loc, None, p.get("quantity") or "", None, qty, unit, p.get("food_id"))
+        c.execute("UPDATE pantry_items SET product=?, upc=?, pack_qty=? WHERE id=?", (product or None, code, qty, pid))
+        # on the shopping list? tick it off (the pantry item is the one just made)
+        checked = None
+        if p.get("food_id") and NATIVE:
+            lid = n_lists.single_list(c)
+            li = c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0 AND food_id=? ORDER BY position LIMIT 1",
+                           (lid, p["food_id"])).fetchone()
+            if li:
+                n_lists.set_checked(c, lid, li["id"], True)
+                c.execute("UPDATE pantry_items SET mealie_item_id=? WHERE id=?", (li["id"], pid))
+                checked = {"id": li["id"], "text": n_lists._display(li)}
+        row = pantry_json(c, pantry_row(c, pid))
+    if p.get("image_url"):
+        if _pantry_image(pid, p["image_url"]):
+            with db() as c:
+                row = pantry_json(c, pantry_row(c, pid))
+    return {"ok": True, "code": code, "item": row, "list_checked": checked, "pack": pack or None,
+            "product": {"name": p.get("name"), "brand": p.get("brand"), "quantity": p.get("quantity")}}
+
+
+SNAP_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["name", "brand", "size_text"],
+               "properties": {"name": {"type": "string"}, "brand": {"type": "string"}, "size_text": {"type": "string"}}}
+
+
+def scan_photo(b):
+    """POST /api/scan/photo {code, image, location?}: a barcode nobody knows; read the package photo with AI,
+    remember the answer for that code, and add it."""
+    if not cfg("openai_key"):
+        raise ApiError(400, "Reading a package photo needs AI. Add your OpenAI key in Settings → AI recipe import.")
+    code = re.sub(r"\D", "", _s(b.get("code"), 20))
+    if not 6 <= len(code) <= 14:
+        raise ApiError(400, "That doesn't look like a barcode.")
+    img = _s(b.get("image"), 12_000_000)
+    if not img.startswith("data:image/"):
+        raise ApiError(400, "Send a photo of the package.")
+    out = openai_chat([{"role": "user", "content": [
+        {"type": "text", "text": "This is a grocery package. Read what is printed on it: name = what the product is (e.g. "
+                                 "'Iodized table salt'), brand = the brand, size_text = the net size exactly as printed (e.g. "
+                                 "'26 oz', '12 x 355 ml'), or empty. Do not guess anything that isn't visible."},
+        {"type": "image_url", "image_url": {"url": img, "detail": "low"}}]}], "package", SNAP_SCHEMA, "package photo", code)
+    name = " ".join((out.get("name") or "").split())[:80]
+    if not name:
+        raise ApiError(422, "Couldn't read the package. Type the name instead.")
+    brand = " ".join((out.get("brand") or "").split())[:60]
+    with db() as c:
+        fid = n_foods.resolve(c, name, brand)
+        c.execute("INSERT OR REPLACE INTO upc_local(code, food_id, name, quantity, at) VALUES (?,?,?,?,?)",
+                  (code, fid, n_foods.get(c, fid)["name"] if fid else name, (out.get("size_text") or "")[:40], iso(today())))
+    res = scan_add({"code": code, "location": b.get("location")})
+    if res.get("item") and brand:
+        with db() as c:
+            c.execute("UPDATE pantry_items SET product=? WHERE id=?", (" · ".join(x for x in (brand, name) if x), res["item"]["id"]))
+            res["item"] = pantry_json(c, pantry_row(c, res["item"]["id"]))
+    return res
+
+
+def scan_more(pid, delta):
+    """+1 / -1 on a scanned pantry item: known sizes add or remove one package's amount."""
+    with db() as c:
+        r = pantry_row(c, pid)
+        if not r:
+            raise ApiError(404, "Item not found")
+        if r["qty"] is not None and r["pack_qty"]:
+            q = max(0.0, r["qty"] + delta * r["pack_qty"])
+            orig = max(q, (r["original_qty"] or 0) + delta * r["pack_qty"])
+            c.execute("UPDATE pantry_items SET qty=?, original_qty=?, amount_left=? WHERE id=?",
+                      (q, orig or None, min(1.0, q / orig) if orig else 0, pid))
+            event(c, pid, "scanned", f"{'+' if delta > 0 else '-'}1 package")
+            return {"ok": True, "item": pantry_json(c, pantry_row(c, pid)), "added_id": None}
+        if delta > 0:   # amount unknown: another one of the same item
+            nid = add_pantry_item(c, r["name"], r["location"], None, r["quantity_text"], None, None, None, r["food_id"])
+            c.execute("UPDATE pantry_items SET product=?, upc=?, image=? WHERE id=?", (r["product"], r["upc"], None, nid))
+            return {"ok": True, "item": pantry_json(c, pantry_row(c, pid)), "added_id": nid}
+        twin = c.execute("SELECT id FROM pantry_items WHERE upc=? AND id<>? AND status='active' ORDER BY id DESC LIMIT 1",
+                         (r["upc"], pid)).fetchone() if r["upc"] else None
+        if twin:
+            c.execute("DELETE FROM pantry_items WHERE id=?", (twin["id"],))
+        return {"ok": True, "item": pantry_json(c, pantry_row(c, pid)), "added_id": None}
+
+
+def scan_undo(b):
+    pid = _int_id(b.get("pantry_item_id"), "item")
+    with db() as c:
+        r = pantry_row(c, pid)
+        if not r:
+            raise ApiError(404, "Item not found")
+        if r["mealie_item_id"]:
+            c.execute("UPDATE shopping_items SET checked=0, checked_at=NULL, checked_how=NULL WHERE id=?", (r["mealie_item_id"],))
+        c.execute("DELETE FROM pantry_items WHERE id=?", (pid,))
+    if r["image"]:
+        try:
+            os.remove(os.path.join(IMG_DIR, "pantry", os.path.basename(r["image"])))
+        except OSError:
+            pass
+    return {"ok": True}
 
 
 def pantry_checkin_status():
@@ -6218,9 +6509,9 @@ def scheduler():
                 flag = f"checkin_nudge_{ck['last']}"
                 if not get_internal(flag):
                     set_internal(flag, True)
-                    deliver({"subject": "🧺 Time for a quick pantry check",
-                             "text": f"It's been {ck['days_since']} days. Open TablePlan → Pantry → Check-in to confirm what's left. It takes about a minute.",
-                             "html": email_wrap("<p>Time for a quick pantry check. Open TablePlan → Pantry → <b>Check-in</b>.</p>"), "files": []})
+                    deliver({"subject": "🧺 Time for a quick inventory check",
+                             "text": f"It's been {ck['days_since']} days. Open TablePlan → Inventory → Check-in to confirm what's left. It takes about a minute.",
+                             "html": email_wrap("<p>Time for a quick inventory check. Open TablePlan → Inventory → <b>Check-in</b>.</p>"), "files": []})
             # Monthly AI budget alert (80% and 100%)
             budget = float(s.get("ai_budget") or 0)
             if budget > 0 and any(channels_ready().values()):
@@ -6244,7 +6535,7 @@ def scheduler():
 # Request body limits: screenshots/PDFs and photo uploads are big, everything else is small JSON.
 BODY_LIMITS = [
     (re.compile(r"/api/import/images"), 36_000_000),            # ~25 MB of files once base64-encoded
-    (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload"), 12_000_000),   # 8 MB image
+    (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload|/api/scan/photo"), 12_000_000),   # 8 MB image
 ]
 BODY_LIMIT_DEFAULT = 1_000_000
 
@@ -6255,7 +6546,8 @@ EXPENSIVE = [
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish)"), "ai"),
     (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
-    (re.compile(r"/api/(upc/\d+|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
+    (re.compile(r"/api/scan/photo"), "ai"),
+    (re.compile(r"/api/(upc/\d+|scan|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
 ]
 PUBLIC_PATHS = ("/", "/manifest.webmanifest", "/sw.js", "/api/session", "/api/login")
@@ -6624,6 +6916,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, import_from_mealie(self.body()))
         if m == "POST" and path == "/api/setup/complete":
             set_cfg(setup_complete=True)
+            seen = get_settings().get("whatsnew_seen") or []
+            save_settings({"whatsnew_seen": (seen + [i for i in whatsnew_ids() if i not in seen])[-500:]})   # new install: nothing is "new"
             return self.send(200, {"ok": True})
 
         # ---- import & updates
@@ -6643,6 +6937,26 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             return self.send(200, plan_preview(*date_range(b.get("start"), b.get("end"))))
         # ---- barcode lookup (Open Food Facts) & pantry check-ins
+        if m == "POST" and path == "/api/scan":
+            require_native()
+            return self.send(200, scan_add(self.body()))
+        if m == "POST" and path == "/api/scan/photo":
+            require_native()
+            return self.send(200, scan_photo(self.body()))
+        if m == "POST" and path == "/api/scan/undo":
+            return self.send(200, scan_undo(self.body()))
+        mm = re.fullmatch(r"/api/scan/(\d{1,12})/(more|less)", path)
+        if m == "POST" and mm:
+            return self.send(200, scan_more(int(mm.group(1)), 1 if mm.group(2) == "more" else -1))
+        mm = re.fullmatch(r"/img/pantry/(\d{1,12})", path)
+        if m == "GET" and mm:
+            with db() as c:
+                r = c.execute("SELECT image FROM pantry_items WHERE id=?", (int(mm.group(1)),)).fetchone()
+            fn = r["image"] if r else None
+            if not fn or not re.fullmatch(r"\d{1,12}\.(jpg|png|webp|gif)", fn):
+                return self.send(404, b"", "image/jpeg", {"Cache-Control": "no-cache"})
+            with open(os.path.join(IMG_DIR, "pantry", fn), "rb") as f:
+                return self.send(200, f.read(), mimetypes.guess_type(fn)[0] or "image/jpeg", {"Cache-Control": "private, max-age=86400"})
         mm = re.fullmatch(r"/api/upc/(\d{6,14})", path)
         if m == "GET" and mm:
             return self.send(200, upc_lookup(mm.group(1)))
