@@ -1,5 +1,21 @@
 [
  {
+  "id": "accounts",
+  "date": "2026-11-13",
+  "icon": "users",
+  "color": "teal",
+  "title": "Everyone gets their own sign-in",
+  "text": "Each person in your household signs in as themselves with a password or PIN and shares the same recipes, plans and lists. Admins add people in Settings → Members."
+ },
+ {
+  "id": "getting-started",
+  "date": "2026-11-13",
+  "icon": "check",
+  "color": "green",
+  "title": "Getting started checklist",
+  "text": "A short checklist on Home ticks itself off as you set things up. Rename, hide or add your own steps, and hide the card when you're done."
+ },
+ {
   "id": "how-long",
   "date": "2026-11-12",
   "icon": "clock",

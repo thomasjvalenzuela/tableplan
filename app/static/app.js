@@ -258,6 +258,7 @@ async function renderHome() {
   if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie">${esc(s.error)}</button>`;
   html += zoomNudge();
   html += homeContextCard(s, tonight);
+  html += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
 
   // 1. Shopping: the next few things to buy, soonest meal first
   const toBuy = ((list && list.items) || []).filter((i) => !i.checked);
@@ -293,6 +294,7 @@ async function renderHome() {
 
   html += `<section class="home-card diary-w" id="home-diary" hidden aria-label="Cooking diary"></section>`;
   app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
+  homeChecklist($("#home-cl"));
   api("GET", "/api/diary?limit=3").then((d) => {
     const box = $("#home-diary"); if (!box || !(d.entries || []).length) return;
     box.hidden = false;
@@ -1753,10 +1755,12 @@ async function openSettings() {
         ${c.backend === "native" ? "" : `<button class="row" data-sec="mealie"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("book")}</span><div class="main"><div class="a">Recipe library (Mealie)</div><div class="b">${c.connected ? "Connected" : "Not connected"}</div></div><span class="chev">${ic("chevR")}</span></button>`}
         <button class="row" data-sec="ai"><span class="ic bg-indigo" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("sparkle")}</span><div class="main"><div class="a">AI recipe import</div><div class="b">OpenAI key for screenshots, photos & videos</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" data-sec="notify"><span class="ic bg-blue" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("mail")}</span><div class="main"><div class="a">Notifications</div><div class="b">${Object.entries(c.channels || {}).filter(([, v]) => v).map(([k]) => esc(cap(CH_LABEL[k] || k))).join(", ") || "Not set up · Telegram, ntfy or email"}</div></div><span class="chev">${ic("chevR")}</span></button>
-        <button class="row" data-sec="password"><span class="ic bg-gray" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("open")}</span><div class="main"><div class="a">Password</div><div class="b">${c.auth_required ? "On" : "Off (anyone on your Wi-Fi)"}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-account"><span class="ic bg-gray" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("users")}</span><div class="main"><div class="a">Your account</div><div class="b">${c.me ? `Signed in as ${esc(c.me.name)}${c.me.admin ? " · admin" : ""}` : "Not set up · anyone on your Wi-Fi can open TablePlan"}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-members"><span class="ic bg-teal" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("users")}</span><div class="main"><div class="a">Members</div><div class="b">${c.me ? (c.me.admin ? "Add people, reset sign-ins" : "Who's in this household") : "Everyone gets their own sign-in"}</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-checklist"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("check")}</span><div class="main"><div class="a">Getting started checklist</div><div class="b">Your setup steps, ticked as you go</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <div class="group-label">Appearance</div>
-      <div class="group"><div class="field"><label>Theme<small class="lh">Saved on this device. “System” follows your phone or computer.</small></label><select id="st-theme">${[["system", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<option value="${v}" ${currentTheme() === v ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+      <div class="group"><div class="field"><label>Theme<small class="lh">Saved for you on this device${c.me ? " and with your account" : ""}. “System” follows your phone or computer.</small></label><select id="st-theme">${[["system", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<option value="${v}" ${currentTheme() === v ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
       <div class="group-label">Cooking</div>
       <div class="group">
         <div class="field"><label>Recipe style</label><select id="st-style"><option value="classic" ${s.recipe_style !== "steps" ? "selected" : ""}>Classic</option><option value="steps" ${s.recipe_style === "steps" ? "selected" : ""}>Step-by-step</option></select></div>
@@ -1822,7 +1826,7 @@ async function openSettings() {
         <button class="row" id="st-wn"><div class="main"><div class="a">What's new</div><div class="b">Everything added recently</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
-      ${c.backend === "native" ? `<div class="group-label danger-label">Danger zone</div>
+      ${c.backend === "native" && isAdmin() ? `<div class="group-label danger-label">Danger zone</div>
       <div class="group danger-zone" id="st-danger">${DANGER.map(([k, l, d]) => `<button class="row" data-reset="${k}"><div class="main"><div class="a">${k === "everything" ? "Reset everything" : k === "demo" ? "Wipe demo data" : `Reset ${esc(l.toLowerCase())}`}</div><div class="b">${esc(d)}</div></div><span class="chev">${ic("chevR")}</span></button><div class="danger-confirm" data-for="${k}" hidden></div>`).join("")}</div>
       <p class="hint">A backup is saved first every time, under Settings → Backups.</p>` : ""}
       <p class="hint" style="text-align:center;margin-top:18px">TablePlan ${esc(up.version || c.version || "")}${up.latest && !up.update_available ? " · up to date" : ""} · your data stays on your server<span class="desktop-only"><br><a ${extLink(c.repo_url) || extLink(REPO)} style="color:var(--sub)">Source code (AGPL-3.0)</a></span></p>`;
@@ -1844,6 +1848,9 @@ async function openSettings() {
     $$("[data-eat]").forEach((i) => (i.onchange = () => { const et = { ...(s.eat_times || {}) }; if (i.value) et[i.dataset.eat] = i.value; else delete et[i.dataset.eat]; save({ eat_times: et }); }));
     $("#st-startrem").onchange = (e) => { save({ start_reminder: e.target.checked }); if (e.target.checked && !anyChannel()) toast("Set up Notifications so reminders can reach you", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg)); };
     $("#st-stores").onclick = () => storesManager(draw);
+    $("#st-account").onclick = () => accountView(draw);
+    $("#st-members").onclick = () => membersView(draw);
+    $("#st-checklist").onclick = () => checklistSheet();
     $("#st-theme").onchange = (e) => { setTheme(e.target.value); save({ theme: e.target.value }); };
     bindDanger();
     $("#st-cats").onclick = () => categoriesManager(draw);
@@ -1853,7 +1860,7 @@ async function openSettings() {
     $("#st-backups").onclick = () => backupsView(draw);
     api("GET", "/api/stores").then((ss) => { const b = $("#st-stores-b"); if (b && Array.isArray(ss) && ss.length) b.textContent = ss.map((x) => x.name).join(", "); }).catch(() => {});
     $("#st-ai").onclick = () => openAiSpending();
-    const titles = { household: "Household", mealie: "Recipe library", ai: "AI recipe import", notify: "Notifications", password: "Password" };
+    const titles = { household: "Household", mealie: "Recipe library", ai: "AI recipe import", notify: "Notifications" };
     $$("[data-sec]").forEach((b) => (b.onclick = () => openSetupSection(b.dataset.sec, titles[b.dataset.sec], reloadCfg)));
     $("#st-mimport") && ($("#st-mimport").onclick = () => openMealieImport());
     $("#st-share").onclick = () => openShareSetup();
@@ -2257,6 +2264,7 @@ function openUpdateHelp() {
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("#layer").firstChild && !$("#cook") && TABS.some((t) => t[0] === location.hash.slice(1))) refresh(); });
-  setTimeout(maybeWhatsNew, 600);
+  if (sess.needs_account) setTimeout(() => maybeAccountPrompt(sess), 500);
+  else setTimeout(maybeWhatsNew, 600);
   setTimeout(() => resumeCook(), 300);   // timers survive a reload: reopen cook mode where it was
 })();

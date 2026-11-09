@@ -281,7 +281,7 @@ class PublicModeAuth(unittest.TestCase):
         self.assertEqual(st, 200)
         new_cookie = hdrs["Set-Cookie"].split(";")[0]
         self.assertIn("HttpOnly", hdrs["Set-Cookie"])
-        self.assertIn("SameSite=Lax", hdrs["Set-Cookie"])
+        self.assertIn("SameSite=Strict", hdrs["Set-Cookie"])
         # the setup code no longer works, and the session it created was revoked
         self.assertEqual(self.req("POST", "/api/login", {"password": S.SETUP_CODE})[0], 401)
         self.assertEqual(self.req("GET", "/api/config", cookie=code_cookie)[0], 401)

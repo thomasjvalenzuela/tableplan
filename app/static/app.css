@@ -1153,3 +1153,30 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .eat-form{display:flex;gap:8px;align-items:center;padding:6px 8px}
 .eat-form input{font:inherit;padding:6px 8px;border-radius:10px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
 .start-by{font-weight:600;color:var(--title)}
+/* ---------------------------------------------------------------- accounts & getting-started checklist */
+.who{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;margin:4px 0 6px}
+.who-btn{display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 8px;border-radius:16px;background:var(--card2);color:var(--text);font:inherit;font-weight:500;min-height:44px}
+.who-btn:hover,.who-btn:focus-visible{background:var(--fill2)}
+.who-av{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;background:var(--forest,#176B50);color:#fff;font-family:var(--serif);font-weight:800;font-size:22px;flex:none}
+:root[data-theme="dark"] .who-av{background:var(--mint,#32CC95);color:#091B15}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .who-av{background:var(--mint,#32CC95);color:#091B15}}
+.who-av.sm{width:34px;height:34px;font-size:15px}
+.who-n{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct-head{display:flex;align-items:center;gap:12px;margin:6px 2px 4px}
+.acct-head b{display:block;font-size:18px}.acct-head span{color:var(--sub);font-size:14px}
+.sub-h{font-family:var(--serif);font-weight:800;font-size:22px;margin:8px 2px 12px;color:var(--title)}
+.cl-bar{height:6px;border-radius:3px;background:var(--fill);overflow:hidden;margin:2px 0 8px}
+.cl-bar i{display:block;height:100%;background:var(--ink);border-radius:3px;transition:width .3s}
+.cl-rows,.cl-list{display:flex;flex-direction:column}
+.cl-row{display:flex;align-items:center;gap:10px;min-height:48px;padding:2px 0;border-top:.5px solid var(--sep)}
+.cl-list .cl-row{padding:2px 14px}.cl-list .cl-row:first-child,.cl-rows .cl-row:first-child{border-top:0}
+.cl-t{flex:1;min-width:0;display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;font:inherit;color:var(--text);background:none;padding:10px 0;min-height:44px}
+.cl-t .chev{color:var(--sub2)}
+.cl-row.done .cl-t{color:var(--sub);text-decoration:line-through;text-decoration-color:var(--sep)}
+.cl-row .check.sq:disabled{opacity:1}
+.cl-w .btn.small{margin-top:8px}
+.cl-done{display:flex;flex-direction:column;gap:4px;align-items:flex-start}.cl-done span{color:var(--sub)}
+.cl-ren{display:flex;gap:8px;flex:1;align-items:center}.cl-ren input{flex:1;min-width:0;font:inherit;padding:8px 10px;border-radius:10px;border:1px solid var(--sep);background:var(--card);color:var(--text)}
+.wiz-actions .btn.sec{white-space:nowrap}
+.cl-row .check.sq{margin-left:0}
+.cl-row .check.sq.on{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}

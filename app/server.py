@@ -494,7 +494,7 @@ def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     with db() as c:
         c.executescript(SCHEMA)
-        n_recipes.init(c); n_plans.init(c); n_lists.init(c); n_foods.init(c)
+        n_recipes.init(c); n_plans.init(c); n_lists.init(c); n_foods.init(c); n_users.init(c)
         c.execute("DELETE FROM guided_cache WHERE profile NOT IN ('ai3', 'auto3')")   # older step-by-step formats
         for table, col, typ in (("pantry_items", "food_id", "INTEGER"), ("upc_cache", "food_id", "INTEGER"),
                                 ("pantry_items", "product", "TEXT"), ("pantry_items", "image", "TEXT"),
@@ -737,6 +737,9 @@ def save_settings(patch):
     return get_settings()
 
 
+PER_USER_SETTINGS = ("theme", "whatsnew_seen")   # each member keeps their own once accounts exist
+
+
 def set_internal(key, value):
     with db() as c:
         c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -876,8 +879,130 @@ def rotate_sessions():
     set_cfg(session_secret=base64.urlsafe_b64encode(os.urandom(32)).decode())
 
 
+def users_exist():
+    with db() as c:
+        return n_users.count(c) > 0
+
+
+# ---- onboarding checklist: per person, ticked automatically as the household gets going (or by hand)
+CHECKLIST = (
+    ("account", "Create your account", "settings:account"),
+    ("household", "Set up your household", "settings:household"),
+    ("recipe", "Add your first recipe", "#recipes"),
+    ("plan", "Plan a meal", "#meals"),
+    ("list", "Shop from your list", "#list"),
+    ("inventory", "Stock your inventory", "#pantry"),
+    ("cook", "Cook a meal", "#recipes"),
+    ("notify", "Turn on notifications", "settings:notify"),
+    ("members", "Invite your household", "settings:members"),
+)
+CHECKLIST_LINK = re.compile(r"(#[a-z]+(/[A-Za-z0-9_-]{1,80})?|settings:[a-z]+)")
+
+
+def _count(c, sql):
+    try:
+        return c.execute(sql).fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
+
+def checklist_auto(user):
+    done = set()
+    if user:
+        done.add("account")
+    if cfg("household_name"):
+        done.add("household")
+    if any(channels_ready().values()) or (user and user.get("notify_email") and user.get("email")):
+        done.add("notify")
+    with db() as c:
+        checks = {"recipe": "SELECT COUNT(*) FROM recipes", "plan": "SELECT COUNT(*) FROM meal_plans",
+                  "list": "SELECT (SELECT COUNT(*) FROM shopping_items WHERE checked=1) + (SELECT COUNT(*) FROM trips)",
+                  "inventory": "SELECT COUNT(*) FROM pantry_items", "cook": "SELECT COUNT(*) FROM diary",
+                  "members": "SELECT CASE WHEN COUNT(*) >= 2 THEN 1 ELSE 0 END FROM users"}
+        for k, sql in checks.items():
+            if (NATIVE or k not in ("recipe", "plan", "list")) and _count(c, sql) > 0:
+                done.add(k)
+    return done
+
+
+def _checklist_state(h):
+    st = h.get_user_state().get("checklist")
+    st = st if isinstance(st, dict) else {}
+    return {"done": [x for x in st.get("done", []) if isinstance(x, str)][:50],
+            "hidden": [x for x in st.get("hidden", []) if isinstance(x, str)][:50],
+            "renamed": {k: v for k, v in (st.get("renamed") or {}).items() if isinstance(v, str)} if isinstance(st.get("renamed"), dict) else {},
+            "custom": [x for x in st.get("custom", []) if isinstance(x, dict) and isinstance(x.get("id"), str)][:30],
+            "dismissed": bool(st.get("dismissed"))}
+
+
+def checklist_view(h):
+    st, auto = _checklist_state(h), checklist_auto(h.user)
+    items = [{"id": i, "title": st["renamed"].get(i) or t, "default_title": t, "link": link, "custom": False}
+             for i, t, link in CHECKLIST]
+    items += [{"id": x["id"], "title": str(x.get("title") or "")[:80], "default_title": "", "link": x.get("link") or "",
+               "custom": True} for x in st["custom"]]
+    for it in items:
+        it["auto"] = it["id"] in auto
+        it["done"] = it["auto"] or it["id"] in st["done"]
+        it["hidden"] = it["id"] in st["hidden"]
+    shown = [it for it in items if not it["hidden"]]
+    n = sum(1 for it in shown if it["done"])
+    return {"items": items, "done": n, "total": len(shown), "complete": bool(shown) and n == len(shown),
+            "dismissed": st["dismissed"]}
+
+
+def checklist_action(h, b):
+    st = _checklist_state(h)
+    act, iid = b.get("action"), str(b.get("id") or "")[:40]
+    known = {i for i, _, _ in CHECKLIST} | {x["id"] for x in st["custom"]}
+    title = re.sub(r"\s+", " ", str(b.get("title") or "")).strip()[:80]
+    if act in ("tick", "untick", "hide", "unhide", "rename", "remove") and iid not in known:
+        raise ApiError(404, "That checklist item is gone.")
+    if act == "tick" and iid not in st["done"]:
+        st["done"].append(iid)
+    elif act == "untick":
+        st["done"] = [x for x in st["done"] if x != iid]
+    elif act == "hide" and iid not in st["hidden"]:
+        st["hidden"].append(iid)
+    elif act == "unhide":
+        st["hidden"] = [x for x in st["hidden"] if x != iid]
+    elif act == "rename":
+        custom = next((x for x in st["custom"] if x["id"] == iid), None)
+        if custom is not None:
+            if not title:
+                raise ApiError(400, "Give it a name.")
+            custom["title"] = title
+        elif title:
+            st["renamed"][iid] = title
+        else:
+            st["renamed"].pop(iid, None)   # blank: back to the default name
+    elif act == "add":
+        if not title:
+            raise ApiError(400, "Give it a name.")
+        link = str(b.get("link") or "").strip()
+        if link and not CHECKLIST_LINK.fullmatch(link):
+            raise ApiError(400, "Links go to a TablePlan page, like #recipes or settings:notify.")
+        if len(st["custom"]) >= 30:
+            raise ApiError(400, "That's a lot of checklist items. Remove some first.")
+        st["custom"].append({"id": "c" + secrets.token_hex(4), "title": title, "link": link})
+    elif act == "remove":
+        if not any(x["id"] == iid for x in st["custom"]):
+            raise ApiError(400, "Built-in items can be hidden, not removed.")
+        st["custom"] = [x for x in st["custom"] if x["id"] != iid]
+        st["done"] = [x for x in st["done"] if x != iid]
+    elif act == "dismiss":
+        if not checklist_view(h)["complete"]:
+            raise ApiError(400, "Finish or hide the remaining items first.")
+        st["dismissed"] = True
+    elif act == "restore":
+        st["dismissed"] = False
+    else:
+        raise ApiError(400, "Unknown checklist action.")
+    h.put_user_state({"checklist": st})
+
+
 def auth_required():
-    return bool(cfg("app_password_hash")) or PUBLIC_MODE
+    return bool(cfg("app_password_hash")) or PUBLIC_MODE or users_exist()
 
 
 def password_ok(pw):
@@ -904,22 +1029,30 @@ def _recent_fails(now):
             del _login_fails[ip]
 
 
-def login_throttled(ip):
+LOGIN_FAILS_PER_ACCOUNT = 8     # per 10 minutes, from any address (a 6-digit PIN can't be walked through)
+
+
+def login_throttled(ip, account=None):
     now = time.time()
     with _login_lock:
         _recent_fails(now)
-        total = sum(len(v) for v in _login_fails.values())
-        return len(_login_fails.get(ip, [])) >= LOGIN_FAILS_PER_IP or total >= LOGIN_FAILS_GLOBAL
+        total = sum(len(v) for k, v in _login_fails.items() if not str(k).startswith("acct:"))
+        return (len(_login_fails.get(ip, [])) >= LOGIN_FAILS_PER_IP or total >= LOGIN_FAILS_GLOBAL
+                or (account is not None and len(_login_fails.get(f"acct:{account}", [])) >= LOGIN_FAILS_PER_ACCOUNT))
 
 
-def login_failed(ip):
+def login_failed(ip, account=None):
     with _login_lock:
         _login_fails.setdefault(ip, []).append(time.time())
+        if account is not None:
+            _login_fails.setdefault(f"acct:{account}", []).append(time.time())
 
 
-def login_succeeded(ip):
+def login_succeeded(ip, account=None):
     with _login_lock:
         _login_fails.pop(ip, None)
+        if account is not None:
+            _login_fails.pop(f"acct:{account}", None)
 
 
 # ---- per-client rate limits for expensive work (imports, AI, outbound fetches) in public mode
@@ -1626,6 +1759,7 @@ from native import foods as n_foods  # noqa: E402
 from native import plu as n_plu  # noqa: E402
 from native import timers as n_timers  # noqa: E402
 from native import eta as n_eta  # noqa: E402
+from native import users as n_users  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -2769,8 +2903,22 @@ def print_pantry(items):
 
 # ============================================================ email
 
+def mail_recipients():
+    """The household's mail_to list plus every member who opted in to email (deduplicated, case-insensitive)."""
+    out, seen = [], set()
+    try:
+        with db() as c:
+            extra = n_users.notify_emails(c)
+    except sqlite3.Error:
+        extra = []
+    for a in list(cfg("mail_to") or []) + extra:
+        if a and a.lower() not in seen:
+            seen.add(a.lower()); out.append(a)
+    return out
+
+
 def email_ready():
-    return bool(cfg("smtp_host") and cfg("mail_to"))
+    return bool(cfg("smtp_host") and mail_recipients())
 
 
 def smtp_send(msg, conf=None):
@@ -2800,7 +2948,7 @@ def send_email(subject, text, html_body, attachments=(), to=None, conf=None):
     msg = EmailMessage()
     sender = (c.get("smtp_from") if conf else cfg("smtp_from")) or (c.get("smtp_user") if conf else cfg("smtp_user"))
     msg["Subject"], msg["From"] = re.sub(r"[\r\n]+", " ", subject)[:250], sender
-    msg["To"] = ", ".join(to or (c.get("mail_to") if conf else cfg("mail_to")))
+    msg["To"] = ", ".join(to or (c.get("mail_to") if conf else mail_recipients()))
     msg.set_content(text)
     msg.add_alternative(html_body, subtype="html")
     for fname, data, mime in attachments:
@@ -7861,14 +8009,30 @@ class Handler(BaseHTTPRequestHandler):
             sys.stdout.write("[tableplan] %s %s\n" % (self.client_ip(), (fmt % args).replace("\n", " ")[:500]))
 
     # ---- helpers
-    def authorized(self):
-        if not auth_required():
-            return True
+    def session_token(self):
         for part in (self.headers.get("Cookie") or "").split(";"):
             k, _, v = part.strip().partition("=")
-            if k == "tp_session" and valid_session(v):
-                return True
-        return False
+            if k == "tp_session" and v:
+                return v
+        return ""
+
+    def authorized(self):
+        """True when this request may use the app; sets self.user to the signed-in member (None without accounts)."""
+        if getattr(self, "_authed", None) is not None:
+            return self._authed
+        self.user = None
+        tok, ok = self.session_token(), False
+        if tok.startswith("u."):
+            with db() as c:
+                row = n_users.session_user(c, tok, time.time(), SESSION_DAYS * 86400)
+            if row is not None:
+                self.user, ok = n_users.public_user(row), True
+        elif tok and valid_session(tok) and not users_exist():
+            ok = True   # household-password session: only until the first account exists
+        if not ok and not auth_required():
+            ok = True
+        self._authed = ok
+        return ok
 
     def client_ip(self):
         peer = self.client_address[0] if self.client_address else ""
@@ -7882,7 +8046,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def cookie(self, value, max_age=SESSION_DAYS * 86400):
         secure = "; Secure" if getattr(_req, "scheme", "http") == "https" else ""
-        return f"tp_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
+        return f"tp_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{secure}"
 
     def send(self, code, body, ctype="application/json; charset=utf-8", headers=None):
         if getattr(self, "_sync_after", False) and code < 300:
@@ -7995,6 +8159,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(code, {"error": msg})
 
     def handle_any(self, method):
+        self._authed = None
+        self.user = None
         self._body = None
         self._req_len = 0
         self._max_body = BODY_LIMIT_DEFAULT
@@ -8104,14 +8270,43 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- session / auth
         if m == "GET" and path == "/api/session":
-            return self.send(200, {"auth_required": auth_required(), "authed": self.authorized(), "public": PUBLIC_MODE,
-                                   "needs_setup_code": PUBLIC_MODE and not cfg("app_password_hash"), "backend": "native" if NATIVE else "mealie",
+            authed = self.authorized()
+            with db() as c:
+                people = n_users.chooser(c)
+            return self.send(200, {"auth_required": auth_required(), "authed": authed, "public": PUBLIC_MODE,
+                                   "needs_setup_code": PUBLIC_MODE and not cfg("app_password_hash") and not people,
+                                   "backend": "native" if NATIVE else "mealie",
+                                   "accounts": bool(people), "profiles": people if auth_required() else [],
+                                   "household_password": bool(cfg("app_password_hash")) and not people,
+                                   "me": self.user if authed else None,
+                                   "needs_account": authed and not people and bool(cfg("setup_complete")),
+                                   "pin_allowed": not PUBLIC_MODE,
                                    "setup_complete": bool(cfg("setup_complete")), "version": APP_VERSION})
         if m == "POST" and path == "/api/login":
-            ip = self.client_ip()
-            if login_throttled(ip):
+            ip, b = self.client_ip(), self.body()
+            uid = b.get("user_id")
+            acct = int(uid) if isinstance(uid, int) or (isinstance(uid, str) and uid.isdigit() and len(uid) < 12) else None
+            if login_throttled(ip, acct):
                 raise ApiError(429, "Too many tries. Wait 10 minutes and try again.")
-            pw = self.body().get("password") or ""
+            if users_exist():
+                if acct is None:
+                    raise ApiError(400, "Choose who's signing in.")
+                with db() as c:
+                    row = n_users.verify(c, acct, b.get("secret") if isinstance(b.get("secret"), str) else "", PUBLIC_MODE)
+                    tok = n_users.new_session(c, row["id"], time.time()) if row is not None else None
+                if tok:
+                    login_succeeded(ip, acct)
+                    return self.send(200, {"ok": True, "me": n_users.public_user(row)},
+                                     headers={"Set-Cookie": self.cookie(tok)})
+                login_failed(ip, acct)
+                log(f"failed sign-in for member {acct} from {ip}")
+                time.sleep(1.0)
+                with db() as c:
+                    pin = (n_users.get(c, acct) or {"kind": ""})["kind"] == "pin"
+                if pin and PUBLIC_MODE:
+                    raise ApiError(401, "PIN sign-in is off because this TablePlan is on the internet. Ask your admin to set a password for you.")
+                raise ApiError(401, "Wrong PIN" if pin else "Wrong password")
+            pw = b.get("password") or ""
             if not auth_required() or password_ok(pw):
                 login_succeeded(ip)
                 return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie(make_session())})
@@ -8120,13 +8315,19 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(1.0)
             raise ApiError(401, "Wrong password" if cfg("app_password_hash") else "Wrong setup code. Find it in the TablePlan server log.")
         if m == "POST" and path == "/api/logout":
+            with db() as c:
+                n_users.end_session(c, self.session_token())
             return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie("", 0)})
+
+        # ---- accounts (everyone shares the household's data; accounts decide who's signed in)
+        if path.startswith("/api/me") or path.startswith("/api/users") or path.startswith("/api/account") or path == "/api/checklist":
+            return self.accounts_route(m, path)
 
         if m == "GET" and path == "/api/config":
             s = get_settings()
             base, slug = mealie_public(), cfg("group_slug")
             return self.send(200, {"mealie_url": base, "group_slug": slug,
-                                   "email_ready": email_ready(), "mail_to": cfg("mail_to") or [], "settings": s,
+                                   "email_ready": email_ready(), "mail_to": cfg("mail_to") or [], "settings": self.user_settings(s), "me": self.user,
                                    "channels": channels_ready(), "telegram_chat": cfg("telegram_chat_name"),
                                    "usda_synced_at": get_internal("usda_synced_at"),
                                    "setup_complete": bool(cfg("setup_complete")), "connected": NATIVE or bool(cfg("mealie_token")), "backend": "native" if NATIVE else "mealie",
@@ -8192,6 +8393,8 @@ class Handler(BaseHTTPRequestHandler):
                        "email": dict(smtp_host="", smtp_user="", smtp_password="", smtp_from="", mail_to=[])}[which])
             return self.send(200, notify_status())
         if m == "POST" and path == "/api/setup/password":
+            if users_exist():
+                raise ApiError(409, "Everyone signs in with their own account now. Change yours in Settings → Account.")
             pw = _s(self.body().get("password"), 1024)
             min_len = 8 if PUBLIC_MODE else 4
             if pw and len(pw) < min_len:
@@ -8209,6 +8412,8 @@ class Handler(BaseHTTPRequestHandler):
             set_cfg(setup_complete=True)
             seen = get_settings().get("whatsnew_seen") or []
             save_settings({"whatsnew_seen": (seen + [i for i in whatsnew_ids() if i not in seen])[-500:]})   # new install: nothing is "new"
+            if self.user:
+                self.put_user_state({"whatsnew_seen": whatsnew_ids()[-500:]})
             return self.send(200, {"ok": True})
 
         # ---- import & updates
@@ -8353,8 +8558,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/settings":
             if m == "PUT":
-                return self.send(200, save_settings(self.body()))
-            return self.send(200, get_settings())
+                b = self.body()
+                mine = {k: validate_setting(k, b.pop(k)) for k in PER_USER_SETTINGS if isinstance(b, dict) and k in b}
+                if mine and self.user:
+                    self.put_user_state(mine)
+                elif mine:
+                    b.update(mine)   # no accounts: these stay household settings
+                out = save_settings(b) if b else get_settings()
+                return self.send(200, self.user_settings(out))
+            return self.send(200, self.user_settings(get_settings()))
 
         # --- recipes & images
         if m == "GET" and path == "/api/foods":
@@ -8691,10 +8903,133 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def require_admin(self):
-        """Resets and member management are for the household admin once accounts exist (always allowed before)."""
-        user = getattr(self, "user", None)
-        if user is not None and not user.get("admin"):
-            raise ApiError(403, "Only the household admin can do that.")
+        """Resets and member management are for a household admin once accounts exist (always allowed before)."""
+        if users_exist() and not (getattr(self, "user", None) or {}).get("admin"):
+            raise ApiError(403, "Only a household admin can do that.")
+
+    # ---- per-user state (falls back to one household-wide record before accounts exist)
+    def get_user_state(self):
+        if self.user:
+            with db() as c:
+                return n_users.get_state(c, self.user["id"])
+        st = get_internal("anon_state", {})
+        return st if isinstance(st, dict) else {}
+
+    def put_user_state(self, patch):
+        if self.user:
+            with db() as c:
+                return n_users.put_state(c, self.user["id"], patch)
+        st = self.get_user_state()
+        st.update({k: v for k, v in patch.items() if k in n_users.STATE_KEYS})
+        set_internal("anon_state", st)
+        return st
+
+    def user_settings(self, s):
+        if not self.user:
+            return s
+        st = self.get_user_state()
+        return {**s, **{k: st[k] for k in PER_USER_SETTINGS if k in st}}
+
+    def accounts_route(self, m, path):
+        try:
+            return self._accounts_route(m, path)
+        except n_users.UserError as e:
+            raise ApiError(400, str(e))
+
+    def _signed_in_member(self):
+        if not self.user:
+            raise ApiError(400, "Create your account first (Settings → Account).")
+        return self.user
+
+    def _accounts_route(self, m, path):
+        b = self.body() if m in ("POST", "PUT", "PATCH") else {}
+        if not isinstance(b, dict):
+            raise ApiError(400, "Expected a JSON object.")
+        kind = b.get("kind") if b.get("kind") in ("password", "pin") else "password"
+        secret = b.get("secret") if isinstance(b.get("secret"), str) else ""
+        if m == "POST" and path == "/api/account/first":
+            with db() as c:
+                if n_users.count(c):
+                    raise ApiError(409, "Accounts are already set up. Sign in, or ask an admin to add you.")
+                row = n_users.create(c, b.get("name"), b.get("email"), kind, secret, PUBLIC_MODE, admin=True)
+                hs = get_settings()
+                n_users.put_state(c, row["id"], {"theme": hs.get("theme") or "system",
+                                                 "whatsnew_seen": hs.get("whatsnew_seen") or [],
+                                                 **{k: v for k, v in (get_internal("anon_state", {}) or {}).items()
+                                                    if k in ("tour", "checklist")}})
+                tok = n_users.new_session(c, row["id"], time.time())
+            rotate_sessions()                     # household-password and setup-code sessions end now
+            set_cfg(app_password_hash="")         # everyone signs in with their own account from here on
+            log(f"first account created ({row['name']}) from {self.client_ip()}; household password retired")
+            return self.send(200, {"me": n_users.public_user(row)}, headers={"Set-Cookie": self.cookie(tok)})
+        if path == "/api/me":
+            if m == "GET":
+                return self.send(200, {"me": self.user, "state": self.get_user_state(), "accounts": users_exist()})
+            if m == "PATCH":
+                me = self._signed_in_member()
+                with db() as c:
+                    row = n_users.update(c, me["id"], {k: b[k] for k in ("name", "email", "notify_email") if k in b}, False)
+                return self.send(200, {"me": n_users.public_user(row)})
+        if m == "POST" and path == "/api/me/secret":
+            me, ip = self._signed_in_member(), self.client_ip()
+            if login_throttled(ip, me["id"]):
+                raise ApiError(429, "Too many tries. Wait 10 minutes and try again.")
+            with db() as c:
+                if n_users.verify(c, me["id"], b.get("current") if isinstance(b.get("current"), str) else "", False) is None:
+                    login_failed(ip, me["id"])
+                    raise ApiError(400, "Your current password or PIN isn't right.")
+                n_users.set_secret(c, me["id"], kind, secret, PUBLIC_MODE)
+                tok = n_users.new_session(c, me["id"], time.time())
+            log(f"member {me['id']} changed their {kind}; their other devices were signed out")
+            return self.send(200, {"ok": True, "kind": kind}, headers={"Set-Cookie": self.cookie(tok)})
+        if m == "PUT" and path == "/api/me/state":
+            patch = {}
+            if "tour" in b:
+                t = b["tour"]
+                if t is not None and (not isinstance(t, dict) or len(json.dumps(t)) > 4000):
+                    raise ApiError(400, "Bad tour state.")
+                patch["tour"] = t
+            if "account_prompt" in b:
+                patch["account_prompt"] = _v_int(0, 10**14)(b["account_prompt"] or 0)
+            return self.send(200, {"state": self.put_user_state(patch)})
+        if path == "/api/checklist":
+            if m == "POST":
+                checklist_action(self, b)
+            return self.send(200, checklist_view(self))
+        if path == "/api/users":
+            if m == "GET":
+                with db() as c:
+                    return self.send(200, {"users": n_users.list_users(c) if (self.user or not n_users.count(c)) else [],
+                                           "me": self.user, "pin_allowed": not PUBLIC_MODE})
+            if m == "POST":
+                self.require_admin()
+                if not users_exist():
+                    raise ApiError(400, "Create your own account first.")
+                with db() as c:
+                    row = n_users.create(c, b.get("name"), b.get("email"), kind, secret, PUBLIC_MODE, admin=bool(b.get("admin")))
+                    n_users.put_state(c, row["id"], {"whatsnew_seen": whatsnew_ids()[-500:]})   # nothing is "new" to them
+                log(f"member {row['name']} added by {self.user['name']}")
+                return self.send(200, {"user": n_users.public_user(row)})
+        mm = re.fullmatch(r"/api/users/(\d{1,9})(/secret)?", path)
+        if mm:
+            self.require_admin()
+            uid, out = int(mm.group(1)), None
+            with db() as c:   # commit before answering, so the next request sees the change
+                if mm.group(2) and m == "POST":
+                    n_users.set_secret(c, uid, kind, secret, PUBLIC_MODE)
+                    log(f"{kind} reset for member {uid} by {self.user['name']}")
+                    out = {"ok": True}
+                elif m == "PATCH" and not mm.group(2):
+                    out = {"user": n_users.public_user(n_users.update(c, uid, b, True))}
+                elif m == "DELETE" and not mm.group(2):
+                    if uid == self.user["id"]:
+                        raise ApiError(400, "You can't remove yourself. Ask another admin.")
+                    n_users.remove(c, uid)
+                    log(f"member {uid} removed by {self.user['name']}")
+                    out = {"ok": True}
+            if out is not None:
+                return self.send(200, out)
+        raise ApiError(404, "Not found")
 
     def patch_item(self, it, b):
         """PATCH /api/list/items/{id}: store_id (remembered per food), text, checked (the bought / undo flow)."""
@@ -8792,7 +9127,7 @@ class Handler(BaseHTTPRequestHandler):
 SYNC_PATHS = re.compile(r"/api/pantry(/\d+)?|/api/list/items/[A-Za-z0-9-]{1,64}(/have)?|/api/lists/[^/]+/items/[^/]+/(bought|undo)"
                         r"|/api/scan(/.*)?|/api/trip/.*|/api/recipe/[^/]+(/have-all|/polish|/restore-original)?|/api/plan/(save|generate)"
                         r"|/api/recipes/bulk|/api/staples/.*|/api/recipe/[^/]+/(adjust/save|versions/\d+/restore)")
-VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js")
+VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js", "accounts.js")
 
 
 def _int_or_none(v):

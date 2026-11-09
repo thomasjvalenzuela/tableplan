@@ -34,18 +34,51 @@ async function _api(method, path, body) {
 // ------------------------------------------------------------------ sign-in screen
 function renderLogin(onDone, sess) {
   document.querySelector(".tabbar").style.display = "none";
-  const code = sess && sess.needs_setup_code;
   const root = document.getElementById("app");
-  root.innerHTML = `<div class="wiz"><div class="wiz-card fade-in" style="max-width:380px">
-    <div class="wiz-logo"><img class="brand-logo" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."></div>
-    <h2 class="wiz-title">TablePlan</h2><p class="wiz-sub">${code ? "This server is on the internet, so setup is locked. Enter the one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs)." : "Enter the household password."}</p>
+  const profiles = (sess && sess.profiles) || [];
+  const shell = (inner) => `<div class="wiz"><div class="wiz-card fade-in" style="max-width:400px">
+    <div class="wiz-logo"><img class="brand-logo" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."></div>${inner}</div></div>`;
+  const finish = () => { document.querySelector(".tabbar").style.display = ""; onDone(); };
+  if (profiles.length) {
+    let last = "";
+    try { last = localStorage.getItem("tp.lastUser") || ""; } catch (_) {}
+    const chooser = () => {
+      root.innerHTML = shell(`<h2 class="wiz-title">Who's cooking?</h2><p class="wiz-sub">Choose your name to sign in.</p>
+        <div class="who" role="list">${profiles.map((p) => `<button class="who-btn" role="listitem" data-uid="${_esc(p.id)}"><span class="who-av" aria-hidden="true">${_esc((p.name || "?").trim().charAt(0).toUpperCase())}</span><span class="who-n">${_esc(p.name)}</span></button>`).join("")}</div>
+        <p class="whint" style="text-align:center">New here? Ask whoever set up TablePlan to add you in Settings → Members.</p>`);
+      root.querySelectorAll("[data-uid]").forEach((b) => (b.onclick = () => secretStep(profiles.find((p) => String(p.id) === b.dataset.uid))));
+    };
+    const secretStep = (p) => {
+      const pin = p.kind === "pin";
+      root.innerHTML = shell(`<h2 class="wiz-title">Hi, ${_esc(p.name)}</h2><p class="wiz-sub">Enter your ${pin ? "PIN" : "password"}.</p>
+        <form id="lg"><input type="text" name="username" value="${_esc(p.name)}" autocomplete="username" hidden>
+        <div class="wgroup"><div class="wfield"><label for="lg-pw">${pin ? "PIN" : "Password"}</label><input type="password" id="lg-pw" ${pin ? 'inputmode="numeric" autocomplete="one-time-code"' : 'autocomplete="current-password"'} maxlength="256" autofocus></div></div>
+        <div class="wiz-err" id="lg-err"></div>
+        <div class="wiz-actions">${profiles.length > 1 ? `<button class="btn sec" type="button" id="lg-back">Not ${_esc(p.name)}?</button>` : ""}<button class="btn" type="submit">Sign in</button></div></form>`);
+      root.querySelector("#lg-back") && (root.querySelector("#lg-back").onclick = chooser);
+      root.querySelector("#lg-pw").focus();
+      root.querySelector("#lg").onsubmit = async (e) => {
+        e.preventDefault();
+        const btn = e.target.querySelector("button[type=submit]"); btn.disabled = true;
+        try {
+          await _api("POST", "/api/login", { user_id: p.id, secret: root.querySelector("#lg-pw").value });
+          try { localStorage.setItem("tp.lastUser", String(p.id)); } catch (_) {}
+          finish();
+        } catch (err) { root.querySelector("#lg-err").textContent = err.message; btn.disabled = false; root.querySelector("#lg-pw").select(); }
+      };
+    };
+    const remembered = profiles.find((p) => String(p.id) === last);
+    return remembered ? secretStep(remembered) : chooser();
+  }
+  const code = sess && sess.needs_setup_code;
+  root.innerHTML = shell(`<h2 class="wiz-title">TablePlan</h2><p class="wiz-sub">${code ? "This server is on the internet, so setup is locked. Enter the one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs)." : "Enter the household password."}</p>
     <form id="lg"><div class="wfield"><input type="${code ? "text" : "password"}" id="lg-pw" placeholder="${code ? "Setup code" : "Password"}" autocomplete="${code ? "one-time-code" : "current-password"}" autofocus></div>
     <div class="wiz-err" id="lg-err"></div>
-    <button class="btn" type="submit">Sign in</button></form></div></div>`;
+    <button class="btn" type="submit">Sign in</button></form>`);
   document.getElementById("lg").onsubmit = async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector("button"); btn.disabled = true;
-    try { await _api("POST", "/api/login", { password: document.getElementById("lg-pw").value }); document.querySelector(".tabbar").style.display = ""; onDone(); }
+    try { await _api("POST", "/api/login", { password: document.getElementById("lg-pw").value }); finish(); }
     catch (err) { document.getElementById("lg-err").textContent = err.message; btn.disabled = false; }
   };
 }
@@ -290,7 +323,63 @@ const Setup = {
       st.password = { set: true }; done && done(); return true;
     };
   },
+
+  // Your own sign-in. The first account is the household admin; it replaces the shared household password.
+  account(el, st, done) {
+    const sess = st.session || {};
+    if (sess.accounts) {
+      el.innerHTML = `<div class="wstatus ok"><b>Accounts are set up</b><span>Manage people in Settings → Members.</span></div>`;
+      return async () => true;
+    }
+    const get = accountFields(el, { pinAllowed: sess.pin_allowed !== false, lead: sess.household_password
+      ? "Everyone now signs in as themselves. Create yours first: you'll be the admin, and the shared household password stops working."
+      : "You'll be the household admin. Add everyone else in Settings → Members, each with their own password or PIN." });
+    return async () => {
+      const v = get();
+      const r = await _api("POST", "/api/account/first", { name: v.name, email: v.email, kind: v.kind, secret: v.secret });
+      try { localStorage.setItem("tp.lastUser", String(r.me.id)); } catch (_) {}
+      st.session = { ...sess, accounts: true, me: r.me }; done && done(r); return true;
+    };
+  },
 };
+
+// Name, email and a password or PIN, used for your own account and when an admin adds someone.
+// Returns a getter that validates and throws a friendly Error.
+function accountFields(el, { pinAllowed = true, lead = "", name = "", email = "", withName = true, withEmail = true, label = "" } = {}) {
+  el.innerHTML = `${lead ? `<p class="wlead">${_esc(lead)}</p>` : ""}
+    ${withName || withEmail ? `<div class="wgroup">
+      ${withName ? `<div class="wfield"><label for="ac-name">Name</label><input id="ac-name" autocomplete="name" maxlength="40" value="${_esc(name)}" placeholder="Thomas"></div>` : ""}
+      ${withEmail ? `<div class="wfield"><label for="ac-email">Email (optional)</label><input id="ac-email" type="email" autocomplete="email" maxlength="254" value="${_esc(email)}" placeholder="For notifications you opt in to"></div>` : ""}
+    </div><div style="height:12px"></div>` : ""}
+    ${pinAllowed ? `<div class="seg wseg" role="tablist" aria-label="Sign in with"><button type="button" data-k="password" class="on" role="tab" aria-selected="true">Password</button><button type="button" data-k="pin" role="tab" aria-selected="false">PIN</button></div>` : ""}
+    <div class="wgroup">
+      <div class="wfield"><label for="ac-secret" id="ac-l">${_esc(label || "Password")}</label><input id="ac-secret" type="password" autocomplete="new-password" maxlength="256"></div>
+      <div class="wfield"><label for="ac-secret2">Type it again</label><input id="ac-secret2" type="password" autocomplete="new-password" maxlength="256"></div>
+    </div>
+    <p class="whint" id="ac-hint"></p>`;
+  let kind = "password";
+  const min = pinAllowed ? 8 : 10;
+  const sec = el.querySelector("#ac-secret"), sec2 = el.querySelector("#ac-secret2");
+  const setKind = (k) => {
+    kind = k;
+    el.querySelectorAll("[data-k]").forEach((b) => { b.classList.toggle("on", b.dataset.k === k); b.setAttribute("aria-selected", String(b.dataset.k === k)); });
+    el.querySelector("#ac-l").textContent = label ? `${label} ${k === "pin" ? "PIN" : "password"}` : (k === "pin" ? "PIN" : "Password");
+    for (const i of [sec, sec2]) { i.value = ""; i.inputMode = k === "pin" ? "numeric" : "text"; i.placeholder = k === "pin" ? "6 or more digits" : `At least ${min} characters`; }
+    el.querySelector("#ac-hint").textContent = k === "pin"
+      ? "A PIN is quick on a shared kitchen tablet. It only works on your home network."
+      : pinAllowed ? "Use a password if you'll sign in away from home." : "This TablePlan is on the internet, so everyone uses a password of 10 or more characters.";
+  };
+  el.querySelectorAll("[data-k]").forEach((b) => (b.onclick = () => setKind(b.dataset.k)));
+  setKind("password");
+  return () => {
+    const v = { name: el.querySelector("#ac-name")?.value.trim() ?? "", email: el.querySelector("#ac-email")?.value.trim() ?? "", kind, secret: sec.value };
+    if (withName && !v.name) throw new Error("Enter a name.");
+    if (kind === "pin" && !/^\d{6,12}$/.test(v.secret)) throw new Error("A PIN is 6 to 12 digits.");
+    if (kind === "password" && v.secret.length < min) throw new Error(`Use a password of at least ${min} characters.`);
+    if (v.secret !== sec2.value) throw new Error(kind === "pin" ? "The PINs don't match." : "The passwords don't match.");
+    return v;
+  };
+}
 
 // Every section records its current submit handler on its container, so screens that redraw themselves
 // (Telegram linking, Mealie retry) always submit the right form.
@@ -306,7 +395,7 @@ const WIZ_STEPS = [
   { key: "mealie", title: "Recipe library", sub: "TablePlan keeps recipes in Mealie, which is included and runs on your server.", section: "mealie", skippable: true },
   { key: "ai", title: "Import from screenshots", sub: "Let AI read recipe photos, screenshots and tricky web pages.", section: "ai", skippable: true },
   { key: "notify", title: "Notifications", sub: "Get grocery lists, meal plans and use-soon alerts on your phone.", section: "notify", skippable: true },
-  { key: "password", title: "Lock it (optional)", sub: "Protect TablePlan with a household password.", section: "password", skippable: true },
+  { key: "account", title: "Your account", sub: "Each person signs in as themselves and shares the same recipes, plans and lists.", section: "account" },
   { key: "done", title: "You're all set", sub: "" },
 ];
 
@@ -315,6 +404,8 @@ async function runWizard(onFinish) {
   const root = document.getElementById("app");
   root.innerHTML = `<div class="wiz"><div class="spinner"></div></div>`;
   let st = await _api("GET", "/api/setup/status").catch(() => ({}));
+  st.session = await _api("GET", "/api/session").catch(() => ({}));
+  if (st.session.accounts) { const k = WIZ_STEPS.findIndex((s) => s.key === "account"); if (k >= 0) WIZ_STEPS.splice(k, 1); }
   if (st.mealie?.native) { const k = WIZ_STEPS.findIndex((s) => s.key === "mealie"); if (k >= 0) WIZ_STEPS.splice(k, 1); }
   let i = 0, submit = null;
 
