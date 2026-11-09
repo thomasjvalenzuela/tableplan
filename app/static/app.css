@@ -892,3 +892,19 @@ h1.title{font-family:var(--serif);font-weight:700;letter-spacing:-.01em}
 .stock-card .x{position:absolute;top:8px;right:8px;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:var(--sub)}
 .stock-card .x svg{width:16px;height:16px}
 .pill-btn.ink{background:var(--accent);color:var(--on-accent)}
+/* scan rows: how full + use-by */
+.sb-row{flex-direction:column;align-items:stretch;gap:6px}
+.sb-line{display:flex;align-items:center;gap:10px}
+.sb-ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding-left:50px}
+.fill-chips{display:inline-flex;flex-wrap:wrap;gap:4px}
+.chip-s{border:0;background:var(--fill);color:var(--text);border-radius:999px;padding:5px 10px;font-size:12.5px;font-weight:600;cursor:pointer}
+.chip-s.on{background:var(--accent);color:var(--on-accent)}
+.chip-s.exp{color:var(--sub)}
+.chip-s.exp.set{color:var(--text)}
+.sb-exp{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding-left:50px}
+.sb-exp input[type=date]{font:inherit;font-size:14px;padding:5px 8px;border-radius:9px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
+.sb-opts{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;font-size:13.5px;color:var(--sub);margin:4px auto}
+.sb-toggle{display:inline-flex;gap:6px;align-items:center}
+.sb-all{display:inline-flex;gap:6px;align-items:center}
+.sb-all input{font:inherit;font-size:13px;padding:4px 6px;border-radius:8px;border:1px solid var(--sep);background:var(--card2);color:var(--text)}
+.tr-exp{display:inline-flex;align-items:center;gap:6px}.tr-fill{flex:0 0 auto}

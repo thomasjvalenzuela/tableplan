@@ -336,6 +336,7 @@ function bindContextCard(s) {
 const entryName = (e) => (e.recipe && e.recipe.name) || e.title || "Note";
 function relExpiry(it) {
   const d = it.days_left;
+  if (it.expiry_label && d != null && d >= 0) return it.expiry_label;   // "Opened · use within 5 days", "Use by Nov 12"
   if (d === null || d === undefined) return "No use-by date";
   if (d < 0) return `Expired ${-d} day${d === -1 ? "" : "s"} ago`;
   if (d === 0) return "Use today";
@@ -1353,8 +1354,8 @@ function openPantryItem(it, after) {
   const draw = (it) => {
     const left = Math.round(it.amount_left * 100);
     const rule = it.rule;
-    const ruleLine = rule ? `${rule.name}` : "No match — set one for accurate dates";
-    const srcLabel = { package: "from package", manual: "set by you", estimate: rule ? (rule.source === "usda" ? "USDA FoodKeeper" : rule.source === "custom" ? "house rule" : "estimate") : "estimate", none: "" }[it.expiry_source] || "";
+    const ruleLine = rule ? `${rule.name}` : "No match — set one so opened items get a countdown";
+    const srcLabel = { package: "printed date", manual: "set by you", opened: "countdown since opening", frozen: "countdown since freezing", none: "" }[it.expiry_source] || "";
     sheetBody().innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;margin:-4px 2px 12px">${expiryPill(it)}<span class="muted">${esc(relExpiry(it))}${srcLabel ? ` · ${esc(srcLabel)}` : ""}</span></div>
       <div class="group"><div class="kv">
@@ -1372,14 +1373,14 @@ function openPantryItem(it, after) {
         <div class="amount-edit"><span class="muted">Amount</span><input type="number" inputmode="decimal" min="0" step="any" id="pi-qty" placeholder="—" value="${it.qty != null ? esc(+(+it.qty).toFixed(3)) : ""}" aria-label="Amount left">
           <select id="pi-unit" aria-label="Unit">${PANTRY_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (it.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
           <button class="pill-btn" id="pi-amt">Save</button></div></div>
-      ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and switches to the after-opening shelf life${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${esc(it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge)} days)` : ""}.</p>` : ""}
+      ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and starts a countdown${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${esc(it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge)} days)` : ""}.</p>` : ""}
       <div class="group-label">Stored in</div>
       <div class="seg" id="pi-loc">${["fridge", "freezer", "pantry"].map((l) => `<button data-loc="${l}" class="${it.location === l ? "on" : ""}">${cap(l)}</button>`).join("")}</div>
       <div class="group" style="margin-top:12px">
         <div class="field"><label>Use-by date</label><input type="date" id="pi-date" value="${esc(it.expires_on || "")}"></div>
         <button class="row" id="pi-rule"><div class="main"><div class="a">Shelf life</div><div class="b">${esc(ruleLine)}</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
-      <p class="hint">Have a printed date? Enter it above and it wins over the estimate.</p>
+      <p class="hint">TablePlan never guesses a date for sealed food. Enter the printed date, or it starts a countdown when you open or freeze it.${it.keeps_hint ? ` ${esc(it.keeps_hint)}.` : ""}</p>
       <div style="height:14px"></div>
       <div class="btn-row"><button class="btn red" id="pi-toss">${ic("trash")} Toss</button>${!it.opened_on && it.location !== "freezer" ? `<button class="btn sec" id="pi-open">${ic("open")} Opened</button>` : ""}</div>`;
     const done = () => { closeSheet(); after && after(); };
@@ -1439,7 +1440,7 @@ function openAddPantry(after) {
     <div class="group-label">Stored in</div>
     <div class="seg" id="ap-loc"><button data-loc="">Auto</button><button data-loc="fridge">Fridge</button><button data-loc="freezer">Freezer</button><button data-loc="pantry">Pantry</button></div>
     <div class="group" style="margin-top:12px"><div class="field"><label>Printed date</label><input type="date" id="ap-date"></div></div>
-    <p class="hint">Optional — if the package has a use-by date, it's used instead of the estimate.</p>
+    <p class="hint">Optional — the date printed on the package. Without one, there's no date until you open it.</p>
     <div style="height:14px"></div><button class="btn" id="ap-save">Add</button>`, {
     onMount() {
       const locBtns = $$("#ap-loc button");

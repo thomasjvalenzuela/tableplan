@@ -5,9 +5,9 @@ Mealie (separate container) owns recipes, AI screenshot/link import, scaling,
 meal-plan storage and shopping lists. TablePlan adds:
 
   * one-tap meal-plan generation for a week or month from your recipe pool
-  * a pantry with expiration tracking driven by USDA FoodKeeper shelf-life data
-    (mark something opened / used half → the rest gets the "after opening" date)
-  * shopping list → pantry: tick an item off and it's stocked with a due date
+  * an inventory with use-by dates you can trust: printed dates you enter, or a countdown once
+    something is opened or frozen (USDA FoodKeeper shelf-life data); sealed items are never guessed
+  * shopping list → inventory: tick an item off and it's stocked
   * email (SMTP), print, CSV, TXT and calendar (.ics) exports
   * an Apple Home–style mobile UI (static/)
 
@@ -171,7 +171,7 @@ CREATE TABLE IF NOT EXISTS pantry_items (
   opened_on TEXT,
   frozen_on TEXT,
   expires_on TEXT,
-  expiry_source TEXT DEFAULT 'estimate',        -- estimate | package | manual | none
+  expiry_source TEXT DEFAULT 'none',            -- package | manual | opened | frozen | none (old: estimate)
   rule_id INTEGER REFERENCES shelf_rules(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'active',        -- active | used | tossed
   finished_on TEXT,
@@ -416,6 +416,25 @@ def foods_unmerge(b):
     return {"ok": True}
 
 
+def migrate_expiry_estimates(c):
+    """One time: no guessed dates. Sealed items lose estimated dates; opened/frozen ones become countdowns."""
+    n = {"cleared": 0, "opened": 0, "frozen": 0}
+    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND expiry_source='estimate'").fetchall():
+        rule = c.execute("SELECT * FROM shelf_rules WHERE id=?", (r["rule_id"],)).fetchone() if r["rule_id"] else None
+        if r["location"] == "freezer" and r["frozen_on"] and rule and rule["freezer"]:
+            exp, src = parse_date(r["frozen_on"]) + timedelta(days=rule["freezer"]), "frozen"
+            n["frozen"] += 1
+        elif r["opened_on"] and opened_days(rule, r["location"]):
+            exp, src = parse_date(r["opened_on"]) + timedelta(days=opened_days(rule, r["location"])), "opened"
+            n["opened"] += 1
+        else:
+            exp, src = None, "none"
+            n["cleared"] += 1
+        c.execute("UPDATE pantry_items SET expires_on=?, expiry_source=? WHERE id=?", (iso(exp), src, r["id"]))
+    log("use-by dates: estimates removed:", ", ".join(f"{k} {v}" for k, v in n.items()))
+    return n
+
+
 def migrate_foods(c):
     """One time: canonical foods for everything already stored (recipes, list, pantry, store memory, barcodes)."""
     counts = {"foods_seeded": n_foods.seed(c, c.execute("SELECT * FROM shelf_rules").fetchall()),
@@ -479,6 +498,9 @@ def init_db():
             for r in seed["rules"]:
                 insert_rule(c, r, r.get("source", "starter"))
             log(f"seeded {len(seed['rules'])} starter shelf-life rules")
+        if not c.execute("SELECT 1 FROM settings WHERE key='expiry_no_guess'").fetchone():
+            migrate_expiry_estimates(c)
+            c.execute("INSERT INTO settings(key, value) VALUES ('expiry_no_guess', 'true')")
         if not c.execute("SELECT 1 FROM settings WHERE key='foods_migrated'").fetchone():
             migrate_foods(c)
             c.execute("INSERT INTO settings(key, value) VALUES ('foods_migrated', 'true')")
@@ -1151,11 +1173,13 @@ def add_pantry_item(c, name, location=None, package_date=None, quantity_text="",
     loc = location if location in LOCATIONS else (rule["default_location"] if rule else "fridge")
     t = today()
     pkg = parse_date(package_date)
+    # Only dates we know: a printed/package date, or (going straight into the freezer) a freezer countdown.
     if pkg:
         exp, src = pkg, "package"
+    elif loc == "freezer" and rule and rule["freezer"]:
+        exp, src = t + timedelta(days=rule["freezer"]), "frozen"
     else:
-        d = sealed_days(rule, loc)
-        exp, src = (t + timedelta(days=d), "estimate") if d else (None, "none")
+        exp, src = None, "none"
     cur = c.execute(
         """INSERT INTO pantry_items(name, quantity_text, location, purchased_on, frozen_on, expires_on,
            expiry_source, rule_id, mealie_item_id, created_at, qty, unit, original_qty, food_id)
@@ -1184,26 +1208,37 @@ def apply_pantry_action(c, item_id, body):
     t = today()
     exp = parse_date(item["expires_on"])
 
-    if action == "use":
-        left = float(body.get("left", 0))
+    def opened_countdown(when):
+        """Opening starts a countdown (after-opening shelf life); a sooner printed or typed date still wins."""
+        od = opened_days(rule, item["location"])
+        cd = when + timedelta(days=od) if od else None
+        if exp and item["expiry_source"] in ("package", "manual") and (cd is None or exp < cd):
+            return exp, item["expiry_source"]
+        return (cd, "opened") if cd else (exp if item["expiry_source"] in ("package", "manual") else None,
+                                          item["expiry_source"] if item["expiry_source"] in ("package", "manual") else "none")
+
+    if action in ("use", "fill"):
+        try:
+            left = float(body.get("left", 0))
+        except (TypeError, ValueError):
+            raise ApiError(400, "How much is left?")
         left = max(0.0, min(1.0, left))
         if left <= 0.001:
             c.execute("UPDATE pantry_items SET amount_left=0, status='used', finished_on=? WHERE id=?", (iso(t), item_id))
             event(c, item_id, "finished")
             return
         updates = {"amount_left": left}
-        if item["qty"] is not None and (item["original_qty"] or item["qty"]):
-            updates["qty"] = round(left * (item["original_qty"] or item["qty"]), 4)   # keep the known amount in step
-            updates["original_qty"] = item["original_qty"] or item["qty"]
-        if not item["opened_on"] and item["location"] != "freezer":
+        if item["qty"] is not None or item["original_qty"] is not None:
+            full = item["original_qty"] or item["qty"]
+            updates["qty"] = round(left * full, 4)   # keep the known amount in step
+            updates["original_qty"] = full
+        if left < 0.999 and not item["opened_on"] and item["location"] != "freezer":
             updates["opened_on"] = iso(t)
-            od = opened_days(rule, item["location"])
-            if od:
-                new_exp = t + timedelta(days=od)
-                # Opening can only shorten shelf life, never extend a sooner package date.
-                if not exp or new_exp < exp:
-                    updates["expires_on"] = iso(new_exp)
-                    updates["expiry_source"] = "estimate"
+            new_exp, src = opened_countdown(t)
+            updates["expires_on"], updates["expiry_source"] = iso(new_exp), src
+        elif action == "fill" and left >= 0.999 and item["opened_on"] == iso(t) and item["expiry_source"] in ("opened", "none"):
+            # set back to Full right after scanning: it isn't open after all
+            updates.update(opened_on=None, expires_on=None, expiry_source="none")
         sets = ", ".join(f"{k}=?" for k in updates)
         c.execute(f"UPDATE pantry_items SET {sets} WHERE id=?", (*updates.values(), item_id))
         event(c, item_id, "used", f"{round(left * 100)}% left; expires {updates.get('expires_on', item['expires_on'])}")
@@ -1211,11 +1246,8 @@ def apply_pantry_action(c, item_id, body):
     elif action == "open":
         if item["opened_on"]:
             return
-        od = opened_days(rule, item["location"])
-        new_exp = t + timedelta(days=od) if od else exp
-        if exp and new_exp and exp < new_exp:
-            new_exp = exp
-        c.execute("UPDATE pantry_items SET opened_on=?, expires_on=? WHERE id=?", (iso(t), iso(new_exp), item_id))
+        new_exp, src = opened_countdown(t)
+        c.execute("UPDATE pantry_items SET opened_on=?, expires_on=?, expiry_source=? WHERE id=?", (iso(t), iso(new_exp), src, item_id))
         event(c, item_id, "opened", f"expires {iso(new_exp)}")
 
     elif action == "move":
@@ -1224,32 +1256,24 @@ def apply_pantry_action(c, item_id, body):
             raise ApiError(400, "Bad location")
         if loc == item["location"]:
             return
-        new_exp = exp
-        frozen_on = item["frozen_on"]
-        if loc == "freezer":
+        kept = exp if item["expiry_source"] in ("package", "manual") else None
+        new_exp, src, frozen_on = kept, item["expiry_source"] if kept else "none", item["frozen_on"]
+        if loc == "freezer":   # freezing starts a freezer countdown
             fz = rule["freezer"] if rule else None
-            new_exp = t + timedelta(days=fz) if fz else exp
+            new_exp, src = (t + timedelta(days=fz), "frozen") if fz else (kept, src)
             frozen_on = iso(t)
-        elif item["location"] == "freezer":
-            # Thawing: use the after-thawing window, falling back to the opened window.
+        elif item["location"] == "freezer":   # thawing: the after-thawing window (falls back to after-opening)
             th = (rule["thawed_fridge"] or rule["opened_fridge"]) if rule else None
-            new_exp = t + timedelta(days=th) if th else None
+            new_exp, src = (t + timedelta(days=th), "opened") if th else (kept, src)
             frozen_on = None
-        else:
-            # Pantry <-> fridge: recompute from the right column, keep the sooner date.
-            d = (opened_days if item["opened_on"] else sealed_days)(rule, loc)
+        elif item["opened_on"]:   # opened, pantry <-> fridge: the countdown for the new place
+            d = opened_days(rule, loc)
             if d:
-                cand = t + timedelta(days=d)
-                new_exp = cand if (not exp or item["expiry_source"] != "package") else min(exp, cand)
+                cand = parse_date(item["opened_on"]) + timedelta(days=d)
+                new_exp, src = (min(kept, cand), item["expiry_source"]) if kept and kept < cand else (cand, "opened")
         c.execute("UPDATE pantry_items SET location=?, frozen_on=?, expires_on=?, expiry_source=? WHERE id=?",
-                  (loc, frozen_on, iso(new_exp), "estimate" if new_exp else "none", item_id))
+                  (loc, frozen_on, iso(new_exp), src, item_id))
         event(c, item_id, "moved", f"to {loc}; expires {iso(new_exp)}")
-
-    elif action == "set_date":
-        d = parse_date(body.get("expires_on"))
-        c.execute("UPDATE pantry_items SET expires_on=?, expiry_source=? WHERE id=?",
-                  (iso(d), "manual" if d else "none", item_id))
-        event(c, item_id, "date set", iso(d) or "cleared")
 
     elif action == "rule":
         rid = body.get("rule_id")
@@ -1260,20 +1284,27 @@ def apply_pantry_action(c, item_id, body):
         if r:
             c.execute("INSERT INTO food_map(food_key, rule_id) VALUES (?,?) ON CONFLICT(food_key) DO UPDATE SET rule_id=excluded.rule_id",
                       (key, r["id"]))
-        # Recompute expiry from purchase/open dates with the new rule (package/manual dates are kept).
+        # Countdowns (opened / frozen) follow the new rule; printed and typed dates are kept; sealed items get no guess.
         new_exp, src = exp, item["expiry_source"]
         if src not in ("package", "manual"):
-            base_open = parse_date(item["opened_on"])
-            if item["location"] == "freezer":
-                d, start = (r["freezer"] if r else None), parse_date(item["frozen_on"]) or t
-            elif base_open:
-                d, start = opened_days(r, item["location"]), base_open
+            if item["location"] == "freezer" and item["frozen_on"]:
+                d = r["freezer"] if r else None
+                new_exp, src = (parse_date(item["frozen_on"]) + timedelta(days=d), "frozen") if d else (None, "none")
+            elif item["opened_on"]:
+                d = opened_days(r, item["location"])
+                new_exp, src = (parse_date(item["opened_on"]) + timedelta(days=d), "opened") if d else (None, "none")
             else:
-                d, start = sealed_days(r, item["location"]), parse_date(item["purchased_on"]) or t
-            new_exp, src = (start + timedelta(days=d), "estimate") if d else (None, "none")
+                new_exp, src = None, "none"
         c.execute("UPDATE pantry_items SET rule_id=?, expires_on=?, expiry_source=? WHERE id=?",
                   (r["id"] if r else None, iso(new_exp), src, item_id))
         event(c, item_id, "rule", r["name"] if r else "none")
+
+    elif action == "set_date":
+        d = parse_date(body.get("expires_on"))
+        kind = "package" if body.get("source") == "package" else "manual"
+        c.execute("UPDATE pantry_items SET expires_on=?, expiry_source=? WHERE id=?",
+                  (iso(d), kind if d else "none", item_id))
+        event(c, item_id, "date set", iso(d) or "cleared")
 
     elif action == "rename":
         name = (body.get("name") or "").strip()
@@ -1318,6 +1349,33 @@ def apply_pantry_action(c, item_id, body):
         raise ApiError(400, "Unknown action")
 
 
+def _span(days):
+    return f"{days} day{'s' if days != 1 else ''}" if days < 14 else f"{round(days / 7)} weeks" if days < 60 else f"{round(days / 30)} months"
+
+
+def expiry_label(row, exp, t):
+    """How the date is known: a printed date, or a countdown from opening or freezing. None when there's no date."""
+    if not exp:
+        return None
+    d = (exp - t).days
+    when = "past due" if d < 0 else "use today" if d == 0 else f"use within {_span(d)}"
+    if row["expiry_source"] == "opened":
+        return f"Opened · {when}"
+    if row["expiry_source"] == "frozen":
+        return f"Frozen · {when}"
+    return f"Use by {exp.strftime('%b')} {exp.day}"
+
+
+def keeps_hint(rule, row):
+    """Shelf-life knowledge as a hint, never as a date: 'Usually keeps ~2 weeks after opening'."""
+    if not rule:
+        return None
+    d = opened_days(rule, row["location"]) if row["location"] != "freezer" else rule["freezer"]
+    if not d:
+        return None
+    return f"Usually keeps ~{_span(d)} {'in the freezer' if row['location'] == 'freezer' else 'after opening'}"
+
+
 def pantry_json(c, row):
     t = today()
     exp = parse_date(row["expires_on"])
@@ -1328,6 +1386,7 @@ def pantry_json(c, row):
         "purchased_on": row["purchased_on"], "opened_on": row["opened_on"], "frozen_on": row["frozen_on"],
         "expires_on": row["expires_on"], "expiry_source": row["expiry_source"],
         "days_left": (exp - t).days if exp else None, "status": row["status"], "emoji": food_emoji(row["name"]),
+        "expiry_label": expiry_label(row, exp, t), "keeps_hint": keeps_hint(rule, row),
         "qty": row["qty"], "unit": row["unit"] or "", "left_text": pantry_left_text(row),
         "product": row["product"] or "", "upc": row["upc"] or "", "food_id": row["food_id"],
         **_reserved(c, row),
@@ -4402,7 +4461,7 @@ def _off_like(host, source):
     def lookup(code):
         res = _https_json(f"https://{host}/api/v2/product/{code}.json?" + urllib.parse.urlencode(
             {"fields": "product_name,product_name_en,generic_name,generic_name_en,brands,quantity,categories_tags,"
-                       "image_front_small_url,image_front_url"}), timeout=12)
+                       "image_front_small_url,image_front_url,expiration_date"}), timeout=12)
         p = res.get("product") or {}
         name = (p.get("product_name_en") or p.get("product_name") or p.get("generic_name") or "").strip()
         cats = [c.split(":", 1)[-1].replace("-", " ") for c in (p.get("categories_tags") or []) if c.startswith("en:")]
@@ -4410,7 +4469,8 @@ def _off_like(host, source):
                 "generic": (p.get("generic_name_en") or p.get("generic_name") or "").strip(),
                 "brand": (p.get("brands") or "").split(",")[0].strip(), "quantity": p.get("quantity") or "",
                 "categories": cats[-4:], "source": source, "pack": parse_pack(p.get("quantity") or ""),
-                "image_url": p.get("image_front_small_url") or p.get("image_front_url") or "", "food_id": None, "food_name": ""}
+                "image_url": p.get("image_front_small_url") or p.get("image_front_url") or "", "food_id": None, "food_name": "",
+                "expiration_date": p.get("expiration_date") or ""}
     return lookup
 
 
@@ -4670,8 +4730,13 @@ def trip_apply(b):
                 else:
                     action = "add"
             if action == "add":
-                pid = add_pantry_item(c, name, loc, None, n_units.fmt(qty, unit) if qty is not None else "", li_id, qty, unit, fid)
+                printed = parse_date(r.get("expires_on")) if isinstance(r.get("expires_on"), str) else None
+                pid = add_pantry_item(c, name, loc, iso(printed) if printed else None, n_units.fmt(qty, unit) if qty is not None else "",
+                                      li_id, qty, unit, fid)
                 undo["created"].append(pid)
+                left = r.get("left")
+                if isinstance(left, (int, float)) and not isinstance(left, bool) and 0 < left < 0.999:
+                    apply_pantry_action(c, pid, {"action": "fill", "left": left})
             if action != "ignore":
                 items += 1
             if price is not None:
@@ -4795,7 +4860,9 @@ def scan_add(b):
         qty = pack.get("qty") if pack else None
         unit = pack.get("unit") if pack else None
         loc = loc or (f["location"] if f and f.get("location") else None) or (p.get("rule") or {}).get("location")
-        pid = add_pantry_item(c, canon, loc, None, p.get("quantity") or "", None, qty, unit, p.get("food_id"))
+        printed = parse_date(p.get("expiration_date")) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(p.get("expiration_date") or "")) else None
+        pid = add_pantry_item(c, canon, loc, iso(printed) if printed and printed >= today() else None, p.get("quantity") or "",
+                              None, qty, unit, p.get("food_id"))
         c.execute("UPDATE pantry_items SET product=?, upc=?, pack_qty=? WHERE id=?", (product or None, code, qty, pid))
         # on the shopping list? tick it off (the pantry item is the one just made)
         checked = None
@@ -7676,21 +7743,32 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, self.bought(mm.group(1), mm.group(2), mm.group(3), self.body()))
 
         # --- pantry
-        if path == "/api/pantry":
+        if path == "/api/pantry":   # (responses are sent after the transaction closes: the list sync needs the db)
             with db() as c:
                 if m == "POST":
                     b = self.body()
                     if not (b.get("name") or "").strip():
                         raise ApiError(400, "Name is required")
                     iid = add_pantry_item(c, b["name"], b.get("location"), b.get("package_date"), b.get("quantity_text", ""))
-                    return self.send(200, pantry_json(c, pantry_row(c, iid)))
-                return self.send(200, {"items": list_pantry(c, q.get("status", "active"))})
+                    out = pantry_json(c, pantry_row(c, iid))
+                else:
+                    out = {"items": list_pantry(c, q.get("status", "active"))}
+            if m == "POST":
+                self._sync_after = False
+                sync_list()
+                with db() as c:   # what the item has reserved after the sync
+                    out = pantry_json(c, pantry_row(c, out["id"]))
+            return self.send(200, out)
         mm = re.fullmatch(r"/api/pantry/(\d+)", path)
         if mm and m in ("PATCH", "POST"):
             with db() as c:
                 apply_pantry_action(c, int(mm.group(1)), self.body())
+            self._sync_after = False
+            sync_list()
+            with db() as c:
                 row = pantry_row(c, int(mm.group(1)))
-                return self.send(200, pantry_json(c, row) if row else {"deleted": True})
+                out = pantry_json(c, row) if row else {"deleted": True}
+            return self.send(200, out)
         if m == "GET" and path == "/api/pantry/match":
             with db() as c:
                 r = match_rule(c, q.get("name", ""))

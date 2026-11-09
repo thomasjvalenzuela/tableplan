@@ -368,3 +368,62 @@ class Allocation(unittest.TestCase):
         self.assertTrue(any("chili" in i["text"].lower() for i in S.ongoing_list()["items"]))
         with self.assertRaises(S.ApiError):
             S.save_settings({"staples": ["x" * 41]})
+
+
+class UseByDates(unittest.TestCase):
+    """Never guess a sealed item's date: printed dates only, or a countdown once opened or frozen."""
+
+    def add(self, name, loc="fridge", **kw):
+        with S.db() as c:
+            return S.add_pantry_item(c, name, loc, kw.get("pkg"), kw.get("text", ""), None, kw.get("qty"), kw.get("unit"))
+
+    def row(self, pid):
+        with S.db() as c:
+            return S.pantry_json(c, S.pantry_row(c, pid))
+
+    def act(self, pid, body):
+        with S.db() as c:
+            S.apply_pantry_action(c, pid, body)
+            return S.pantry_json(c, S.pantry_row(c, pid))
+
+    def test_sealed_items_get_no_date(self):
+        r = self.row(self.add("Heavy cream"))
+        self.assertEqual((r["expires_on"], r["expiry_source"], r["expiry_label"]), (None, "none", None))
+        self.assertIn("after opening", r["keeps_hint"] or "")
+        r = self.row(self.add("Heavy cream", pkg=day(9)))
+        self.assertEqual((r["expires_on"], r["expiry_source"], r["expiry_label"][:6]), (day(9), "package", "Use by"))
+
+    def test_fill_math_and_opened_countdown(self):
+        pid = self.add("Heavy cream", qty=2, unit="cup")
+        r = self.act(pid, {"action": "fill", "left": 0.5})
+        self.assertEqual((r["amount_left"], r["qty"]), (0.5, 1.0))
+        self.assertIsNotNone(r["opened_on"])
+        self.assertEqual(r["expiry_source"], "opened")
+        self.assertTrue(r["expiry_label"].startswith("Opened · use within"))
+        r = self.act(pid, {"action": "fill", "left": 1})   # back to Full right after scanning: not open after all
+        self.assertEqual((r["amount_left"], r["qty"], r["opened_on"], r["expires_on"]), (1.0, 2.0, None, None))
+        # a sooner printed date wins over the countdown
+        pid2 = self.add("Heavy cream", pkg=day(1))
+        r = self.act(pid2, {"action": "fill", "left": 0.25})
+        self.assertEqual((r["expires_on"], r["expiry_source"]), (day(1), "package"))
+        # no rule, no date
+        r = self.act(self.add("Mystery sauce"), {"action": "open"})
+        self.assertEqual((r["expires_on"], r["expiry_source"]), (None, "none"))
+
+    def test_freezing_starts_a_freezer_countdown(self):
+        pid = self.add("Ground beef")
+        r = self.act(pid, {"action": "move", "location": "freezer"})
+        self.assertEqual(r["expiry_source"], "frozen")
+        self.assertTrue(r["expiry_label"].startswith("Frozen"))
+        r = self.act(pid, {"action": "set_date", "expires_on": day(5), "source": "package"})
+        self.assertEqual(r["expiry_source"], "package")
+
+    def test_migration_drops_estimates(self):
+        a, b = self.add("Heavy cream"), self.add("Milk")
+        with S.db() as c:
+            c.execute("UPDATE pantry_items SET expires_on=?, expiry_source='estimate' WHERE id IN (?,?)", (day(7), a, b))
+            c.execute("UPDATE pantry_items SET opened_on=? WHERE id=?", (day(-1), b))
+            n = S.migrate_expiry_estimates(c)
+        self.assertEqual((n["cleared"], n["opened"]), (1, 1))
+        self.assertEqual((self.row(a)["expires_on"], self.row(a)["expiry_source"]), (None, "none"))
+        self.assertEqual(self.row(b)["expiry_source"], "opened")

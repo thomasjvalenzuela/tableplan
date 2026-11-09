@@ -1,5 +1,21 @@
 [
  {
+  "id": "trusted-dates",
+  "date": "2026-11-09",
+  "icon": "clock",
+  "color": "orange",
+  "title": "Use-by dates you can trust",
+  "text": "Use-by dates you can trust: only printed dates you enter, or a countdown once opened."
+ },
+ {
+  "id": "fill-and-date",
+  "date": "2026-11-09",
+  "icon": "scan",
+  "color": "blue",
+  "title": "How full, and when it's due",
+  "text": "When you stock up, tap ½ or ¼ for things already open, and add the printed date in one tap."
+ },
+ {
   "id": "fresh-look",
   "date": "2026-11-09",
   "icon": "sparkle",

@@ -658,9 +658,20 @@ function startScanSession(after) {
     <div class="sb-head"><b>How do you want to stock up?</b><span class="grow"></span><button class="text-btn strong" id="sb-done">Done</button></div>
     <div class="seg sb-method" id="sb-method" role="radiogroup" aria-label="Method"></div>
     <div class="chips sb-locs" id="sb-locs" role="radiogroup" aria-label="Put items in"></div>
-    <div id="sb-input"></div><div class="muted small" id="sb-n" aria-live="polite"></div>
+    <div id="sb-input"></div>
+    <div class="sb-opts"><label class="sb-toggle"><input type="checkbox" id="sb-counting" ${counting() ? "checked" : ""}> Counting what I already have</label>
+      <label class="sb-all">Set date for all <input type="date" id="sb-all-date" aria-label="Use-by date for every item this session"></label></div>
+    <div class="muted small" id="sb-n" aria-live="polite"></div>
     <div id="sb-name"></div><div class="sb-rows" id="sb-rows"></div></div>`);
   $("#sb-done").onclick = endScanSession;
+  $("#sb-counting").onchange = (e) => { try { localStorage.setItem("tp.counting", e.target.checked ? "1" : "0"); } catch (_) {} drawSession(); };
+  $("#sb-all-date").onchange = async (e) => {
+    const d = e.target.value; if (!d) return;
+    for (const row of SS.rows.filter((r) => r.item)) {
+      try { const r = await api("PATCH", `/api/pantry/${enc(row.item.id)}`, { action: "set_date", expires_on: d, source: "package" }); row.item = { ...row.item, ...r }; } catch (x) { fail(x); }
+    }
+    drawSession(); toast(`Use-by date set for ${plural(SS.rows.length, "item")}`);
+  };
   drawSession();
 }
 function drawStockInput() {
@@ -706,12 +717,38 @@ function endScanSession() {
   if (SS.after) SS.after(); else if (state.tab === "pantry") renderPantry();
   SS.after = null;
 }
+const FILLS = [[1, "Full"], [0.75, "¾"], [0.5, "½"], [0.25, "¼"], [0.1, "Almost empty"]];
+const counting = () => { try { return localStorage.getItem("tp.counting") === "1"; } catch (_) { return false; } };
+const fillLabel = (v) => (FILLS.find(([f]) => Math.abs(f - v) < 0.02) || [0, `${Math.round(v * 100)}%`])[1];
+const plusDays = (n) => isoDate(addDays(today(), n));
 function scanRowHtml(r, i) {
   if (r.naming) return "";
   const it = r.item, sub = [it.product, it.quantity_text].filter(Boolean).join(" · ");
-  return `<div class="sb-row" data-i="${i}">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="sb-img emo">${esc(it.emoji || "🥫")}</span>`}
+  const left = it.amount_left ?? 1, open = r.fillOpen ?? counting();
+  const exp = it.expires_on ? (it.expiry_label || fmt(parseISO(it.expires_on), { month: "short", day: "numeric" })) : "No date";
+  return `<div class="sb-row" data-i="${i}"><div class="sb-line">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="sb-img emo">${esc(it.emoji || "🥫")}</span>`}
     <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(sub || cap(it.location))}${r.list ? ` · <span class="ok-note">✓ Checked off your list</span>` : ""}</div></div>
-    <div class="sb-count"><button class="mini" data-less aria-label="One fewer ${esc(it.name)}">−</button><b>${esc(r.count)}</b><button class="mini" data-more aria-label="One more ${esc(it.name)}">+</button></div></div>`;
+    <div class="sb-count"><button class="mini" data-less aria-label="One fewer ${esc(it.name)}">−</button><b>${esc(r.count)}</b><button class="mini" data-more aria-label="One more ${esc(it.name)}">+</button></div></div>
+    <div class="sb-ctl">${open
+      ? `<span class="fill-chips" role="radiogroup" aria-label="How full">${FILLS.map(([f, l]) => `<button class="chip-s ${Math.abs(f - left) < 0.02 ? "on" : ""}" data-fill="${f}" role="radio" aria-checked="${Math.abs(f - left) < 0.02}">${esc(l)}</button>`).join("")}</span>`
+      : `<button class="chip-s" data-fill-open aria-expanded="false">${esc(fillLabel(left))} ▾</button>`}
+      <button class="chip-s exp ${it.expires_on ? "set" : ""}" data-exp aria-expanded="${!!r.expOpen}">Exp: ${esc(exp)}</button></div>
+    ${r.expOpen ? `<div class="sb-exp"><input type="date" data-exp-date value="${esc(it.expires_on || "")}" aria-label="Printed use-by date">
+      <button class="chip-s" data-exp-add="3">+3d</button><button class="chip-s" data-exp-add="7">+1w</button><button class="chip-s" data-exp-add="30">+1mo</button>
+      ${it.expires_on ? `<button class="chip-s" data-exp-clear>No date</button>` : ""}<span class="muted small">The date picker is for the printed date.</span></div>` : ""}</div>`;
+}
+async function patchScanned(row, body) {
+  try { const r = await api("PATCH", `/api/pantry/${enc(row.item.id)}`, body); if (r && r.id) row.item = { ...row.item, ...r }; drawSession(); }
+  catch (e) { fail(e); }
+}
+function bindScanRow(box, row) {
+  const el = $(`[data-i="${SS.rows.indexOf(row)}"]`, box); if (!el) return;
+  $$("[data-fill]", el).forEach((b) => (b.onclick = () => patchScanned(row, { action: "fill", left: +b.dataset.fill })));
+  $("[data-fill-open]", el) && ($("[data-fill-open]", el).onclick = () => { row.fillOpen = true; drawSession(); });
+  $("[data-exp]", el).onclick = () => { row.expOpen = !row.expOpen; drawSession(); };
+  $("[data-exp-date]", el) && ($("[data-exp-date]", el).onchange = (e) => { if (e.target.value) { row.expOpen = false; patchScanned(row, { action: "set_date", expires_on: e.target.value, source: "package" }); } });
+  $$("[data-exp-add]", el).forEach((b) => (b.onclick = () => { row.expOpen = false; patchScanned(row, { action: "set_date", expires_on: plusDays(+b.dataset.expAdd), source: "manual" }); }));
+  $("[data-exp-clear]", el) && ($("[data-exp-clear]", el).onclick = () => { row.expOpen = false; patchScanned(row, { action: "set_date", expires_on: "" }); });
 }
 function drawSession() {
   const bar = $("#scan-bar");
@@ -728,6 +765,7 @@ function drawSession() {
     if (!box) return;
     box.innerHTML = rowsHtml;
     $$("[data-more],[data-less]", box).forEach((b) => (b.onclick = () => bumpScan(SS.rows[+b.closest("[data-i]").dataset.i], b.hasAttribute("data-more") ? 1 : -1)));
+    SS.rows.forEach((r) => !r.naming && bindScanRow(box, r));
   });
   [$("#sb-name"), $("#sc-name")].forEach((box) => { if (box) drawNaming(box); });
 }
@@ -933,7 +971,9 @@ async function openTrip(after) {
         <div class="tr-bottom"><input class="tr-qty" type="number" inputmode="decimal" min="0" step="any" value="${r.quantity != null ? esc(r.quantity) : ""}" placeholder="Qty" aria-label="Quantity">
           <select class="tr-unit" aria-label="Unit">${TRIP_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (r.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
           <select class="tr-loc" aria-label="Store in">${["fridge", "freezer", "pantry"].map((l) => `<option value="${l}" ${r.location === l ? "selected" : ""}>${cap(l)}</option>`).join("")}</select>
-          <span class="tr-price">$<input type="number" inputmode="decimal" min="0" step="0.01" value="${r.price != null ? esc((+r.price).toFixed(2)) : ""}" aria-label="Price"></span></div></div>`).join("")}</div>
+          <span class="tr-price">$<input type="number" inputmode="decimal" min="0" step="0.01" value="${r.price != null ? esc((+r.price).toFixed(2)) : ""}" aria-label="Price"></span></div>
+        <div class="tr-bottom"><select class="tr-fill" aria-label="How full">${FILLS.map(([f, l]) => `<option value="${f}" ${(r.left ?? 1) === f ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          <label class="tr-exp muted small">Exp <input type="date" class="tr-date" value="${esc(r.expires_on || "")}" aria-label="Printed use-by date"></label></div></div>`).join("")}</div>
       <div style="height:12px"></div><button class="btn" id="tr-apply">Apply all</button>`;
     $$("#trip .trip-row").forEach((el) => {
       const r = rows[+el.dataset.i];
@@ -943,6 +983,8 @@ async function openTrip(after) {
       $(".tr-unit", el).onchange = (e) => { r.unit = e.target.value; };
       $(".tr-loc", el).onchange = (e) => { r.location = e.target.value; };
       $(".tr-price input", el).onchange = (e) => { r.price = e.target.value === "" ? null : +e.target.value; };
+      $(".tr-fill", el).onchange = (e) => { r.left = +e.target.value; };
+      $(".tr-date", el).onchange = (e) => { r.expires_on = e.target.value || null; };
     });
     $("#tr-apply").onclick = async (e) => {
       e.currentTarget.disabled = true;
