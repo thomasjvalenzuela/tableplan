@@ -124,6 +124,8 @@ function toast(msg, actionLabel, action) {
   toastTimer = setTimeout(() => t.classList.remove("on"), actionLabel ? 6000 : 3200);
 }
 const fail = (e) => toast(e.message || String(e));
+// Inventory places: fridge, freezer, pantry and shelves like the spice cabinet → [[key, label], …]
+const invPlaces = () => ((state.cfg?.settings?.locations) || [{ key: "fridge", label: "Fridge" }, { key: "freezer", label: "Freezer" }, { key: "pantry", label: "Pantry" }]).map((p) => [p.key, p.label]);
 // "17:40" → "5:40" (the board is compact; AM/PM only when it's not the evening)
 const clock12 = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(t || ""); if (!m) return t || ""; const h = +m[1]; return `${((h + 11) % 12) + 1}:${m[2]}${h < 12 ? " AM" : ""}`; };
 
@@ -1372,15 +1374,16 @@ async function renderPantry() {
   } else if (view === "grid") {
     const hot = shown.filter((i) => i.days_left != null).sort((a, b) => a.days_left - b.days_left).slice(0, 9);
     if (hot.length >= 3) html += `<div class="hotbar-h">Use soonest</div><div class="hotbar">${hot.map(slotHtml).join("")}</div>`;
-    for (const [k, l] of [["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]]) {
-      const its = shown.filter((i) => i.location === k);
+    const known = new Set(invPlaces().map(([k]) => k));
+    for (const [k, l] of invPlaces()) {   // a section per place: fridge, freezer, pantry, then shelves like the spice cabinet
+      const its = shown.filter((i) => (i.place && known.has(i.place) ? i.place : i.location) === k);
       if (its.length) html += `<div class="slots-h">${esc(l)} <span>${its.length}</span></div><div class="slots">${its.map(slotHtml).join("")}</div>`;
     }
   } else {
     html += `<div class="group" style="margin-top:12px">${shown.map((it) => {
       const left = Math.round(it.amount_left * 100);
       return `<button class="row ${INV.sel && INV.sel.has(it.id) ? "sel" : ""}" data-id="${esc(it.id)}" ${INV.sel ? `aria-pressed="${INV.sel.has(it.id)}"` : ""}>${invMark(it)}${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
-        <div class="main"><div class="a">${esc(it.name)}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
+        <div class="main"><div class="a">${esc(it.name)}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.place_label ? `${esc(it.place_label)} · ` : ""}${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
   }
@@ -1406,7 +1409,7 @@ function drawInvBar(shown) {
   };
   bar.innerHTML = `<div class="sel-row"><b>${esc(n)} selected</b><button class="text-btn" id="ib-all">Select all</button><span class="grow"></span><button class="text-btn strong" id="ib-done">Done</button></div>
     <div class="sel-row ib-acts">
-      <span class="ib-group"><span class="muted small">Move to</span>${[["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([k, l]) => `<button class="chip-s" data-mv="${k}" ${n ? "" : "disabled"}>${l}</button>`).join("")}</span>
+      <span class="ib-group"><span class="muted small">Move to</span>${invPlaces().map(([k, l]) => `<button class="chip-s" data-mv="${esc(k)}" ${n ? "" : "disabled"}>${esc(l)}</button>`).join("")}</span>
       <button class="chip-s" id="ib-used" ${n ? "" : "disabled"}>Used up</button>
       <label class="chip-s ib-date">Exp <input type="date" id="ib-date" ${n ? "" : "disabled"} aria-label="Use-by date for the selected items"></label>
       <button class="chip-s danger" id="ib-del" ${n ? "" : "disabled"}>Delete</button></div>`;
@@ -1462,7 +1465,7 @@ function openPantryItem(it, after) {
           <button class="pill-btn" id="pi-amt">Save</button></div></div>
       ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and starts a countdown${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${esc(it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge)} days)` : ""}.</p>` : ""}
       <div class="group-label">Stored in</div>
-      <div class="seg" id="pi-loc">${["fridge", "freezer", "pantry"].map((l) => `<button data-loc="${l}" class="${it.location === l ? "on" : ""}">${cap(l)}</button>`).join("")}</div>
+      <div class="tag-cloud" id="pi-loc" role="radiogroup" aria-label="Stored in">${invPlaces().map(([k, l]) => `<button class="tag ${(it.place || it.location) === k ? "on" : ""}" data-loc="${esc(k)}" role="radio" aria-checked="${(it.place || it.location) === k}">${esc(l)}</button>`).join("")}</div>
       <div class="group" style="margin-top:12px">
         <div class="field"><label>Use-by date</label><input type="date" id="pi-date" value="${esc(it.expires_on || "")}"></div>
         <button class="row" id="pi-rule"><div class="main"><div class="a">Shelf life</div><div class="b">${esc(ruleLine)}</div></div><span class="chev">${ic("chevR")}</span></button>
@@ -1487,7 +1490,7 @@ function openPantryItem(it, after) {
       const r = await act({ action: "amount", qty: q === "" ? null : q, unit: $("#pi-unit").value }, q === "" ? "Amount cleared" : "Amount saved");
       if (r) { draw(r); after && after(); }
     };
-    $$("#pi-loc [data-loc]").forEach((b) => (b.onclick = async () => { const r = await act({ action: "move", location: b.dataset.loc }, `Moved to ${b.dataset.loc}`); if (r) { draw(r); after && after(); } }));
+    $$("#pi-loc [data-loc]").forEach((b) => (b.onclick = async () => { const r = await act({ action: "move", location: b.dataset.loc }, `Moved to ${b.textContent}`); if (r) { draw(r); after && after(); } }));
     $("#pi-date").onchange = async (e) => { const r = await act({ action: "set_date", expires_on: e.target.value }, "Date saved"); if (r) { draw(r); after && after(); } };
     $("#pi-rule").onclick = () => pickRule(it, async (rule) => { const r = await act({ action: "rule", rule_id: rule ? rule.id : null }, rule ? "Shelf life updated" : null); draw(r || it); after && after(); });
     $("#pi-toss").onclick = async () => { const r = await act({ action: "toss" }); if (r) { toast(`${it.name} tossed`, "Undo", async () => { await act({ action: "restore" }); after && after(); }); done(); } };
@@ -1525,7 +1528,7 @@ function openAddPantry(after) {
       <div class="field"><input class="full" type="text" id="ap-qty" placeholder="Size (optional, e.g. 1 pint)"></div></div>
     <p class="hint" id="ap-match">Shelf life is looked up automatically.</p>
     <div class="group-label">Stored in</div>
-    <div class="seg" id="ap-loc"><button data-loc="">Auto</button><button data-loc="fridge">Fridge</button><button data-loc="freezer">Freezer</button><button data-loc="pantry">Pantry</button></div>
+    <div class="tag-cloud" id="ap-loc" role="radiogroup" aria-label="Put it in"><button class="tag" data-loc="">Auto</button>${invPlaces().map(([k, l]) => `<button class="tag" data-loc="${esc(k)}">${esc(l)}</button>`).join("")}</div>
     <div class="group" style="margin-top:12px"><div class="field"><label>Printed date</label><input type="date" id="ap-date"></div></div>
     <p class="hint">Optional — the date printed on the package. Without one, there's no date until you open it.</p>
     <div style="height:14px"></div><button class="btn" id="ap-save">Add</button>`, {

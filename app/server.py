@@ -98,7 +98,12 @@ SESSION_DAYS = 180
 
 FOODKEEPER_URL = env("FOODKEEPER_URL", "https://www.fsis.usda.gov/shared/data/EN/foodkeeper.json")
 
-LOCATIONS = ("fridge", "freezer", "pantry")
+LOCATIONS = ("fridge", "freezer", "pantry")   # storage kinds: shelf life follows these
+# Places: where things live in this kitchen. Each is one of the three kinds; "spices" and "baking" are pantry shelves.
+DEFAULT_PLACES = [{"key": "fridge", "label": "Fridge", "kind": "fridge"}, {"key": "freezer", "label": "Freezer", "kind": "freezer"},
+                  {"key": "pantry", "label": "Pantry", "kind": "pantry"},
+                  {"key": "spices", "label": "Spice cabinet", "kind": "pantry"},
+                  {"key": "baking", "label": "Baking supplies", "kind": "pantry"}]
 DEFAULT_STORES = ("Aldi", "Costco")
 DEFAULT_SETTINGS = {
     "meal_types": ["dinner"],
@@ -116,6 +121,7 @@ DEFAULT_SETTINGS = {
     "oven": "conventional",           # conventional | convection | air_fryer | toaster_oven
     "eat_times": {"breakfast": "08:00", "lunch": "12:30", "dinner": "18:30"},   # when we usually eat, per meal
     "start_reminder": False,          # message me when it's time to start cooking
+    "locations": DEFAULT_PLACES,      # inventory places (fridge, freezer, pantry + shelves like the spice cabinet)
     "temp_unit": "F",                 # F | C
     "ai_budget": 0,                   # monthly USD; 0 = no alert
     "pantry_check_days": 7,           # remind to review the pantry every N days (0 = off)
@@ -498,7 +504,8 @@ def init_db():
         c.execute("DELETE FROM guided_cache WHERE profile NOT IN ('ai3', 'auto3')")   # older step-by-step formats
         for table, col, typ in (("pantry_items", "food_id", "INTEGER"), ("upc_cache", "food_id", "INTEGER"),
                                 ("pantry_items", "product", "TEXT"), ("pantry_items", "image", "TEXT"),
-                                ("pantry_items", "upc", "TEXT"), ("pantry_items", "pack_qty", "REAL")):
+                                ("pantry_items", "upc", "TEXT"), ("pantry_items", "pack_qty", "REAL"),
+                                ("pantry_items", "place", "TEXT")):
             if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pantry_items)")}
@@ -643,6 +650,44 @@ def whatsnew_ids():
         return []
 
 
+def _v_places(v):
+    if not isinstance(v, list) or not 3 <= len(v) <= 20:
+        raise ValueError("must be a list of 3 to 20 places")
+    out, seen = [], set()
+    for x in v:
+        if not isinstance(x, dict):
+            raise ValueError("has a bad place")
+        key, label, kind = str(x.get("key") or ""), " ".join(str(x.get("label") or "").split())[:30], x.get("kind")
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,19}", key) or key in seen or kind not in LOCATIONS or not label:
+            raise ValueError(f"has a bad place {key[:20]}")
+        if key in LOCATIONS and kind != key:
+            raise ValueError(f"keeps {key} as a {key}")
+        seen.add(key)
+        out.append({"key": key, "label": label, "kind": kind})
+    if not set(LOCATIONS) <= seen:
+        raise ValueError("must keep the fridge, freezer and pantry")
+    return out
+
+
+def places():
+    return {p["key"]: p for p in (get_settings().get("locations") or DEFAULT_PLACES)}
+
+
+def split_place(key):
+    """A place key -> (storage kind, place key or None). Unknown keys -> (None, None)."""
+    p = places().get(key) if isinstance(key, str) else None
+    if not p:
+        return None, None
+    return p["kind"], (None if p["key"] in LOCATIONS else p["key"])
+
+
+def ensure_place(key, label, kind="pantry"):
+    """Add a place (e.g. the spice cabinet) if this household doesn't have it yet."""
+    ps = list(places().values())
+    if key not in {p["key"] for p in ps}:
+        save_settings({"locations": ps + [{"key": key, "label": label, "kind": kind}]})
+
+
 def _v_eat_times(v):
     if not isinstance(v, dict) or len(v) > 10:
         raise ValueError("must map meal types to times")
@@ -707,6 +752,7 @@ SETTINGS_VALIDATORS = {
     "oven": _v_enum("conventional", "convection", "air_fryer", "toaster_oven"),
     "eat_times": _v_eat_times,
     "start_reminder": _v_bool,
+    "locations": _v_places,
     "temp_unit": _v_enum("F", "C"),
     "ai_budget": _v_num(0, 100_000),
     "pantry_check_days": _v_int(0, 365),
@@ -891,12 +937,17 @@ CHECKLIST = (
     ("recipe", "Add your first recipe", "#recipes"),
     ("plan", "Plan a meal", "#meals"),
     ("list", "Shop from your list", "#list"),
-    ("inventory", "Stock your inventory", "#pantry"),
+    ("inv_fridge", "Inventory your fridge", "stock:fridge"),
+    ("inv_freezer", "Inventory your freezer", "stock:freezer"),
+    ("inv_pantry", "Inventory your pantry", "stock:pantry"),
+    ("inv_spices", "Inventory your spice cabinet", "stock:spices"),
+    ("inv_baking", "Inventory your baking supplies", "stock:baking"),
     ("cook", "Cook a meal", "#recipes"),
     ("notify", "Turn on notifications", "settings:notify"),
     ("members", "Invite your household", "settings:members"),
 )
-CHECKLIST_LINK = re.compile(r"(#[a-z]+(/[A-Za-z0-9_-]{1,80})?|settings:[a-z]+)")
+CHECKLIST_LINK = re.compile(r"(#[a-z]+(/[A-Za-z0-9_-]{1,80})?|settings:[a-z]+|stock:[a-z][a-z0-9_]{1,19})")
+CHECKLIST_PLACE_MIN = 5          # "Inventory your fridge" ticks itself at 5 items there
 
 
 def _count(c, sql):
@@ -917,17 +968,29 @@ def checklist_auto(user):
     with db() as c:
         checks = {"recipe": "SELECT COUNT(*) FROM recipes", "plan": "SELECT COUNT(*) FROM meal_plans",
                   "list": "SELECT (SELECT COUNT(*) FROM shopping_items WHERE checked=1) + (SELECT COUNT(*) FROM trips)",
-                  "inventory": "SELECT COUNT(*) FROM pantry_items", "cook": "SELECT COUNT(*) FROM diary",
+                  "cook": "SELECT COUNT(*) FROM diary",
                   "members": "SELECT CASE WHEN COUNT(*) >= 2 THEN 1 ELSE 0 END FROM users"}
         for k, sql in checks.items():
             if (NATIVE or k not in ("recipe", "plan", "list")) and _count(c, sql) > 0:
                 done.add(k)
+        try:
+            for r in c.execute("SELECT COALESCE(place, location) k, COUNT(*) n FROM pantry_items WHERE status='active' GROUP BY 1"):
+                if r["n"] >= CHECKLIST_PLACE_MIN:
+                    done.add(f"inv_{r['k']}")
+        except sqlite3.Error:
+            pass
     return done
 
 
 def _checklist_state(h):
     st = h.get_user_state().get("checklist")
     st = st if isinstance(st, dict) else {}
+    # one "Stock your inventory" became a step per place: its tick carries over to the pantry
+    for k in ("done", "hidden"):
+        if isinstance(st.get(k), list) and "inventory" in st[k]:
+            st[k] = [x for x in st[k] if x != "inventory"] + (["inv_pantry"] if k == "done" and "inv_pantry" not in st[k] else [])
+    if isinstance(st.get("renamed"), dict):
+        st["renamed"].pop("inventory", None)
     return {"done": [x for x in st.get("done", []) if isinstance(x, str)][:50],
             "hidden": [x for x in st.get("hidden", []) if isinstance(x, str)][:50],
             "renamed": {k: v for k, v in (st.get("renamed") or {}).items() if isinstance(v, str)} if isinstance(st.get("renamed"), dict) else {},
@@ -1336,7 +1399,8 @@ def add_pantry_item(c, name, location=None, package_date=None, quantity_text="",
     qty = float(qty) if qty is not None and float(qty) > 0 else None
     unit = n_units.normalize(unit) if qty is not None else None
     rule = match_rule(c, name)
-    loc = location if location in LOCATIONS else (rule["default_location"] if rule else "fridge")
+    kind, place = split_place(location)
+    loc = kind or (rule["default_location"] if rule else "fridge")
     t = today()
     pkg = parse_date(package_date)
     # Only dates we know: a printed/package date, or (going straight into the freezer) a freezer countdown.
@@ -1353,7 +1417,9 @@ def add_pantry_item(c, name, location=None, package_date=None, quantity_text="",
         (name.strip(), quantity_text or "", loc, iso(t), iso(t) if loc == "freezer" else None, iso(exp), src,
          rule["id"] if rule else None, mealie_item_id, datetime.now().isoformat(timespec="seconds"), qty, unit, qty,
          food_id if food_id is not None else _food_id(c, name)))
-    event(c, cur.lastrowid, "added", f"{loc}; expires {iso(exp) or 'unknown'}")
+    if place:
+        c.execute("UPDATE pantry_items SET place=? WHERE id=?", (place, cur.lastrowid))
+    event(c, cur.lastrowid, "added", f"{place or loc}; expires {iso(exp) or 'unknown'}")
     return cur.lastrowid
 
 
@@ -1417,9 +1483,11 @@ def apply_pantry_action(c, item_id, body):
         event(c, item_id, "opened", f"expires {iso(new_exp)}")
 
     elif action == "move":
-        loc = body.get("location")
-        if loc not in LOCATIONS:
+        loc, place = split_place(body.get("location"))
+        if loc is None:
             raise ApiError(400, "Bad location")
+        if place != item["place"]:
+            c.execute("UPDATE pantry_items SET place=? WHERE id=?", (place, item_id))
         if loc == item["location"]:
             return
         kept = exp if item["expiry_source"] in ("package", "manual") else None
@@ -1549,6 +1617,7 @@ def pantry_json(c, row):
     return {
         "id": row["id"], "name": row["name"], "quantity_text": row["quantity_text"],
         "location": row["location"], "amount_left": row["amount_left"],
+        "place": row["place"], "place_label": (places().get(row["place"]) or {}).get("label") if row["place"] else None,
         "purchased_on": row["purchased_on"], "opened_on": row["opened_on"], "frozen_on": row["frozen_on"],
         "expires_on": row["expires_on"], "expiry_source": row["expiry_source"],
         "days_left": (exp - t).days if exp else None, "status": row["status"], "emoji": food_emoji(row["name"]),
@@ -5215,7 +5284,7 @@ def trip_apply(b):
             unit = n_units.normalize(_s(r.get("unit"), 20)) if qty is not None else None
             if unit and n_units.dimension(unit) is None:
                 unit = ""
-            loc = r.get("location") if r.get("location") in LOCATIONS else None
+            loc = r.get("location") if split_place(r.get("location"))[0] else None
             fid = _food_id(c, name)
             pid = li_id = None
             if action == "check_off":
@@ -5345,7 +5414,7 @@ def scan_add(b):
     is_plu = len(code) in (4, 5) and n_plu.lookup(code) is not None
     if not (6 <= len(code) <= 14 or is_plu):
         raise ApiError(400, "That isn't a barcode or a produce code we know.")
-    loc = b.get("location") if b.get("location") in LOCATIONS else None
+    loc = b.get("location") if split_place(b.get("location"))[0] else None
     name = " ".join(_s(b.get("name"), 80).split())
     size = " ".join(_s(b.get("quantity"), 40).split())
     if name:
@@ -8319,6 +8388,14 @@ class Handler(BaseHTTPRequestHandler):
                 n_users.end_session(c, self.session_token())
             return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie("", 0)})
 
+        if m == "POST" and path == "/api/places/ensure":
+            key = self.body().get("key")
+            known = {"spices": "Spice cabinet", "baking": "Baking supplies"}
+            if key not in known and key not in places():
+                raise ApiError(404, "Unknown place.")
+            if key in known:
+                ensure_place(key, known[key])
+            return self.send(200, {"locations": list(places().values())})
         # ---- accounts (everyone shares the household's data; accounts decide who's signed in)
         if path.startswith("/api/me") or path.startswith("/api/users") or path.startswith("/api/account") or path == "/api/checklist":
             return self.accounts_route(m, path)

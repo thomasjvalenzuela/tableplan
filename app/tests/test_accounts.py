@@ -201,7 +201,7 @@ class AccountsHttp(unittest.TestCase):
 
     def test_checklist_auto_manual_custom_dismiss(self):
         st, _, cl = self.req("GET", "/api/checklist")
-        self.assertEqual(cl["total"], 9)
+        self.assertEqual(cl["total"], 13)
         self.assertFalse({i["id"]: i for i in cl["items"]}["account"]["done"])
         cookie, me = self.first()
         cl = self.req("GET", "/api/checklist", cookie=cookie)[2]
@@ -214,7 +214,7 @@ class AccountsHttp(unittest.TestCase):
         items = {i["id"]: i for i in cl["items"]}
         self.assertTrue(items["cook"]["done"])
         self.assertEqual(items["plan"]["title"], "Plan Monday")
-        self.assertEqual(cl["total"], 9)          # 9 built-in - 1 hidden + 1 custom
+        self.assertEqual(cl["total"], 13)         # 13 built-in - 1 hidden + 1 custom
         self.assertEqual(self.req("POST", "/api/checklist", {"action": "add", "title": "x", "link": "javascript:alert(1)"}, cookie=cookie)[0], 400)
         self.assertEqual(self.req("POST", "/api/checklist", {"action": "dismiss"}, cookie=cookie)[0], 400)
         for it in cl["items"]:
@@ -234,6 +234,41 @@ class AccountsHttp(unittest.TestCase):
         st, _, data = self.req("PUT", "/api/me/state", {"account_prompt": int(_t.time() * 1000) + 3 * 86400000})
         self.assertEqual(st, 200, data)
         self.assertGreater(data["state"]["account_prompt"], 10 ** 12)
+
+    def test_checklist_inventory_by_place(self):
+        st, _, cl = self.req("GET", "/api/checklist")
+        ids = [i["id"] for i in cl["items"]]
+        for k in ("inv_fridge", "inv_freezer", "inv_pantry", "inv_spices", "inv_baking"):
+            self.assertIn(k, ids)
+        self.assertNotIn("inventory", ids)
+        links = {i["id"]: i["link"] for i in cl["items"]}
+        self.assertEqual(links["inv_spices"], "stock:spices")
+        with S.db() as c:
+            c.execute("DELETE FROM pantry_items")
+            for n in ("Cumin", "Paprika", "Oregano", "Cinnamon"):
+                S.add_pantry_item(c, n, "spices")
+        items = {i["id"]: i for i in self.req("GET", "/api/checklist")[2]["items"]}
+        self.assertFalse(items["inv_spices"]["done"])                   # 4 isn't enough
+        with S.db() as c:
+            S.add_pantry_item(c, "Nutmeg", "spices")
+            row = c.execute("SELECT location, place FROM pantry_items WHERE name='Nutmeg'").fetchone()
+        self.assertEqual((row["location"], row["place"]), ("pantry", "spices"))   # a pantry shelf
+        items = {i["id"]: i for i in self.req("GET", "/api/checklist")[2]["items"]}
+        self.assertTrue(items["inv_spices"]["done"] and items["inv_spices"]["auto"])
+        self.assertFalse(items["inv_pantry"]["done"])                   # the spice cabinet isn't the pantry
+        # an old checklist's manual "Stock your inventory" tick moves to the pantry
+        S.set_internal("anon_state", {"checklist": {"done": ["inventory", "cook"], "hidden": [], "renamed": {"inventory": "x"}, "custom": []}})
+        items = {i["id"]: i for i in self.req("GET", "/api/checklist")[2]["items"]}
+        self.assertTrue(items["inv_pantry"]["done"] and not items["inv_pantry"]["auto"])
+        self.assertTrue(items["cook"]["done"])
+        # a removed place comes back when its checklist step is used
+        S.save_settings({"locations": [p for p in S.DEFAULT_PLACES if p["key"] != "baking"]})
+        self.assertNotIn("baking", S.places())
+        self.assertEqual(self.req("POST", "/api/places/ensure", {"key": "baking"})[0], 200)
+        self.assertEqual(S.places()["baking"]["label"], "Baking supplies")
+        self.assertEqual(self.req("POST", "/api/places/ensure", {"key": "garage"})[0], 404)
+        with S.db() as c:
+            c.execute("DELETE FROM pantry_items")
 
     def test_notify_emails_join_recipients(self):
         cookie, me = self.first()

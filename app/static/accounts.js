@@ -11,11 +11,23 @@ const SETTINGS_LINKS = { account: "Your account", members: "Members", household:
 function openLink(link) {
   if (!link) return;
   if (link.startsWith("#")) { closeSheet(true); location.hash = link.slice(1); return; }
+  if (link.startsWith("stock:")) return stockAt(link.slice(6));
   const k = link.startsWith("settings:") ? link.slice(9) : "";
   if (k === "account") return accountView();
   if (k === "members") return membersView();
   if (["household", "notify", "ai"].includes(k)) return openSetupSection(k, SETTINGS_LINKS[k], reloadCfg);
   openSettings();
+}
+
+// "Inventory your spice cabinet": open Stock up with that place picked (adding the place if it's new).
+async function stockAt(key) {
+  closeSheet(true);
+  if (!invPlaces().some(([k]) => k === key)) {
+    try { const r = await api("POST", "/api/places/ensure", { key }); state.cfg.settings.locations = r.locations; } catch (e) { return fail(e); }
+  }
+  SS.loc = key; try { localStorage.setItem("tp.scanLoc", key); } catch (_) {}
+  if (location.hash !== "#pantry") go("pantry");
+  setTimeout(() => startStockUp(renderPantry), 300);
 }
 
 // ------------------------------------------------------------------ Settings → Account

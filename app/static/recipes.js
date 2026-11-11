@@ -935,7 +935,7 @@ const BC_OPTS = { formats: ["EAN13", "EAN8", "UPCA", "UPCE"], tryHarder: true, m
 // ------------------------------------------------------------------ barcode scan sessions (camera, USB or Bluetooth scanner)
 // A keyboard-wedge scanner "types" the digits fast and ends with Enter. Every scan adds to the pantry at once (with
 // Undo), ticks it off the shopping list if it's there, and scanning the same code again adds one more.
-const SCAN_LOCS = [["pantry", "Pantry"], ["fridge", "Fridge"], ["freezer", "Freezer"]];
+const scanLocs = () => { const ps = invPlaces(); return [...ps.filter(([k]) => k === "pantry"), ...ps.filter(([k]) => k !== "pantry")]; };
 const SS = { active: false, loc: (() => { try { return localStorage.getItem("tp.scanLoc") || ""; } catch (_) { return ""; } })(), rows: [], naming: null, queue: [], busy: false, foods: null, after: null };
 const scanCount = () => SS.rows.reduce((n, r) => n + r.count, 0);
 const STOCK_METHODS = [["scanner", "Scanner"], ["camera", "Camera"], ["type", "Type it"], ["receipt", "Receipt"]];
@@ -1052,7 +1052,7 @@ function drawSession() {
   const loc = SS.loc || "pantry";
   if (bar) {
     drawStockInput();
-    $("#sb-locs").innerHTML = SCAN_LOCS.map(([k, l]) => `<button class="filter sm ${loc === k ? "on" : ""}" data-sl="${k}" role="radio" aria-checked="${loc === k}">${esc(l)}</button>`).join("");
+    $("#sb-locs").innerHTML = scanLocs().map(([k, l]) => `<button class="filter sm ${loc === k ? "on" : ""}" data-sl="${esc(k)}" role="radio" aria-checked="${loc === k}">${esc(l)}</button>`).join("");
     $$("#sb-locs [data-sl]").forEach((b) => (b.onclick = () => { SS.loc = b.dataset.sl; try { localStorage.setItem("tp.scanLoc", SS.loc); } catch (_) {} drawSession(); }));
     const n = scanCount();
     $("#sb-n").textContent = n ? `${plural(n, "item")} added` : stockMethod() === "scanner" ? "Ready, scan away" : "";
