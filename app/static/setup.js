@@ -1,8 +1,10 @@
-/* Theme: System / Light / Dark, chosen per device (falls back to the household setting). */
+/* Look before anything renders: this device's last theme + mode (the server usually set them already from a cookie). */
 (function () {
-  let t = "";
-  try { t = localStorage.getItem("tp.theme") || ""; } catch (_) {}
-  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  const r = document.documentElement;
+  let m = "", t = "";
+  try { m = localStorage.getItem("tp.theme") || ""; t = localStorage.getItem("tp.palette") || ""; } catch (_) {}
+  if (!r.dataset.mode && (m === "light" || m === "dark")) r.dataset.mode = m;
+  if (!r.dataset.theme && /^(midnight|blossom|forest)$/.test(t)) r.dataset.theme = t;
 })();
 /* TablePlan — sign-in, first-run setup wizard, and the setup sections reused by Settings. Loaded before app.js. */
 "use strict";
@@ -37,7 +39,7 @@ function renderLogin(onDone, sess) {
   const root = document.getElementById("app");
   const profiles = (sess && sess.profiles) || [];
   const shell = (inner) => `<div class="wiz"><div class="wiz-card fade-in" style="max-width:400px">
-    <div class="wiz-logo"><img class="brand-logo" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."></div>${inner}</div></div>`;
+    <div class="wiz-logo"><img class="brand-logo logo-l" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."><img class="brand-logo logo-d" src="/static/logo-white.png" alt="TablePlan · Plan meals. Shop smarter."></div>${inner}</div></div>`;
   const finish = () => { document.querySelector(".tabbar").style.display = ""; onDone(); };
   if (profiles.length) {
     let last = "";
@@ -414,7 +416,7 @@ async function runWizard(onFinish) {
     const dots = WIZ_STEPS.map((_, n) => `<i class="${n === i ? "on" : n < i ? "past" : ""}"></i>`).join("");
     root.innerHTML = `<div class="wiz"><div class="wiz-card fade-in">
       <div class="wiz-dots">${dots}</div>
-      ${step.key === "welcome" || step.key === "done" ? `<div class="wiz-logo"><img class="brand-logo" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."></div>` : ""}
+      ${step.key === "welcome" || step.key === "done" ? `<div class="wiz-logo"><img class="brand-logo logo-l" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."><img class="brand-logo logo-d" src="/static/logo-white.png" alt="TablePlan · Plan meals. Shop smarter."></div>` : ""}
       <h2 class="wiz-title">${_esc(step.title)}</h2>${step.sub ? `<p class="wiz-sub">${_esc(step.sub)}</p>` : ""}
       <div id="wiz-body"></div><div class="wiz-err" id="wiz-err"></div>
       <div class="wiz-actions">

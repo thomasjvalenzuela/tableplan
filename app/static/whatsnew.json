@@ -1,5 +1,13 @@
 [
  {
+  "id": "pick-your-look",
+  "date": "2026-11-14",
+  "icon": "sparkle",
+  "color": "indigo",
+  "title": "Pick your look",
+  "text": "A cleaner black-and-white design is the new default. Prefer color? Choose Midnight, Blossom or Forest, in light or dark, under Settings → Appearance."
+ },
+ {
   "id": "accounts",
   "date": "2026-11-13",
   "icon": "users",

@@ -65,15 +65,38 @@ const cssUrl = (u) => { const s = safeUrl(u, true); return s ? `url('${esc(s.rep
 const bgStyle = (u) => { const c = cssUrl(u); return c ? `style="background-image:${c}"` : ""; };
 // External link attributes (href + target + rel), or "" when the URL isn't http(s)/same-origin.
 const extLink = (u) => { const s = safeUrl(u); return s ? `href="${esc(s)}" target="_blank" rel="noopener noreferrer"` : ""; };
-// Theme: this device's choice, else the household default, else the system setting
-const currentTheme = () => { try { return localStorage.getItem("tp.theme") || state.cfg?.settings?.theme || "system"; } catch (_) { return "system"; } };
-function applyTheme(t) {
+// Look = theme (Mono, Midnight, Blossom, Forest) + mode (System, Light, Dark). Your account's choice, with this device's
+// copy as the fallback; a cookie lets the server set it on the page before the first paint (no flash).
+const LOOKS = { mono: ["Mono", "#FFFFFF", "#000000", "#0A0A0A"], midnight: ["Midnight", "#FFFFFF", "#050B1A", "#0B1F4D"],
+  blossom: ["Blossom", "#FFF5F7", "#0D070B", "#B8235E"], forest: ["Forest", "#F3FAF6", "#07120E", "#176B50"] };
+const lsGet = (k) => { try { return localStorage.getItem(k) || ""; } catch (_) { return ""; } };
+const currentTheme = () => state.cfg?.settings?.theme || lsGet("tp.theme") || "system";            // the mode
+const currentLook = () => { const p = state.cfg?.settings?.palette || lsGet("tp.palette"); return LOOKS[p] ? p : "mono"; };
+function applyTheme(mode = currentTheme(), look = currentLook()) {
   const root = document.documentElement;
-  if (t === "light" || t === "dark") root.dataset.theme = t; else delete root.dataset.theme;
-  const dark = t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
-  $$('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", dark ? "#091B15" : "#F3FAF6"));
+  if (mode === "light" || mode === "dark") root.dataset.mode = mode; else delete root.dataset.mode;
+  if (look && look !== "mono") root.dataset.theme = look; else delete root.dataset.theme;
+  const [, light, dark] = LOOKS[look] || LOOKS.mono;
+  const metas = $$('meta[name="theme-color"]');
+  metas.forEach((m) => {
+    const isDark = /dark/.test(m.getAttribute("media") || "");
+    m.setAttribute("content", mode === "light" ? light : mode === "dark" ? dark : isDark ? dark : light);
+  });
+  try {
+    localStorage.setItem("tp.theme", mode); localStorage.setItem("tp.palette", look);
+    document.cookie = `tp_look=${look}.${mode}; Path=/; Max-Age=31536000; SameSite=Strict${location.protocol === "https:" ? "; Secure" : ""}`;
+  } catch (_) {}
 }
-function setTheme(t) { try { localStorage.setItem("tp.theme", t); } catch (_) {} applyTheme(t); }
+function setTheme(mode, look) { if (state.cfg?.settings) { if (mode) state.cfg.settings.theme = mode; if (look) state.cfg.settings.palette = look; } applyTheme(mode || currentTheme(), look || currentLook()); }
+// Large titles collapse into a compact blurred bar once they scroll away.
+function updateCompactBar() {
+  const bar = document.getElementById("cbar"); if (!bar) return;
+  const h = document.querySelector("#app h1.title, #app .rd2 h1");
+  const show = !!h && !$("#cook") && h.getBoundingClientRect().bottom < (parseFloat(getComputedStyle(bar).height) || 46);
+  if (show) bar.firstElementChild.textContent = h.textContent.trim();
+  bar.classList.toggle("on", show);
+}
+window.addEventListener("scroll", updateCompactBar, { passive: true });
 const BUILD = (() => { try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch (_) { return ""; } })();
 const app = $("#app");
 const state = { tab: "home", cfg: null, summary: null, listId: localStorage.getItem("tp.list") || null, pantryFilter: "all", plan: null };
@@ -184,6 +207,7 @@ function go(tab) {
 }
 let lastHash = null;
 function route() {
+  setTimeout(updateCompactBar, 60);
   if (location.hash === lastHash && document.getElementById("app").childElementCount) return;
   lastHash = location.hash;
   document.body.classList.remove("selecting");
@@ -260,6 +284,7 @@ async function renderHome() {
   if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie">${esc(s.error)}</button>`;
   html += zoomNudge();
   html += homeContextCard(s, tonight);
+  html += homeStats(s, list);
   html += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
 
   // 1. Shopping: the next few things to buy, soonest meal first
@@ -326,6 +351,18 @@ async function renderHome() {
   $("#tn-cook") && ($("#tn-cook").onclick = open);
   $("#tn-miss") && ($("#tn-miss").onclick = open);
   bindContextCard(s);
+}
+// Stat tiles: big number, small label, a tiny tag.
+function homeStats(s, list) {
+  const exp = (s.expiring || []), gone = exp.filter((i) => +i.days_left < 0).length;
+  const toBuy = ((list && list.items) || []).filter((i) => !i.checked);
+  const week = (s.week || []).filter((e) => e.recipe && !e.cooked && !e.skipped);
+  const mins = week.reduce((n, e) => n + (+(e.recipe.eta?.shown || e.recipe.minutes) || 0), 0);
+  const hrs = mins >= 60 ? `${Math.round(mins / 6) / 10} h` : `${mins} min`;
+  return `<div class="stats" role="group" aria-label="At a glance">
+    <button class="stat" data-go="pantry"><b>${esc(s.pantry_count || 0)}</b><span>in inventory</span>${exp.length ? `<i class="${gone ? "bad" : "warn"}">${gone ? `${esc(gone)} expired` : `${esc(exp.length)} use soon`}</i>` : `<i>all fresh</i>`}</button>
+    <button class="stat" data-go="list"><b>${esc(toBuy.length)}</b><span>to buy</span><i>${esc(plural(new Set(toBuy.flatMap((i) => (i.uses || []).map((u) => u.date))).size, "day"))}</i></button>
+    <button class="stat" data-go="meals"><b>${esc(mins ? hrs : week.length)}</b><span>${mins ? "cooking this week" : "meals this week"}</span><i>${esc(plural(week.length, "meal"))}</i></button></div>`;
 }
 const storeName = (list, id) => (id == null ? "" : ((list.stores || []).find((x) => String(x.id) === String(id)) || {}).name || "");
 // At most one nudge on Home, most useful first: missing ingredients > plan running out > check-in > stock your kitchen
@@ -1763,7 +1800,10 @@ async function openSettings() {
         <button class="row" id="st-checklist"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("check")}</span><div class="main"><div class="a">Getting started checklist</div><div class="b">Your setup steps, ticked as you go</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <div class="group-label">Appearance</div>
-      <div class="group"><div class="field"><label>Theme<small class="lh">Saved for you on this device${c.me ? " and with your account" : ""}. “System” follows your phone or computer.</small></label><select id="st-theme">${[["system", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<option value="${v}" ${currentTheme() === v ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+      <div class="group"><div class="field"><label>Mode<small class="lh">Saved for you${c.me ? " with your account" : " on this device"}. “System” follows your phone or computer.</small></label></div>
+        <div style="padding:0 14px 12px"><div class="seg" id="st-mode" role="radiogroup" aria-label="Mode">${[["system", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button data-mode="${v}" role="radio" aria-checked="${currentTheme() === v}" class="${currentTheme() === v ? "on" : ""}">${l}</button>`).join("")}</div></div>
+        <div class="field"><label>Theme</label></div>
+        <div class="looks" id="st-looks" role="radiogroup" aria-label="Theme">${Object.entries(LOOKS).map(([k, [l, bgL, bgD, ink]]) => `<button class="look ${currentLook() === k ? "on" : ""}" data-look="${k}" role="radio" aria-checked="${currentLook() === k}"><span class="sw" aria-hidden="true"><i style="background:${bgL}"></i><i style="background:${ink}"></i><i style="background:${bgD}"></i></span><b>${l}</b></button>`).join("")}</div></div>
       <div class="group-label">Cooking</div>
       <div class="group">
         <div class="field"><label>Recipe style</label><select id="st-style"><option value="classic" ${s.recipe_style !== "steps" ? "selected" : ""}>Classic</option><option value="steps" ${s.recipe_style === "steps" ? "selected" : ""}>Step-by-step</option></select></div>
@@ -1854,7 +1894,8 @@ async function openSettings() {
     $("#st-account").onclick = () => accountView(draw);
     $("#st-members").onclick = () => membersView(draw);
     $("#st-checklist").onclick = () => checklistSheet();
-    $("#st-theme").onchange = (e) => { setTheme(e.target.value); save({ theme: e.target.value }); };
+    $$("#st-mode [data-mode]").forEach((b) => (b.onclick = () => { setTheme(b.dataset.mode); save({ theme: b.dataset.mode }); $$("#st-mode [data-mode]").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", String(x === b)); }); }));
+    $$("#st-looks [data-look]").forEach((b) => (b.onclick = () => { setTheme(null, b.dataset.look); save({ palette: b.dataset.look }); $$("#st-looks [data-look]").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", String(x === b)); }); }));
     bindDanger();
     $("#st-cats").onclick = () => categoriesManager(draw);
     $("#st-staples").onclick = () => staplesManager(draw);
@@ -2253,8 +2294,8 @@ function openUpdateHelp() {
   if (!sess.setup_complete) return runWizard(() => location.reload());
   try { state.cfg = await api("GET", "/api/config"); }
   catch (e) { app.innerHTML = `<h1 class="title">TablePlan</h1><div class="banner">${esc(e.message)}</div>`; return; }
-  applyTheme(currentTheme());
-  matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => applyTheme(currentTheme()));
+  applyTheme();
+  matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => applyTheme());
   checkUpdate(); setInterval(checkUpdate, 3600e3);
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ai: a }; }).catch(() => {});
   route();

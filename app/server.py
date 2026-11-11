@@ -130,7 +130,8 @@ DEFAULT_SETTINGS = {
     "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
     "polish_imports": True,           # AI rewrites imported steps clearly (never amounts); needs an OpenAI key
     "whatsnew_seen": [],              # ids from static/whatsnew.json already shown (on any device)
-    "theme": "system",                # system | light | dark (a device's own choice wins)
+    "theme": "system",                # mode: system | light | dark (a device's own choice wins)
+    "palette": "mono",                # look: mono | midnight | blossom | forest
     "staples": ["Table salt", "Kosher salt", "Black pepper", "Water", "Olive oil", "Vegetable oil", "Cooking spray",
                 "Granulated sugar", "All-purpose flour", "Baking soda", "Baking powder"],   # "always have": never on the list
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
@@ -763,6 +764,7 @@ SETTINGS_VALIDATORS = {
     "categories": _v_categories,
     "whatsnew_seen": _v_ids(500),
     "theme": _v_enum("system", "light", "dark"),
+    "palette": _v_enum("mono", "midnight", "blossom", "forest"),
     "staples": lambda v: _v_names(v, 100, 40),
 }
 
@@ -783,7 +785,7 @@ def save_settings(patch):
     return get_settings()
 
 
-PER_USER_SETTINGS = ("theme", "whatsnew_seen")   # each member keeps their own once accounts exist
+PER_USER_SETTINGS = ("theme", "palette", "whatsnew_seen")   # each member keeps their own once accounts exist
 
 
 def set_internal(key, value):
@@ -9190,6 +9192,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(full, "rb") as f:
             data = f.read()
         if rel == "index.html":
+            data = look_index(data, self.headers.get("Cookie") or "")
             # Versioned asset URLs: a Home Screen app picks up new code as soon as the server is updated.
             v = urllib.parse.quote(APP_VERSION, safe="")
             for a in VERSIONED_ASSETS:
@@ -9204,6 +9207,27 @@ class Handler(BaseHTTPRequestHandler):
 SYNC_PATHS = re.compile(r"/api/pantry(/\d+)?|/api/list/items/[A-Za-z0-9-]{1,64}(/have)?|/api/lists/[^/]+/items/[^/]+/(bought|undo)"
                         r"|/api/scan(/.*)?|/api/trip/.*|/api/recipe/[^/]+(/have-all|/polish|/restore-original)?|/api/plan/(save|generate)"
                         r"|/api/recipes/bulk|/api/staples/.*|/api/recipe/[^/]+/(adjust/save|versions/\d+/restore)")
+# The look (theme + light/dark) is applied before the first paint: the browser sends its choice as a cookie and the
+# page arrives with the attributes already set (no inline script needed under the strict CSP).
+LOOK_COLORS = {"mono": ("#FFFFFF", "#000000"), "midnight": ("#FFFFFF", "#050B1A"), "blossom": ("#FFF5F7", "#0D070B"),
+               "forest": ("#F3FAF6", "#07120E")}
+
+
+def look_index(data, cookie_header):
+    m = re.search(r"(?:^|;\s*)tp_look=([a-z]+)\.([a-z]+)(?:;|$)", cookie_header)
+    if not m or m.group(1) not in LOOK_COLORS or m.group(2) not in ("system", "light", "dark"):
+        return data
+    theme, mode = m.group(1), m.group(2)
+    attrs = f' data-theme="{theme}"' + (f' data-mode="{mode}"' if mode != "system" else "")
+    data = data.replace(b'<html lang="en">', f'<html lang="en"{attrs}>'.encode(), 1)
+    light, dark = LOOK_COLORS[theme]
+    if mode != "system":
+        light = dark = (dark if mode == "dark" else light)
+    data = data.replace(b'content="#FFFFFF" media="(prefers-color-scheme: light)"', f'content="{light}" media="(prefers-color-scheme: light)"'.encode(), 1)
+    data = data.replace(b'content="#000000" media="(prefers-color-scheme: dark)"', f'content="{dark}" media="(prefers-color-scheme: dark)"'.encode(), 1)
+    return data
+
+
 VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js", "accounts.js")
 
 
