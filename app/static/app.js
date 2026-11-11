@@ -392,7 +392,7 @@ function homeContextCard(s, tonight) {
     return `<button class="nudge" id="ctx-plan"><span class="ic bg-orange">${ic("cal")}</span><span><b>${st.days_left ? `Your plan runs out in ${esc(plural(st.days_left, "day"))}` : "Nothing planned yet"}</b><small>Pick the next meals, one day at a time.</small></span><span class="chev">${ic("chevR")}</span></button>`;
   }
   if (s.pantry_checkin?.due) {
-    return `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Time for an inventory check-in</b><small>${s.pantry_checkin.last ? `Last checked ${esc(s.pantry_checkin.days_since)} days ago. ` : ""}Confirm what's still there so plans and lists stay accurate.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+    return `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Kitchen check-in</b><small>A few items might be gone or running low. Swipe through them, about a minute.</small></span><span class="chev">${ic("chevR")}</span></button>`;
   }
   let hidden = 0;
   try { hidden = +localStorage.getItem("tp.stockCardHidden") || 0; } catch (_) {}
@@ -1423,7 +1423,7 @@ async function renderPantry() {
   bindTopbar();
   $("#p-select").onclick = () => { INV.sel = INV.sel ? null : new Set(); state.invKeepSel = true; renderPantry(); };
   $("#p-scan").onclick = () => startStockUp(renderPantry);
-  $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Check-in</button><button data-a="share">${ic("share")} Share or print</button>`, (el) => {
+  $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Kitchen check-in</button><button data-a="share">${ic("share")} Share or print</button>`, (el) => {
     $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ trip: () => openTrip(renderPantry), ci: () => openCheckin(renderPantry), share: () => openShare("pantry", {}) })[b.dataset.a](); }));
   });
   $("#btn-addp").onclick = () => openAddPantry(renderPantry);
@@ -1883,7 +1883,8 @@ async function openSettings() {
       <div class="group-label">Inventory</div>
       <div class="group"><button class="row" id="st-staples"><div class="main"><div class="a">Always have</div><div class="b">${esc((s.staples || []).slice(0, 4).join(", "))}${(s.staples || []).length > 4 ? "…" : ""}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group">
-        <div class="field"><label>Check-in reminder</label><select id="st-ci">${[[0, "Off"], [7, "Weekly"], [14, "Every 2 weeks"], [30, "Monthly"]].map(([v, l]) => `<option value="${v}" ${+s.pantry_check_days === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div class="field"><label for="st-ci">Kitchen check-in</label><select id="st-ci">${[[0, "Off"], [7, "Weekly"], [14, "Every 2 weeks"]].map(([v, l]) => `<option value="${v}" ${+s.pantry_check_days === v || (v === 14 && +s.pantry_check_days > 14) ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div class="field ${+s.pantry_check_days ? "" : "hidden"}" id="st-ci-when"><label for="st-ci-day">Check-in on</label><select id="st-ci-day">${["sun", "mon", "tue", "wed", "thu", "fri", "sat"].map((d) => `<option value="${d}" ${(s.checkin_day || "sun") === d ? "selected" : ""}>${esc(cap(d))} evening</option>`).join("")}</select></div>
       </div>
       <p class="hint">Weekly is recommended: a quick “still have it?” review keeps use-by dates and shopping lists honest.</p>
       <div class="group-label">AI</div>
@@ -1928,7 +1929,8 @@ async function openSettings() {
     $("#st-stove").onchange = (e) => save({ stove: e.target.value });
     $("#st-oven").onchange = (e) => save({ oven: e.target.value });
     $("#st-tu").onchange = (e) => save({ temp_unit: e.target.value });
-    $("#st-ci").onchange = (e) => save({ pantry_check_days: +e.target.value });
+    $("#st-ci").onchange = (e) => { save({ pantry_check_days: +e.target.value }); $("#st-ci-when").classList.toggle("hidden", !+e.target.value); };
+    $("#st-ci-day").onchange = (e) => save({ checkin_day: e.target.value });
     $("#st-hz").onchange = async (e) => { await save({ plan_horizon_days: +e.target.value }); if (state.tab === "meals") replan(); };
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $$("[data-eat]").forEach((i) => (i.onchange = () => { const et = { ...(s.eat_times || {}) }; if (i.value) et[i.dataset.eat] = i.value; else delete et[i.dataset.eat]; save({ eat_times: et }); }));

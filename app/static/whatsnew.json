@@ -1,5 +1,13 @@
 [
  {
+  "id": "kitchen-checkin",
+  "date": "2026-11-20",
+  "icon": "check",
+  "color": "green",
+  "title": "Kitchen check-in",
+  "text": "Once a week (Sunday evening by default, or every 2 weeks, or off), TablePlan asks about the handful of items it's least sure of: past their date, opened a while ago, untouched for weeks, nearly finished, or bought so regularly they're probably gone. Swipe right for still have, left for gone, or tap Running low; Undo fixes a slip, and All good skips the rest. It learns how fast your household goes through things."
+ },
+ {
   "id": "budget-prices",
   "date": "2026-11-19",
   "icon": "dollar",

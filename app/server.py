@@ -124,7 +124,9 @@ DEFAULT_SETTINGS = {
     "locations": DEFAULT_PLACES,      # inventory places (fridge, freezer, pantry + shelves like the spice cabinet)
     "temp_unit": "F",                 # F | C
     "ai_budget": 0,                   # monthly USD; 0 = no alert
-    "pantry_check_days": 7,           # remind to review the pantry every N days (0 = off)
+    "pantry_check_days": 7,           # kitchen check-in: 7 weekly, 14 every 2 weeks, 0 off
+    "checkin_day": "sun",             # ...on this day
+    "checkin_hour": 18,               # ...from this hour (Sunday evening)
     "expiring_window_days": 3,
     "plan_horizon_days": 14,          # how many days the planner board shows
     "plan_reminder_days": 3,          # remind when the plan runs out within N days (0 = off)
@@ -252,6 +254,7 @@ CREATE TABLE IF NOT EXISTS prices (
   url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', observed_on TEXT NOT NULL, fetched_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_prices_key ON prices(food_key, source);
+CREATE TABLE IF NOT EXISTS consumption (food_key TEXT PRIMARY KEY, days REAL, n INTEGER NOT NULL DEFAULT 0, updated TEXT);
 CREATE TABLE IF NOT EXISTS image_picks (
   kind TEXT, key TEXT, idx INTEGER DEFAULT 0, file TEXT, credit TEXT, missing INTEGER DEFAULT 0, updated TEXT,
   PRIMARY KEY (kind, key)
@@ -772,6 +775,8 @@ SETTINGS_VALIDATORS = {
     "temp_unit": _v_enum("F", "C"),
     "ai_budget": _v_num(0, 100_000),
     "pantry_check_days": _v_int(0, 365),
+    "checkin_day": _v_enum("mon", "tue", "wed", "thu", "fri", "sat", "sun"),
+    "checkin_hour": _v_int(0, 23),
     "expiring_window_days": _v_int(0, 60),
     "plan_horizon_days": _v_int(7, 28),
     "plan_reminder_days": _v_int(0, 7),
@@ -1878,7 +1883,8 @@ from native import users as n_users  # noqa: E402
 from native import dupes as n_dupes  # noqa: E402
 from native import barcodes as n_barcodes
 from native import whatcan as n_whatcan
-from native import prices as n_prices  # noqa: E402
+from native import prices as n_prices
+from native import checkin as n_checkin  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -6260,16 +6266,157 @@ def scan_undo(b):
     return {"ok": True}
 
 
-def pantry_checkin_status():
-    days = int(get_settings().get("pantry_check_days") or 0)
-    last = parse_date(get_internal("pantry_checked_at"))
-    if not last:
+def pantry_checkin_status(now=None):
+    """Due once this week's check-in time (Sunday 6 pm by default) has passed; every 2 weeks waits a week longer."""
+    s = get_settings()
+    days = int(s.get("pantry_check_days") or 0)
+    now = now or datetime.now()
+    last_dt = _checkin_last()
+    if not last_dt:
         with db() as c:
-            first = c.execute("SELECT MIN(created_at) FROM pantry_items").fetchone()[0]
-        last = parse_date(first) if first else None
-    due = bool(days and last and (today() - last).days >= days)
-    return {"interval_days": days, "last": iso(last) if last else None, "due": due,
-            "days_since": (today() - last).days if last else None}
+            first = c.execute("SELECT MIN(created_at) FROM pantry_items WHERE status='active'").fetchone()[0]
+        if not first:
+            return {"interval_days": days, "last": None, "due": False, "days_since": None,
+                    "day": s.get("checkin_day") or "sun", "hour": s.get("checkin_hour", 18)}
+        last_dt = datetime.combine(parse_date(first), datetime.min.time())
+        never = True
+    else:
+        never = False
+    due = n_checkin.is_due(now, last_dt, days, s.get("checkin_day") or "sun", int(s.get("checkin_hour", 18)))
+    last = last_dt.date()
+    return {"interval_days": days, "last": None if never else iso(last), "due": due, "days_since": (now.date() - last).days,
+            "day": s.get("checkin_day") or "sun", "hour": int(s.get("checkin_hour", 18))}
+
+
+# ============================================================ kitchen check-in (weekly, swipe through ~10 items)
+
+CHECKIN_SNAP = ("status", "amount_left", "finished_on", "qty", "original_qty", "opened_on", "expires_on", "expiry_source")
+
+
+def _checkin_last():
+    """When the last check-in was done (older installs stored just a date: that counts as the end of the day)."""
+    raw = get_internal("pantry_checked_at")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return dt if "T" in str(raw) else dt.replace(hour=23, minute=59)
+
+
+def _pantry_key(r):
+    return f"f:{r['food_id']}" if r["food_id"] is not None else food_key(clean_food(r["name"]))
+
+
+def checkin_cards(limit=n_checkin.MAX_CARDS):
+    """GET /api/checkin: the few items worth asking about, each with a plain reason."""
+    t = today()
+    with db() as c:
+        rows = c.execute("SELECT * FROM pantry_items WHERE status='active'").fetchall()
+        last_event, last_asked = {}, {}
+        for e in c.execute("SELECT item_id, action, MAX(at) AS at FROM pantry_events GROUP BY item_id, action='checkin'"):
+            (last_asked if e["action"] == "checkin" else last_event)[e["item_id"]] = e["at"]
+        buys = {}
+        for p in c.execute("SELECT food_id, name, date FROM purchases WHERE date>=?", (iso(t - timedelta(days=180)),)).fetchall():
+            fid = p["food_id"] if p["food_id"] is not None else (n_foods.lookup(c, p["name"]) if n_foods.normalize(p["name"] or "") else None)
+            buys.setdefault(f"f:{fid}" if fid is not None else food_key(clean_food(p["name"])), []).append(p["date"])
+        for p in c.execute("SELECT food_id, name, purchased_on FROM pantry_items WHERE purchased_on>=?", (iso(t - timedelta(days=180)),)):
+            buys.setdefault(_pantry_key(p), []).append(p["purchased_on"])
+        cad = {k: v for k, v in ((k, n_checkin.cadence(ds)) for k, ds in buys.items()) if v}
+        rates = {r["food_key"]: r["days"] for r in c.execute("SELECT * FROM consumption WHERE days IS NOT NULL")}
+        items = [{**dict(r), "key": _pantry_key(r)} for r in rows]
+        picks = n_checkin.candidates(items, t, last_event, last_asked, cad, rates, limit)
+        by_id = {r["id"]: r for r in rows}
+        cards = [{**pantry_json(c, by_id[p["id"]]), "reason": p["reason"]} for p in picks]
+    return {"cards": cards, "status": pantry_checkin_status()}
+
+
+def _learn(c, r, answer):
+    key = _pantry_key(r)
+    prev = c.execute("SELECT days, n FROM consumption WHERE food_key=?", (key,)).fetchone()
+    before = (prev["days"], prev["n"]) if prev else None
+    age = (today() - (parse_date(r["purchased_on"]) or today())).days
+    days, n = n_checkin.learn(prev["days"] if prev else None, prev["n"] if prev else 0, age, answer)
+    if days is not None:
+        c.execute("INSERT INTO consumption(food_key, days, n, updated) VALUES (?,?,?,?) ON CONFLICT(food_key) DO UPDATE SET "
+                  "days=excluded.days, n=excluded.n, updated=excluded.updated", (key, days, n, iso(today())))
+    return {"key": key, "before": before}
+
+
+def checkin_answer(b):
+    """POST /api/checkin/answer {id, answer: have|low|gone}: returns an undo token."""
+    require_native()
+    pid = _int_id(b.get("id"), "item")
+    ans = b.get("answer")
+    if ans not in ("have", "low", "gone"):
+        raise ApiError(400, "Answer have, low or gone.")
+    with db() as c:
+        r = pantry_row(c, pid)
+        if not r or r["status"] != "active":
+            raise ApiError(404, "Item not found")
+        snap = {k: r[k] for k in CHECKIN_SNAP}
+        learned = _learn(c, r, ans)
+        if ans == "gone":
+            apply_pantry_action(c, pid, {"action": "use", "left": 0})
+        elif ans == "low" and (r["amount_left"] or 1) > 0.25:
+            apply_pantry_action(c, pid, {"action": "use", "left": 0.25})
+        event(c, pid, "checkin", ans)
+        out = pantry_json(c, pantry_row(c, pid))
+    return {"ok": True, "item": out, "undo": {"id": pid, "before": snap, "learned": learned}}
+
+
+def checkin_undo(b):
+    """POST /api/checkin/undo {undo}: put the item (and what was learned) back exactly."""
+    require_native()
+    u = b.get("undo") if isinstance(b.get("undo"), dict) else {}
+    pid = _int_id(u.get("id"), "item")
+    before = u.get("before") if isinstance(u.get("before"), dict) else None
+    if not before or set(before) - set(CHECKIN_SNAP):
+        raise ApiError(400, "Nothing to undo.")
+    if before.get("status") not in ("active", "used", "tossed"):
+        raise ApiError(400, "Nothing to undo.")
+    for k in ("amount_left", "qty", "original_qty"):
+        if before.get(k) is not None and not isinstance(before[k], (int, float)):
+            raise ApiError(400, "Nothing to undo.")
+    for k in ("finished_on", "opened_on", "expires_on", "expiry_source"):
+        if before.get(k) is not None and not isinstance(before[k], str):
+            raise ApiError(400, "Nothing to undo.")
+    with db() as c:
+        if not pantry_row(c, pid):
+            raise ApiError(404, "Item not found")
+        c.execute(f"UPDATE pantry_items SET {', '.join(f'{k}=?' for k in CHECKIN_SNAP)} WHERE id=?",
+                  (*[before.get(k) for k in CHECKIN_SNAP], pid))
+        last = c.execute("SELECT id FROM pantry_events WHERE item_id=? AND action='checkin' ORDER BY id DESC LIMIT 1", (pid,)).fetchone()
+        if last:
+            c.execute("DELETE FROM pantry_events WHERE id=?", (last["id"],))
+        c.execute("DELETE FROM pantry_events WHERE item_id=? AND action='finished' AND at>=?", (pid, iso(today())))
+        lk = u.get("learned") if isinstance(u.get("learned"), dict) else {}
+        key = _s(lk.get("key"), 200) if isinstance(lk.get("key"), str) else ""
+        if key:
+            prev = lk.get("before")
+            if isinstance(prev, list) and len(prev) == 2 and all(isinstance(x, (int, float)) or x is None for x in prev):
+                c.execute("UPDATE consumption SET days=?, n=? WHERE food_key=?", (prev[0], prev[1], key))
+            elif prev is None:
+                c.execute("DELETE FROM consumption WHERE food_key=?", (key,))
+        return {"ok": True, "item": pantry_json(c, pantry_row(c, pid))}
+
+
+def checkin_finish(b):
+    """POST /api/checkin/done {have: [ids]}: "All good" marks the rest as still here; the check-in is done."""
+    require_native()
+    ids = [_int_id(x, "item") for x in (b.get("have") or [])][:50]
+    with db() as c:
+        for pid in ids:
+            r = pantry_row(c, pid)
+            if r and r["status"] == "active":
+                _learn(c, r, "have")
+                event(c, pid, "checkin", "have")
+    set_internal("pantry_checked_at", datetime.now().isoformat(timespec="seconds"))
+    return {"ok": True, "status": pantry_checkin_status()}
+
+
+
 
 
 # ============================================================ images (ingredients & recipes)
@@ -9701,13 +9848,13 @@ def scheduler():
                 log("plan reminder not sent:", e.message)
             # Pantry check-in reminder (once per due period, at the alert hour)
             ck = pantry_checkin_status()
-            if ck["due"] and any(channels_ready().values()) and now.hour >= int(s.get("expiry_alert_hour") or 8):
-                flag = f"checkin_nudge_{ck['last']}"
+            if ck["due"] and any(channels_ready().values()):
+                flag = f"checkin_nudge_{ck['last']}_{iso(now.date() - timedelta(days=now.weekday()))}"
                 if not get_internal(flag):
                     set_internal(flag, True)
-                    deliver({"subject": "🧺 Time for a quick inventory check",
-                             "text": f"It's been {ck['days_since']} days. Open TablePlan → Inventory → Check-in to confirm what's left. It takes about a minute.",
-                             "html": email_wrap("<p>Time for a quick inventory check. Open TablePlan → Inventory → <b>Check-in</b>.</p>"), "files": []})
+                    deliver({"subject": "🧺 Kitchen check-in",
+                             "text": "A few items might be gone or running low. Open TablePlan to swipe through them: it takes about a minute.",
+                             "html": email_wrap("<p>A few items might be gone or running low. Open TablePlan and tap <b>Kitchen check-in</b>: it takes about a minute.</p>"), "files": []})
             # Prices: refreshed in the background (each source keeps its own pace), and the grocery budget alert
             if NATIVE and now.hour >= 4:
                 last = get_internal("prices_refresh_at") or ""
@@ -10322,8 +10469,16 @@ class Handler(BaseHTTPRequestHandler):
         if m == "GET" and mm:
             return self.send(200, upc_lookup(mm.group(1)))
         if m == "POST" and path == "/api/pantry/checked":
-            set_internal("pantry_checked_at", iso(today()))
+            set_internal("pantry_checked_at", datetime.now().isoformat(timespec="seconds"))
             return self.send(200, pantry_checkin_status())
+        if m == "GET" and path == "/api/checkin":
+            require_native()
+            return self.send(200, checkin_cards())
+        if m == "POST" and path in ("/api/checkin/answer", "/api/checkin/undo", "/api/checkin/done"):
+            fn = {"answer": checkin_answer, "undo": checkin_undo, "done": checkin_finish}[path.rsplit("/", 1)[1]]
+            out = fn(self.body())
+            self._sync_after = NATIVE
+            return self.send(200, out)
         if m == "GET" and path == "/api/pantry/checkin":
             return self.send(200, pantry_checkin_status())
         # ---- recipes

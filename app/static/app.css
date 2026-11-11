@@ -1417,3 +1417,43 @@ h1.title{font-size:34px;line-height:1.08;color:var(--title)}
 .sp-c i.h95{height:95%}
 .bud-bar i.w100,.sp-bar i.w100{width:100%}
 .sp-c i.h100{height:100%}
+
+/* kitchen check-in card stack */
+.ci-wrap{display:flex;flex-direction:column;align-items:stretch;gap:14px;padding-bottom:6px}
+.ci-top{display:flex;justify-content:space-between;align-items:center;min-height:28px;color:var(--sub);font-size:14px}
+.ci-top .link-btn{display:inline-flex;align-items:center;gap:4px}
+.ci-top .link-btn svg{width:16px;height:16px}
+.ci-stack{position:relative;height:300px;touch-action:pan-y}
+.ci-card{position:absolute;inset:0;background:var(--card);border-radius:22px;box-shadow:var(--shadow),0 8px 24px rgba(0,0,0,.08);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:22px;text-align:center;transition:transform .2s ease,opacity .2s ease;user-select:none;-webkit-user-select:none;cursor:grab}
+.ci-card.drag{transition:none;cursor:grabbing}
+.ci-card.behind{pointer-events:none}
+.ci-card.b1{transform:translateY(10px) scale(.96);opacity:.7}
+.ci-card.b2{transform:translateY(20px) scale(.92);opacity:.4}
+.ci-card.fly-right{transform:translateX(130%) rotate(14deg) !important;opacity:0}
+.ci-card.fly-left{transform:translateX(-130%) rotate(-14deg) !important;opacity:0}
+.ci-card.fly-down{transform:translateY(40%) scale(.9) !important;opacity:0}
+.ci-ic{font-size:64px;line-height:1;width:96px;height:96px;display:grid;place-items:center}
+.ci-ic img{width:96px;height:96px;border-radius:20px;object-fit:cover}
+.ci-name{font-size:22px}
+.ci-where{color:var(--sub);font-size:14px}
+.ci-why{margin-top:6px;font-size:14px;font-weight:600;padding:5px 12px;border-radius:999px;background:var(--soon-bg);color:var(--soon-fg)}
+.ci-stamp{position:absolute;top:18px;font-weight:800;font-size:15px;letter-spacing:.04em;text-transform:uppercase;padding:4px 10px;border-radius:8px;border:2px solid;opacity:0;transition:opacity .1s}
+.ci-stamp.have{left:18px;color:var(--ok-fg);transform:rotate(-10deg)}
+.ci-stamp.gone{right:18px;color:var(--red);transform:rotate(10deg)}
+.ci-card.to-have .ci-stamp.have,.ci-card.to-gone .ci-stamp.gone{opacity:1}
+.ci-acts{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.ci-btn{display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 6px;border-radius:16px;background:var(--fill);border:0;color:var(--text);font:inherit;font-size:13.5px;font-weight:600}
+.ci-btn svg{width:24px;height:24px}
+.ci-btn b{font-size:20px;line-height:24px}
+.ci-btn.gone{color:var(--red)}
+.ci-btn.have{background:var(--ink);color:var(--on-ink)}
+.ci-skip{align-self:center}
+.ci-hint{text-align:center;margin:0}
+.ci-done{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:24px 4px}
+.ci-done .ci-ic{width:64px;height:64px;border-radius:50%;background:var(--ok-bg);color:var(--ok-fg)}
+.ci-done .ci-ic svg{width:32px;height:32px}
+.ci-done b{font-size:20px}
+.ci-done span{color:var(--sub)}
+.ci-done .btn{width:100%}
+@media (prefers-reduced-motion:reduce){.ci-card{transition:none}}
+.ci-top .link-btn[hidden]{display:none}

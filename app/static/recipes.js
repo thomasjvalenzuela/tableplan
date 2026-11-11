@@ -1514,25 +1514,86 @@ async function openTrip(after) {
 }
 
 // ------------------------------------------------------------------ pantry check-in (quick review)
+// Kitchen check-in: a stack of the few items worth asking about. Swipe right = still have, left = gone; Undo any answer.
 async function openCheckin(after) {
-  let items = [];
-  try { items = (await api("GET", "/api/pantry")).items; } catch (e) { return fail(e); }
-  const acted = new Set();
-  openSheet("Inventory check-in", `<p class="hint" style="margin:0 4px 12px">Confirm what's still here. It takes a minute and keeps use-by dates and shopping lists accurate.</p>
-    <div class="group">${items.map((it) => `<div class="row flush" data-id="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🥫")}</span><div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(cap(it.location))} · ${Math.round(it.amount_left * 100)}% left${it.expires_on ? ` · ${esc(relExpiry(it))}` : ""}</div></div>
-      <div style="display:flex;gap:6px"><button class="pill-btn" data-a="keep" style="box-shadow:none;background:var(--fill)">✓</button><button class="pill-btn" data-a="half" style="box-shadow:none;background:var(--fill)">½</button><button class="pill-btn" data-a="gone" style="box-shadow:none;background:var(--fill);color:var(--red)">✕</button></div></div>`).join("") || `<div class="row flush muted">Your inventory is empty. Scan or add items first.</div>`}</div>
-    <div style="height:14px"></div><button class="btn" id="ci-done">${ic("check")} Done</button>`, {
+  if (!c_native()) return;
+  let d;
+  try { d = await api("GET", "/api/checkin"); } catch (e) { return fail(e); }
+  const K = { cards: d.cards, i: 0, undo: [], tally: { have: 0, low: 0, gone: 0 }, gone: [] };
+  openSheet("Kitchen check-in", `<div class="ci-wrap"><div class="ci-top"><span id="ci-n" aria-live="polite"></span><button class="link-btn" id="ci-undo" hidden>${ic("refresh")} Undo</button></div>
+    <div class="ci-stack" id="ci-stack"></div><div class="ci-acts" id="ci-acts">
+      <button class="ci-btn gone" data-ans="gone">${ic("x")}<span>Gone</span></button>
+      <button class="ci-btn low" data-ans="low"><b>¼</b><span>Running low</span></button>
+      <button class="ci-btn have" data-ans="have">${ic("check")}<span>Still have</span></button></div>
+    <button class="link-btn ci-skip" id="ci-skip">All good, skip the rest</button>
+    <p class="hint ci-hint">Swipe right if it's still there, left if it's gone.</p></div>`, {
     onMount() {
-      $$("[data-a]").forEach((b) => (b.onclick = async () => {
-        const row = b.closest("[data-id]"), id = row.dataset.id, a = b.dataset.a, it = items.find((x) => String(x.id) === id);
+      const draw = () => {
+        const left = K.cards.length - K.i;
+        $("#ci-undo").hidden = !K.undo.length;
+        if (!left) return finish(false);
+        $("#ci-n").textContent = `${K.i + 1} of ${K.cards.length}`;
+        $("#ci-stack").innerHTML = K.cards.slice(K.i, K.i + 3).map((it, n) => `<div class="ci-card ${n ? `behind b${n}` : "top"}" data-id="${esc(it.id)}" ${n ? 'aria-hidden="true"' : ""}>
+          <span class="ci-ic">${it.image ? `<img src="${esc(it.image)}" alt="">` : esc(it.emoji || "🥫")}</span><b class="ci-name">${esc(cap(it.name))}</b>
+          <span class="ci-where">${esc([it.place_label || cap(it.location), it.qty != null ? it.left_text : it.amount_left < 1 ? `${Math.round(it.amount_left * 100)}% left` : ""].filter(Boolean).join(" · "))}</span>
+          <span class="ci-why">${esc(it.reason)}</span><span class="ci-stamp have" aria-hidden="true">Still have</span><span class="ci-stamp gone" aria-hidden="true">Gone</span></div>`).reverse().join("");
+        swipe($("#ci-stack .ci-card.top"));
+      };
+      const answer = async (ans, card) => {
+        const it = K.cards[K.i]; if (!it || K.busy) return;
+        K.busy = true;
+        if (card) card.classList.add(`fly-${ans === "gone" ? "left" : ans === "have" ? "right" : "down"}`);
         try {
-          if (a === "gone") await api("PATCH", `/api/pantry/${enc(id)}`, { action: "use", left: 0 });
-          if (a === "half") await api("PATCH", `/api/pantry/${enc(id)}`, { action: "use", left: Math.min(0.5, it.amount_left) });
-          acted.add(id); row.style.opacity = a === "gone" ? ".35" : ".6";
-          $$("[data-a]", row).forEach((x) => (x.style.background = x === b ? "var(--ink)" : "var(--fill)", x.style.color = x === b ? "var(--on-ink)" : ""));
+          const r = await api("POST", "/api/checkin/answer", { id: it.id, answer: ans });
+          K.undo.push({ token: r.undo, ans, it }); K.tally[ans]++; if (ans === "gone") K.gone.push(it);
+          try { navigator.vibrate?.(15); } catch (_) {}
+          K.i++;
         } catch (e) { fail(e); }
-      }));
-      $("#ci-done").onclick = async () => { await api("POST", "/api/pantry/checked").catch(() => {}); closeSheet(); toast("Inventory checked ✓"); after && after(); };
+        K.busy = false;
+        setTimeout(draw, card ? 180 : 0);
+      };
+      const swipe = (card) => {
+        if (!card) return;
+        let x0 = null, dx = 0;
+        card.onpointerdown = (e) => { x0 = e.clientX; dx = 0; card.setPointerCapture(e.pointerId); card.classList.add("drag"); };
+        card.onpointermove = (e) => {
+          if (x0 == null) return;
+          dx = e.clientX - x0;
+          card.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`;
+          card.classList.toggle("to-have", dx > 50); card.classList.toggle("to-gone", dx < -50);
+        };
+        const end = () => {
+          if (x0 == null) return;
+          x0 = null; card.classList.remove("drag");
+          if (Math.abs(dx) > 90) return answer(dx > 0 ? "have" : "gone", card);
+          card.style.transform = ""; card.classList.remove("to-have", "to-gone");
+        };
+        card.onpointerup = end; card.onpointercancel = end;
+      };
+      const finish = async (skip) => {
+        const rest = skip ? K.cards.slice(K.i).map((x) => x.id) : [];
+        try { await api("POST", "/api/checkin/done", { have: rest }); } catch (e) { return fail(e); }
+        if (skip) K.tally.have += rest.length;
+        const t = K.tally, box = $(".ci-wrap"); if (!box) return;
+        box.innerHTML = `<div class="ci-done"><span class="ci-ic">${ic("check")}</span><b>${K.cards.length ? "All checked" : "Nothing to check"}</b>
+          <span>${K.cards.length ? esc([t.have && `${t.have} still here`, t.low && `${t.low} running low`, t.gone && `${t.gone} gone`].filter(Boolean).join(" · ")) : "Everything in your kitchen looks certain right now."}</span>
+          ${K.gone.length ? `<button class="btn sec" id="ci-list">${ic("cart")} Add ${esc(plural(K.gone.length, "gone item"))} to the list</button>` : ""}
+          <button class="btn" id="ci-close">Done</button></div>`;
+        $("#ci-close").onclick = () => closeSheet();
+        $("#ci-list") && ($("#ci-list").onclick = async (e) => {
+          e.currentTarget.disabled = true;
+          try { await api("POST", "/api/list/items", { items: K.gone.map((x) => x.name) }); toast(`Added ${plural(K.gone.length, "item")} to your list`, "View", () => { closeSheet(); go("list"); }); } catch (x) { fail(x); }
+        });
+        after && after();
+      };
+      $$("#ci-acts [data-ans]").forEach((b) => (b.onclick = () => answer(b.dataset.ans, $("#ci-stack .ci-card.top"))));
+      $("#ci-skip").onclick = () => finish(true);
+      $("#ci-undo").onclick = async () => {
+        const u = K.undo.pop(); if (!u) return;
+        try { await api("POST", "/api/checkin/undo", { undo: u.token }); K.i--; K.tally[u.ans]--; if (u.ans === "gone") K.gone = K.gone.filter((x) => x !== u.it); draw(); }
+        catch (e) { K.undo.push(u); fail(e); }
+      };
+      draw();
     },
   });
 }
