@@ -1,5 +1,13 @@
 [
  {
+  "id": "budget-prices",
+  "date": "2026-11-19",
+  "icon": "dollar",
+  "color": "green",
+  "title": "Budget and prices",
+  "text": "Set a weekly or monthly grocery budget (split by store if you like) and Home shows how it's going, with a heads-up at 80% and 100%. Recipes show what they cost per serving, the list shows prices and totals per store, the plan shows the week's cost, and Almost there shows what it takes to finish a recipe. Prices come from your receipts first, then prices you set, Kroger, web estimates with their source page, and US averages. ≈ marks an estimate, and nothing is ever guessed. Spending breaks it down by week, store and category, and shows what was thrown away."
+ },
+ {
   "id": "what-can-i-make",
   "date": "2026-11-18",
   "icon": "sparkle",

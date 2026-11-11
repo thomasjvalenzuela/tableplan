@@ -217,6 +217,7 @@ function route() {
   if (h.startsWith("recipe/")) { window.scrollTo(0, 0); return renderRecipe(h.slice(7)); }
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
   if (h === "diary") { window.scrollTo(0, 0); return renderDiary(); }
+  if (h === "spending") { window.scrollTo(0, 0); return renderSpending(); }
   if (h === "make" || h.startsWith("make/")) { window.scrollTo(0, 0); return renderMake({ use: "use_up", almost: "almost" }[h.slice(5)] || "ready"); }
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
@@ -290,6 +291,7 @@ async function renderHome() {
   if (+s.review_items) html += `<button class="nudge" id="home-inv-review"><span class="ic bg-ink">${ic("scan")}</span><span><b>${esc(plural(+s.review_items, "item"))} to review</b><small>Scanned items the product databases didn't know</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
   html += homeContextCard(s, tonight);
   html += homeStats(s, list);
+  html += `<section class="home-card budget-w" id="home-budget" hidden aria-label="Grocery budget"></section>`;
   html += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
 
   // 1. Shopping: the next few things to buy, soonest meal first
@@ -327,6 +329,7 @@ async function renderHome() {
   html += `<section class="home-card diary-w" id="home-diary" hidden aria-label="Cooking diary"></section>`;
   app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
   homeChecklist($("#home-cl"));
+  homeBudget($("#home-budget"));
   $("#home-review") && ($("#home-review").onclick = () => openReview());
   $("#home-inv-review") && ($("#home-inv-review").onclick = () => openReviewItems(renderHome));
   setReviewBadge(+s.review_count || 0);
@@ -482,6 +485,7 @@ async function drawBoard() {
   $("#plan-sub").innerHTML = (through ? `<span class="${low ? "warn" : ""}">Planned through ${esc(fmt(parseISO(through), { weekday: "short", month: "short", day: "numeric" }))}</span>` : "Nothing planned yet") +
     (empty ? ` · ${esc(plural(empty, "empty day"))}` : "");
   $("#fill").disabled = !empty;
+  planCost();
   const cta = $("#plan-cta");
   if (cta) {
     cta.innerHTML = (data.entries || []).length ? "" : `<div class="plan-cta"><b>Nothing planned yet</b><span>Pick a recipe for each day, one at a time.</span><button class="btn" id="plan-cta-go">Plan my ${H === 14 ? "2 weeks" : `${H} days`}</button></div>`;
@@ -1139,7 +1143,7 @@ function drawList(focusAdd) {
     <form class="quick-add" id="qa-form" autocomplete="off"><span class="qa-ic">${ic("plus")}</span>
       <input id="qa" name="qa" placeholder="${esc(addTo ? `Add to ${addTo}…` : "Add an item…")}" enterkeyhint="done" maxlength="200" aria-label="Add an item">
       <button type="submit" class="qa-go" aria-label="Add">${ic("check")}</button></form>
-    <div class="subtitle list-sub">${listSubtitle(toBuy, anyLeft)}</div>
+    <div class="subtitle list-sub">${listSubtitle(toBuy, anyLeft)}</div><div class="list-cost" id="list-cost"></div>
     <div class="toolbar"><button class="pill-btn" id="l-trip">${ic("cart")} Log a grocery trip</button></div>`;
 
   // store → aisle grouping (stores in their saved order, "Any store" last)
@@ -1148,7 +1152,7 @@ function drawList(focusAdd) {
   shown.forEach((it) => { const k = it.store_id == null ? "none" : String(it.store_id); if (!byStore.has(k)) byStore.set(k, []); byStore.get(k).push(it); });
   for (const [k, arr] of byStore) {
     if (!arr.length) continue;
-    if (L.filter === "all") html += `<div class="store-h"><h2>${esc(k === "none" ? "Any store" : storeLabel(k))}</h2><span>${arr.length}</span></div>`;
+    if (L.filter === "all") html += `<div class="store-h" data-sk="${esc(k)}"><h2>${esc(k === "none" ? "Any store" : storeLabel(k))}</h2><span>${arr.length}</span></div>`;
     const aisles = new Map();
     arr.forEach((it) => { const a = it.aisle || "Other"; if (!aisles.has(a)) aisles.set(a, []); aisles.get(a).push(it); });
     for (const [a, its] of aisles) html += `<div class="group-label section">${esc(a)}</div><div class="group shop">${its.map(listRow).join("")}</div>`;
@@ -1174,6 +1178,7 @@ function drawList(focusAdd) {
     try { await api("PATCH", `/api/list/items/${enc(b.dataset.uncheck)}`, { checked: false }); reloadList(); } catch (e) { fail(e); }
   }));
   bindListRows(box);
+  listCosts();
 }
 // Which planned meals need this item: "Tue · Chicken Milanese 1 tbsp" tags (two, then "+N more" expands)
 function usesHtml(it, recs) {
@@ -1885,6 +1890,7 @@ async function openSettings() {
       <div class="group">
         <div class="field"><label>Polish imported recipes<small class="lh">Rewrites steps so they're clear and complete. Never changes amounts. About 1¢ per recipe.</small></label><label class="toggle"><input type="checkbox" id="st-polish" ${s.polish_imports !== false ? "checked" : ""}><span></span></label></div>
       </div>
+      ${c.backend === "native" ? `<div class="group"><button class="row" id="st-prices"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("cart")}</span><div class="main"><div class="a">Prices & budget</div><div class="b">${s.budget && s.budget.amount ? `$${esc(s.budget.amount)} a ${esc(s.budget.period)} · spending, price sources` : "Grocery budget, spending and where prices come from"}</div></div><span class="chev">${ic("chevR")}</span></button></div>` : ""}
       <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${esc(s.ai_budget)}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Import</div>
       <div class="group"><button class="row" id="st-share"><span class="ic bg-pink" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;background:#E1306C">${ic("share")}</span><div class="main"><div class="a">Share to TablePlan from your phone</div><div class="b">Send Instagram, TikTok and recipe links straight in</div></div><span class="chev">${ic("chevR")}</span></button></div>
@@ -1956,6 +1962,7 @@ async function openSettings() {
     };
     $("#st-rules").onclick = () => rulesBrowser(draw);
     $("#st-bctest").onclick = () => openBarcodeTest();
+    $("#st-prices") && ($("#st-prices").onclick = () => openPricesSettings());
   };
   openSheet("Settings", loading(), { onMount: draw });
 }

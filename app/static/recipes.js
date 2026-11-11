@@ -379,6 +379,7 @@ async function renderRecipe(slug) {
       <div class="rd-meta">
         ${rec.eta ? `<button class="mp eta-chip" id="rd-eta" aria-label="How long it takes: ${esc(rec.eta.label)}. Show the breakdown">${ic("clock")} ${esc(rec.eta.label)}</button>` : rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
         <span class="mp">${ic("chef")} ${esc(rec.difficulty)}</span>
+        <button class="mp cost-chip" id="rd-cost" hidden aria-label="What it costs"></button>
         <span class="mp stepper">${ic("users")}<button data-s="-1" aria-label="Fewer servings">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More servings">+</button></span>
       </div>
       ${(rec.categories || []).length ? `<div class="cat-pills">${rec.categories.map((c) => `<span class="cat-pill">${esc(c)}</span>`).join("")}</div>` : ""}
@@ -415,7 +416,8 @@ async function renderRecipe(slug) {
     try { await api("POST", `/api/recipe/${encodeURIComponent(slug)}/favorite`, { favorite: on }); R.rec.favorite = on; btn.classList.toggle("on", on); btn.textContent = on ? "♥" : "♡"; } catch (x) { fail(x); }
   };
   $("#rd-img").onclick = () => openImagePicker({ kind: "recipe", slug, name: rec.name, after: () => renderRecipe(slug) });
-  $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); }));
+  $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); clearTimeout(R.costT); R.costT = setTimeout(drawRecipeCost, 350); }));
+  drawRecipeCost();
   $$("#rd-style button").forEach((b) => (b.onclick = () => { R.style = b.dataset.v; drawContent(); }));
   $("#rd-cook").onclick = () => ((R.rec.missing || []).length ? showMissing() : startCook());
   $("#rd-plan").onclick = () => planRecipe(rec);
@@ -1701,6 +1703,7 @@ function mkCard(r) {
   return `<div class="mk-card" data-mk="${esc(r.id)}"><button class="mk-main" data-open="${esc(r.slug)}"><span class="mk-img ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</span>
     <span class="mk-txt"><span class="a">${esc(r.name)}</span>${meta ? `<span class="b">${esc(meta)}</span>` : ""}
       ${(r.expiring || []).length ? `<span class="mk-uses">Uses ${r.expiring.map(expTag).join("")}</span>` : ""}
+      ${r.to_buy && r.to_buy.total ? `<span class="mk-cost">+${esc(money(r.to_buy.total, r.to_buy.approx))} to complete</span>` : ""}
       ${miss.length ? `<span class="mk-miss">Missing ${esc(miss.map((m) => (m.short ? `${m.text} (have ${m.have || "some"})` : m.text)).join(", "))}</span>` : `<span class="mk-ok">${ic("check")} Everything's here</span>`}</span></button>
     <div class="mk-acts">${miss.length ? `<button class="pill-btn" data-tolist>${ic("cart")} Add ${esc(plural(miss.length, "item"))} to list</button>` : ""}<button class="pill-btn" data-plan>${ic("cal")} Plan it</button></div></div>`;
 }
@@ -1747,4 +1750,188 @@ function drawWeb() {
       }
     };
   });
+}
+
+// ------------------------------------------------------------------ prices, costs, budget (≈ marks an estimate)
+const money = (v, approx) => `${approx ? "≈" : ""}$${(+v || 0).toFixed(2)}`;
+// Recipe page: what it costs at the current servings, and what you'd need to buy
+async function drawRecipeCost() {
+  const el = $("#rd-cost"); if (!el || !c_native() || !R.rec) return;
+  const want = R.servings;
+  let c;
+  try { c = await api("GET", `/api/costs/recipe/${encodeURIComponent(R.rec.slug)}?servings=${enc(want)}`); } catch (_) { return; }
+  if (!$("#rd-cost") || R.servings !== want) return;
+  if (!c.total) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `${ic("dollar")} ${esc(money(c.total, c.approx))}${c.per_serving ? ` <small>· ${esc(money(c.per_serving, c.approx))}/serving</small>` : ""}`;
+  el.onclick = () => openSheet("What it costs", `
+    <div class="kv-list"><div><span>This recipe (${esc(fmtQty(want))} servings)</span><b>${esc(money(c.total, c.approx))}</b></div>
+      ${c.per_serving ? `<div><span>Per serving</span><b>${esc(money(c.per_serving, c.approx))}</b></div>` : ""}
+      ${c.to_buy ? `<div><span>Need to buy (whole packages)</span><b>${c.to_buy.total ? esc(money(c.to_buy.total, c.to_buy.approx)) : "Nothing"}</b></div>` : ""}</div>
+    <div class="group-label">Ingredients used</div>
+    <div class="group">${c.lines.map((l) => `<div class="row flush"><div class="main"><div class="a">${esc(cap(l.food))}</div><div class="b">${esc(PRICE_LABEL[l.source] || l.source)}</div></div><b>${esc(money(l.cost, l.approx))}</b></div>`).join("")}</div>
+    ${c.unpriced.length ? `<p class="hint">No price yet for ${esc(c.unpriced.join(", "))}. Add one in Settings → Prices & budget, or scan a receipt.</p>` : ""}
+    <p class="hint">Counts only the part of each package the recipe uses. ≈ means at least one price is an estimate or out of date.</p>`);
+}
+const PRICE_LABEL = { receipt: "Your receipts", manual: "Set by you", kroger: "Kroger", ai: "Web estimate", bls: "US average" };
+
+// Shopping list: price per item, totals per store, how many have no price
+function listCosts() {
+  if (!c_native() || !L.data) return;
+  const apply = () => {
+    const c = L.costs; if (!c || !$("#lists")) return;
+    $$("#lists .row.li:not(.checked)").forEach((row) => {
+      const p = c.items[row.dataset.id];
+      $(".li-price", row)?.remove();
+      if (p) $(".li-in .main", row)?.insertAdjacentHTML("afterend", `<span class="li-price" title="${esc(PRICE_LABEL[p.source] || "")}">${esc(money(p.cost, p.approx))}</span>`);
+    });
+    const open = L.data.items.filter((i) => !i.checked);
+    const sum = (arr) => arr.reduce((a, i) => { const p = c.items[i.id]; if (p) { a.t += p.cost; a.ap = a.ap || p.approx; } else a.n++; return a; }, { t: 0, ap: false, n: 0 });
+    $$("#lists .store-h[data-sk]").forEach((h) => {
+      const k = h.dataset.sk, s = sum(open.filter((i) => (k === "none" ? i.store_id == null : String(i.store_id) === k)));
+      $(".st-cost", h)?.remove();
+      if (s.t) h.insertAdjacentHTML("beforeend", `<em class="st-cost">${esc(money(s.t, s.ap || s.n > 0))}</em>`);
+    });
+    const all = sum(open), box = $("#list-cost");
+    if (box) box.innerHTML = all.t || all.n ? `<button class="link-btn" id="lc-open">${all.t ? `Estimated ${esc(money(all.t, all.ap || all.n > 0))}` : ""}${all.n ? `${all.t ? " · " : ""}${esc(plural(all.n, "item"))} without a price` : ""}</button>` : "";
+    $("#lc-open") && ($("#lc-open").onclick = () => openPricesSettings());
+  };
+  if (L.costs && L.costsFor === L.data) return apply();
+  api("GET", "/api/costs/list").then((c) => { L.costs = c; L.costsFor = L.data; apply(); }).catch(() => {});
+}
+
+// Plan board: what the next 7 days of meals cost
+function planCost() {
+  if (!c_native()) return;
+  const s = isoDate(today()), e = isoDate(addDays(today(), 6));
+  api("GET", `/api/costs/plan?start=${enc(s)}&end=${enc(e)}`).then((c) => {
+    const sub = $("#plan-sub"); if (!sub || !c.total) return;
+    $(".plan-cost", sub)?.remove();
+    sub.insertAdjacentHTML("beforeend", `<span class="plan-cost"> · ${esc(money(c.total, c.approx))} for the next 7 days</span>`);
+  }).catch(() => {});
+}
+
+// Home: the grocery budget for this week or month
+function homeBudget(box) {
+  if (!box || !c_native()) return;
+  api("GET", "/api/budget").then((b) => {
+    if (!b.on || !$("#home-budget")) return;
+    const pct = Math.min(100, Math.round((b.spent / b.amount) * 100));
+    box.hidden = false;
+    box.className = `home-card budget-w ${b.level}`;
+    box.innerHTML = `<button class="bud" id="bud-open"><span class="bud-top"><b>Groceries this ${b.period === "week" ? "week" : "month"}</b><span>${esc(money(b.spent))} of ${esc(money(b.amount))}</span></span>
+      <span class="bud-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i class="w${Math.round(pct / 5) * 5}"></i></span>
+      <span class="bud-sub">${b.level === "over" ? `Over by ${esc(money(-b.left))}` : `${esc(money(b.left))} left · ${esc(plural(b.days_left, "day"))} to go`}${b.planned ? ` · ${esc(money(b.planned, b.planned_approx))} of meals planned` : ""}</span></button>`;
+    $("#bud-open").onclick = () => { location.hash = "spending"; };
+  }).catch(() => {});
+}
+
+// ------------------------------------------------------------------ Spending (#spending)
+const SP = { by: "week" };
+async function renderSpending() {
+  state.tab = "home"; renderTabs();
+  app.innerHTML = `${topbar(`<button class="round-btn left" id="sp-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="text-btn" id="sp-set">Budget</button>`)}
+    <h1 class="title">Spending</h1>
+    <div class="seg" id="sp-by"><button data-by="week" class="${SP.by === "week" ? "on" : ""}">By week</button><button data-by="month" class="${SP.by === "month" ? "on" : ""}">By month</button></div>
+    <div id="sp-body">${loading()}</div>`;
+  bindTopbar();
+  $("#sp-back").onclick = () => (history.length > 1 ? history.back() : go("home"));
+  $("#sp-set").onclick = () => openPricesSettings();
+  $$("#sp-by [data-by]").forEach((b) => (b.onclick = () => { SP.by = b.dataset.by; renderSpending(); }));
+  let d;
+  try { d = await api("GET", `/api/spending?by=${enc(SP.by)}&n=${SP.by === "week" ? 8 : 6}`); } catch (e) { $("#sp-body").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  const box = $("#sp-body"); if (!box) return;
+  const max = Math.max(1, ...d.periods.map((p) => p.spent), d.budget.on ? d.budget.amount : 0);
+  const lbl = (p) => (SP.by === "week" ? fmt(parseISO(p.start), { month: "short", day: "numeric" }) : fmt(parseISO(p.start), { month: "short" }));
+  const goal = d.budget.on && d.budget.period === SP.by ? d.budget.amount : 0;
+  const bars = (rows) => rows.length ? `<div class="group">${rows.map((r) => `<div class="row flush sp-row"><div class="main"><div class="a">${esc(r.name)}</div><span class="sp-bar"><i class="w${Math.round((r.total / rows[0].total) * 20) * 5}"></i></span></div><b>${esc(money(r.total))}</b></div>`).join("")}</div>` : `<p class="muted small">Nothing yet.</p>`;
+  box.innerHTML = `<div class="sp-sum"><div><b>${esc(money(d.total))}</b><span>last ${esc(plural(d.periods.length, SP.by))}</span></div>
+      <div><b>${d.per_meal ? esc(money(d.per_meal)) : "—"}</b><span>per meal cooked</span></div><div><b>${esc(money(d.waste.total, d.waste.approx))}</b><span>thrown away</span></div></div>
+    <div class="sp-chart" role="img" aria-label="Spending per ${esc(SP.by)}">${d.periods.map((p) => `<div class="sp-col ${goal && p.spent >= goal ? "over" : goal && p.spent >= goal * 0.8 ? "warn" : ""}" title="${esc(lbl(p))}: ${esc(money(p.spent))}">
+      <span class="sp-v">${p.spent ? esc(Math.round(p.spent)) : ""}</span><span class="sp-c"><i class="h${Math.round((p.spent / max) * 20) * 5}"></i></span><span class="sp-l">${esc(lbl(p))}</span></div>`).join("")}</div>
+    ${goal ? `<p class="hint">Budget: ${esc(money(goal))} a ${esc(SP.by)}. Trips without a total are counted from their priced items.</p>` : `<p class="hint">Spending comes from logged grocery trips and receipts. <button class="link-btn" id="sp-goal">Set a budget</button></p>`}
+    <div class="group-label">By store</div>${bars(d.stores)}
+    <div class="group-label">By category</div>${bars(d.categories)}
+    <div class="group-label">Thrown away</div>${d.waste.items.length ? `<div class="group">${d.waste.items.map((w) => `<div class="row flush"><div class="main"><div class="a">${esc(w.name)}</div><div class="b">${esc(fmt(parseISO(w.date), { month: "short", day: "numeric" }))}</div></div><b>${esc(money(w.value, w.approx))}</b></div>`).join("")}</div>` : `<p class="muted small">Nothing tossed. Nice.</p>`}
+    ${d.meals ? `<div class="group-label">Cost per meal</div>` : ""}<div class="group ${d.meals ? "" : "hidden"}">${d.periods.slice().reverse().map((p) => `<div class="row flush"><div class="main"><div class="a">${esc(lbl(p))}</div><div class="b">${esc(plural(p.meals, "meal"))} cooked</div></div><b>${p.per_meal ? `${esc(money(p.per_meal))}/meal` : "—"}</b></div>`).join("")}</div>
+    ${d.meals ? "" : `<p class="hint">Mark meals as cooked to see what each one costs.</p>`}`;
+  $("#sp-goal") && ($("#sp-goal").onclick = () => openPricesSettings());
+}
+
+// ------------------------------------------------------------------ Settings → Prices & budget
+async function openPricesSettings() {
+  openSheet("Prices & budget", `<div id="ps-body">${loading()}</div>`, { onMount: () => drawPrices() });
+}
+async function drawPrices() {
+  const box = $("#ps-body"); if (!box) return;
+  let p, stores = [];
+  try { [p, stores] = await Promise.all([api("GET", "/api/prices"), api("GET", "/api/list").then((l) => l.stores || []).catch(() => [])]); } catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  const s = state.cfg.settings || {}, b = { period: "week", amount: 0, week_start: "mon", stores: {}, plan_aware: true, ...(s.budget || {}) };
+  const when = (iso) => (iso ? fmt(new Date(iso), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "never");
+  box.innerHTML = `
+    <div class="group-label">Grocery budget</div>
+    <div class="group"><div class="row"><div class="main"><div class="a">Goal</div></div><span class="seg mini-seg" id="pb-period"><button data-p="week" class="${b.period === "week" ? "on" : ""}">Week</button><button data-p="month" class="${b.period === "month" ? "on" : ""}">Month</button></span></div>
+      <div class="field"><label for="pb-amt">Amount ($)</label><input id="pb-amt" class="full" inputmode="decimal" value="${b.amount ? esc(b.amount) : ""}" placeholder="e.g. 150"></div>
+      <div class="field ${b.period === "week" ? "" : "hidden"}" id="pb-ws-f"><label for="pb-ws">Week starts</label><select id="pb-ws">${["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((d) => `<option value="${d}" ${b.week_start === d ? "selected" : ""}>${esc(cap(d))}</option>`).join("")}</select></div>
+      <label class="row"><div class="main"><div class="a">Plan around the budget</div><div class="b">Cheaper recipes come up more often, more so past 80%</div></div><input type="checkbox" class="switch" id="pb-aware" ${b.plan_aware !== false ? "checked" : ""}></label></div>
+    ${stores.length ? `<details class="ps-split"><summary>Split by store (optional)</summary><div class="group">${stores.map((st) => `<div class="field"><label for="pb-s-${esc(st.id)}">${esc(st.name)}</label><input id="pb-s-${esc(st.id)}" data-store="${esc(st.id)}" class="full" inputmode="decimal" value="${b.stores[st.id] ? esc(b.stores[st.id]) : ""}" placeholder="—"></div>`).join("")}</div></details>` : ""}
+    <div class="btn-row" style="margin-top:10px"><button class="btn" id="pb-save">Save budget</button><button class="btn sec" id="pb-spend">See spending</button></div>
+    <p class="hint">You'll get a heads-up at 80% and 100% (if notifications are set up), and Home shows how it's going.</p>
+
+    <div class="group-label">Where prices come from</div>
+    <div class="group">${p.sources.map((x) => `<div class="row"><div class="main"><div class="a">${esc(x.label)}${x.estimate ? ` <span class="muted small">≈ estimate</span>` : ""}</div><div class="b">${esc(plural(x.count, "price"))}${x.key === "bls" ? ` · updated ${esc(when(p.bls.at))}` : ""}</div></div></div>`).join("")}</div>
+    <p class="hint">Best first: your receipts, prices you set, Kroger, web estimates (with the page they came from), then US averages. Nothing is ever guessed: foods with no source stay unpriced.</p>
+
+    <div class="group-label">Kroger (optional)</div>
+    <div class="group">${p.kroger.connected ? `<div class="row"><div class="main"><div class="a">Connected</div><div class="b">${p.kroger.location ? `Store: ${esc(p.kroger.location)}` : "Pick your store below"}</div></div><button class="link-btn" id="kr-off">Disconnect</button></div>
+        <form class="field sb-form" id="kr-zip"><input id="kr-z" inputmode="numeric" maxlength="5" placeholder="ZIP code" aria-label="ZIP code"><button class="pill-btn" type="submit">Find stores</button></form><div id="kr-locs"></div>`
+      : `<div class="field"><label for="kr-id">Client ID</label><input id="kr-id" class="full" autocomplete="off"></div><div class="field"><label for="kr-sec">Client secret</label><input id="kr-sec" class="full" type="password" autocomplete="off"></div>
+        <div style="padding:10px 14px"><button class="btn sec" id="kr-save">Connect Kroger</button></div>`}</div>
+    <p class="hint">Free from developer.kroger.com (create an app with the Product scope). Covers Kroger, Ralphs, Fred Meyer, King Soopers and other Kroger stores; prices refresh weekly.</p>
+
+    <div class="group-label">Web estimates</div>
+    <div class="group"><label class="row"><div class="main"><div class="a">Look up missing prices with AI</div><div class="b">${p.ai.key ? "At most once a month per food, within your AI budget" : "Needs your OpenAI key (Settings → AI recipe import)"}</div></div><input type="checkbox" class="switch" id="pa-ai" ${p.ai.on ? "checked" : ""} ${p.ai.key ? "" : "disabled"}></label></div>
+
+    <div class="group-label">Refresh</div>
+    <div class="group"><div class="row"><div class="main"><div class="a">Last refresh</div><div class="b">${p.refresh.running ? "Refreshing now…" : esc(when(p.refresh.last))}${(p.refresh.errors || []).length ? ` · ${esc(p.refresh.errors[0])}` : ""}</div></div><button class="pill-btn" id="pr-now" ${p.refresh.running ? "disabled" : ""}>${ic("refresh")} Refresh now</button></div></div>
+
+    <div class="group-label">Food prices</div>
+    <form class="group" id="pf-form" autocomplete="off"><div class="field"><label for="pf-food">Food</label><input id="pf-food" class="full" maxlength="80" placeholder="e.g. Whole milk" required></div>
+      <div class="field"><label for="pf-price">Price</label><input id="pf-price" class="full" inputmode="decimal" placeholder="$3.49" required></div>
+      <div class="field"><label for="pf-size">Size</label><input id="pf-size" class="full" maxlength="40" placeholder="1 gal"></div>
+      <div style="padding:10px 14px"><button class="btn sec" type="submit">Set price</button></div></form>
+    <div class="group" id="pf-list">${p.foods.length ? p.foods.map((f, i) => `<button class="row" data-pf="${i}"><div class="main"><div class="a">${esc(cap(f.food))}</div><div class="b">${esc(f.best.label)}${f.best.store ? ` · ${esc(f.best.store)}` : ""} · ${esc(fmt(parseISO(f.best.observed_on), { month: "short", day: "numeric", year: "numeric" }))}${f.best.stale ? " · out of date" : ""}</div></div><b>${esc(money(f.best.price, f.best.approx))}${f.best.qty ? ` <small>/ ${esc(fmtQty(f.best.qty))} ${esc(f.best.unit || "")}</small>` : ""}</b></button>`).join("") : `<div class="row"><div class="main"><div class="b">No prices yet. Scan a receipt, set one above, or connect Kroger.</div></div></div>`}</div>`;
+  const saveSettings = async (patch) => { try { state.cfg.settings = await api("PUT", "/api/settings", patch); } catch (e) { fail(e); } };
+  let period = b.period;
+  $$("#pb-period [data-p]").forEach((x) => (x.onclick = () => { period = x.dataset.p; $$("#pb-period [data-p]").forEach((y) => y.classList.toggle("on", y === x)); $("#pb-ws-f").classList.toggle("hidden", period !== "week"); }));
+  $("#pb-save").onclick = async () => {
+    const amt = parseFloat(($("#pb-amt").value || "0").replace(/[^0-9.]/g, "")) || 0;
+    const split = {}; $$("[data-store]", box).forEach((i) => { const v = parseFloat((i.value || "").replace(/[^0-9.]/g, "")); if (v > 0) split[i.dataset.store] = v; });
+    await saveSettings({ budget: { ...b, period, amount: amt, week_start: $("#pb-ws").value, stores: split, plan_aware: $("#pb-aware").checked } });
+    toast(amt ? `Budget saved: ${money(amt)} a ${period}` : "Budget turned off");
+  };
+  $("#pb-spend").onclick = () => { closeSheet(); location.hash = "spending"; };
+  $("#pa-ai").onchange = (e) => saveSettings({ price_ai: e.target.checked });
+  $("#pr-now").onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    try { await api("POST", "/api/prices/refresh", {}); toast("Refreshing prices in the background"); setTimeout(drawPrices, 4000); } catch (x) { fail(x); }
+  };
+  $("#kr-save") && ($("#kr-save").onclick = async () => {
+    try { await api("PUT", "/api/prices/config", { kroger_client_id: $("#kr-id").value.trim(), kroger_client_secret: $("#kr-sec").value.trim() }); drawPrices(); } catch (x) { fail(x); }
+  });
+  $("#kr-off") && ($("#kr-off").onclick = async () => { try { await api("PUT", "/api/prices/config", { kroger_client_id: "", kroger_client_secret: "", location_id: "", location_name: "" }); drawPrices(); } catch (x) { fail(x); } });
+  $("#kr-zip") && ($("#kr-zip").onsubmit = async (e) => {
+    e.preventDefault();
+    const out = $("#kr-locs"); out.innerHTML = loading();
+    try {
+      const r = await api("GET", `/api/prices/kroger/locations?zip=${enc($("#kr-z").value.trim())}`);
+      out.innerHTML = r.locations.length ? r.locations.map((l, i) => `<button class="row" data-kl="${i}"><div class="main"><div class="a">${esc(l.name)}</div><div class="b">${esc(l.address)}</div></div>${l.id === p.kroger.location_id ? ic("check") : ""}</button>`).join("") : `<p class="muted small" style="padding:0 14px">No Kroger stores near there.</p>`;
+      $$("[data-kl]", out).forEach((x) => (x.onclick = async () => { const l = r.locations[+x.dataset.kl]; try { await api("PUT", "/api/prices/config", { location_id: l.id, location_name: l.name }); toast(`Prices from ${l.name}`); drawPrices(); } catch (y) { fail(y); } }));
+    } catch (x) { out.innerHTML = `<div class="banner">${esc(x.message)}</div>`; }
+  });
+  $("#pf-form").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("POST", "/api/prices", { food: $("#pf-food").value.trim(), price: $("#pf-price").value.trim(), size: $("#pf-size").value.trim() }); toast("Price saved"); L.costs = null; drawPrices(); } catch (x) { fail(x); }
+  };
+  $$("[data-pf]", box).forEach((x) => (x.onclick = () => { const f = p.foods[+x.dataset.pf]; $("#pf-food").value = f.food; $("#pf-size").value = f.best.qty ? `${fmtQty(f.best.qty)} ${f.best.unit || ""}`.trim() : ""; $("#pf-price").value = ""; $("#pf-price").focus(); }));
 }

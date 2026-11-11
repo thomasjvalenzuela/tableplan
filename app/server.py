@@ -134,6 +134,8 @@ DEFAULT_SETTINGS = {
     "palette": "mono",                # look: mono | midnight | blossom | forest
     "staples": ["Table salt", "Kosher salt", "Black pepper", "Water", "Olive oil", "Vegetable oil", "Cooking spray",
                 "Granulated sugar", "All-purpose flour", "Baking soda", "Baking powder"],   # "always have": never on the list
+    "budget": {"period": "week", "amount": 0, "week_start": "mon", "stores": {}, "timezone": "", "plan_aware": True},
+    "price_ai": False,                # look up missing prices with AI web search (monthly per food, within the AI budget)
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
                    "Drink"],          # recipe categories, in display order
 }
@@ -244,6 +246,12 @@ CREATE TABLE IF NOT EXISTS purchases (
 );
 CREATE INDEX IF NOT EXISTS ix_purchases_food ON purchases(food_id, date);
 CREATE TABLE IF NOT EXISTS upc_local (code TEXT PRIMARY KEY, food_id INTEGER, name TEXT NOT NULL, quantity TEXT DEFAULT '', at TEXT);
+CREATE TABLE IF NOT EXISTS prices (
+  id INTEGER PRIMARY KEY, food_id INTEGER, food_key TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
+  store TEXT NOT NULL DEFAULT '', price REAL NOT NULL, qty REAL, unit TEXT NOT NULL DEFAULT '', unit_price REAL, base TEXT,
+  url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', observed_on TEXT NOT NULL, fetched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prices_key ON prices(food_key, source);
 CREATE TABLE IF NOT EXISTS image_picks (
   kind TEXT, key TEXT, idx INTEGER DEFAULT 0, file TEXT, credit TEXT, missing INTEGER DEFAULT 0, updated TEXT,
   PRIMARY KEY (kind, key)
@@ -773,7 +781,36 @@ SETTINGS_VALIDATORS = {
     "theme": _v_enum("system", "light", "dark"),
     "palette": _v_enum("mono", "midnight", "blossom", "forest"),
     "staples": lambda v: _v_names(v, 100, 40),
+    "budget": lambda v: _v_budget(v),
+    "price_ai": _v_bool,
 }
+
+
+def _v_budget(v):
+    if not isinstance(v, dict):
+        raise ValueError("must be an object")
+    period = v.get("period", "week")
+    if period not in ("week", "month"):
+        raise ValueError("period must be week or month")
+    amount = _v_num(0, 1_000_000)(v.get("amount", 0))
+    ws = v.get("week_start", "mon")
+    if ws not in ("mon", "tue", "wed", "thu", "fri", "sat", "sun"):
+        raise ValueError("week_start must be a weekday")
+    stores = v.get("stores") or {}
+    if not isinstance(stores, dict) or len(stores) > 12:
+        raise ValueError("stores must map up to 12 store ids to amounts")
+    stores = {str(k)[:64]: _v_num(0, 1_000_000)(x) for k, x in stores.items()}
+    tz = v.get("timezone") or ""
+    if not isinstance(tz, str) or len(tz) > 60:
+        raise ValueError("timezone must be a time zone name")
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(tz)
+        except Exception:
+            raise ValueError("timezone isn't a known time zone")
+    return {"period": period, "amount": amount, "week_start": ws, "stores": stores, "timezone": tz,
+            "plan_aware": bool(v.get("plan_aware", True))}
 
 
 def validate_setting(k, v):
@@ -847,7 +884,7 @@ CFG_DEFAULTS = {
     "setup_complete": False,
 }
 SECRET_KEYS = {"mealie_token", "smtp_password", "app_password_hash", "session_secret", "telegram_token", "ntfy_token",
-               "openai_key", "openai_admin_key",
+               "openai_key", "openai_admin_key", "kroger_client_secret", "bls_key",
                "telegram_link_code"}
 _cfg = {}
 _cfg_lock = threading.Lock()
@@ -1840,7 +1877,8 @@ from native import eta as n_eta  # noqa: E402
 from native import users as n_users  # noqa: E402
 from native import dupes as n_dupes  # noqa: E402
 from native import barcodes as n_barcodes
-from native import whatcan as n_whatcan  # noqa: E402
+from native import whatcan as n_whatcan
+from native import prices as n_prices  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -2983,6 +3021,7 @@ def generate_plan(opts):
                 if hits:
                     boost[r["id"]] = len(hits)
 
+    cost_w = _budget_weights(pool) if NATIVE else {}
     proposals = []
     used_this_plan = {}
     for i in range(days):
@@ -2990,7 +3029,7 @@ def generate_plan(opts):
         for mt in sorted(meal_types, key=lambda m: ENTRY_ORDER.get(m, 9)):
             if o.get("fill_empty_only", True) and (iso(d), mt) in filled:
                 continue
-            pick = _pick(pool, d, i, no_repeat, used, used_this_plan, boost)
+            pick = _pick(pool, d, i, no_repeat, used, used_this_plan, boost, cost_w=cost_w)
             used.setdefault(pick["id"], []).append(d)
             used_this_plan[pick["id"]] = d
             proposals.append(_proposal(d, mt, pick, boost))
@@ -3006,7 +3045,26 @@ def _proposal(d, mt, r, boost):
                        "link": recipe_link(r["slug"]), "uses_expiring": bool(boost.get(r["id"]))}}
 
 
-def _pick(pool, d, day_index, no_repeat, used, used_this_plan, boost, exclude=()):
+def _budget_weights(pool):
+    """Budget-aware planning: with a grocery budget set, cheaper recipes (per serving) come up more often, and more so
+    once this period's spending passes 80%. Recipes without a known cost are left neutral."""
+    b = get_settings().get("budget") or {}
+    if not float(b.get("amount") or 0) or not b.get("plan_aware", True):
+        return {}
+    try:
+        costs = recipe_costs_all()
+        level = budget_status()["level"]
+    except Exception:
+        return {}
+    per = sorted(v["per_serving"] for v in costs.values() if v.get("per_serving"))
+    if len(per) < 3:
+        return {}
+    mid = per[len(per) // 2]
+    k = 1.2 if level else 0.6
+    return {rid: max(0.4, min(2.5, (mid / v["per_serving"]) ** k)) for rid, v in costs.items() if v.get("per_serving")}
+
+
+def _pick(pool, d, day_index, no_repeat, used, used_this_plan, boost, exclude=(), cost_w=None):
     """Weighted random pick. `used` maps recipe id -> list of dates it's planned/made."""
     window = max(1, no_repeat)
 
@@ -3028,6 +3086,8 @@ def _pick(pool, d, day_index, no_repeat, used, used_this_plan, boost, exclude=()
             w *= 1 + 2.5 * boost[r["id"]]
         if r["id"] in used_this_plan:
             w *= 0.3
+        if cost_w and r["id"] in cost_w:
+            w *= cost_w[r["id"]]
         mins = r.get("eta_min") or r.get("minutes")
         if mins and d.weekday() < 4:   # busy weekdays: quick meals come up more, long ones less
             w *= 1.3 if mins <= 35 else 0.6 if mins > 75 else 1.0
@@ -8080,6 +8140,659 @@ def recipe_have_all(slug):
     return {"ok": True, "count": n}
 
 
+# ============================================================ prices, costs and budget
+
+KROGER_API = "https://api.kroger.com/v1"
+BLS_API = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+# BLS average retail prices (U.S. city average, series AP...). A series that returns nothing is simply skipped.
+BLS_SERIES = {
+    "APU0000708111": ("Eggs", 12, "each"),          # grade A large, per dozen
+    "APU0000709112": ("Whole milk", 1, "gallon"),   # per gallon
+    "APU0000702111": ("White bread", 1, "lb"),
+    "APU0000703112": ("Ground beef", 1, "lb"),
+    "APU0000706111": ("Whole chicken", 1, "lb"),
+    "APU0000FF1101": ("Chicken breast", 1, "lb"),   # boneless
+    "APU0000710212": ("Cheddar cheese", 1, "lb"),
+    "APU0000FS1101": ("Butter", 1, "lb"),
+    "APU0000704111": ("Bacon", 1, "lb"),
+    "APU0000711211": ("Bananas", 1, "lb"),
+    "APU0000711111": ("Apples", 1, "lb"),
+    "APU0000711311": ("Oranges", 1, "lb"),
+    "APU0000712112": ("Potatoes", 1, "lb"),
+    "APU0000712211": ("Iceberg lettuce", 1, "lb"),
+    "APU0000712311": ("Tomatoes", 1, "lb"),
+    "APU0000701111": ("All-purpose flour", 1, "lb"),
+    "APU0000701312": ("White rice", 1, "lb"),
+    "APU0000715211": ("Granulated sugar", 1, "lb"),
+    "APU0000717311": ("Ground coffee", 1, "lb"),
+}
+PRICE_REFRESH = {"running": False, "last": None, "done": {}, "errors": []}
+_price_lock = threading.Lock()
+_kroger_token = {"token": "", "until": 0.0}
+
+
+def _pack_of(text):
+    """'1 gal' -> (1, 'gallon'); '12 × 355 ml' -> (4260, 'ml'); '18 ct' -> (18, '')."""
+    p = parse_pack(text or "")
+    if not p:
+        return None, None
+    if p.get("each_qty") and p.get("each_unit") and p.get("count"):
+        return p["count"] * p["each_qty"], p["each_unit"]
+    return p["qty"], p["unit"] or ""
+
+
+def _price_rec(source, price, qty, unit, observed_on, store="", url="", rid=None, note="", name=""):
+    up, base = n_prices.unit_price(price, qty, unit, n_units.convert, n_units.dimension)
+    return {"id": rid, "source": source, "price": price, "qty": qty, "unit": unit or "", "unit_price": up, "base": base,
+            "observed_on": str(observed_on or "")[:10], "store": store or "", "url": url or "", "note": note or "", "name": name}
+
+
+class PriceBook:
+    """Every known price, loaded once per request: keyed by food id ("f:12") and by name key."""
+
+    def __init__(self, c):
+        self.by = {}
+        for r in c.execute("SELECT * FROM prices"):
+            self._add(r["food_id"], r["food_key"], _price_rec(r["source"], r["price"], r["qty"], r["unit"], r["observed_on"],
+                                                             r["store"], r["url"], r["id"], r["note"], r["name"]))
+        for r in c.execute("SELECT p.*, pi.original_qty AS pq, pi.unit AS pu, pi.quantity_text AS pqt FROM purchases p "
+                           "LEFT JOIN pantry_items pi ON pi.id=p.pantry_item_id WHERE p.price>0 ORDER BY p.date DESC, p.id DESC"):
+            qty, unit = r["qty"], r["unit"]
+            if not qty:
+                qty, unit = (r["pq"], r["pu"]) if r["pq"] else _pack_of(r["pqt"])
+            self._add(r["food_id"], food_key(clean_food(r["name"])),
+                      _price_rec("receipt", r["price"], qty, unit, r["date"], r["store_name"], name=r["name"]))
+
+    def _add(self, fid, key, rec):
+        if fid is not None:
+            self.by.setdefault(f"f:{fid}", []).append(rec)
+        if key and not (fid is not None and key == f"f:{fid}"):
+            self.by.setdefault(key, []).append(rec)
+
+    def records(self, key, name=""):
+        out = list(self.by.get(key) or [])
+        k = food_key(clean_food(name)) if name else ""
+        if k and k != key:
+            out += [r for r in self.by.get(k) or [] if not any(r is x for x in out)]
+        return out
+
+
+def _cost_line(book, key, food, qty, unit, t, to_buy=False):
+    recs = book.records(key, food or "")
+    fn = n_prices.cost_to_buy if to_buy else n_prices.cost_used
+    return fn(qty, unit or "", recs, t, n_units.convert, n_units.dimension) if recs else None
+
+
+def recipe_cost(c, rec, scale=1.0, book=None, stock=None, t=None):
+    """What a recipe costs at `scale`: the amounts it uses (partial packages count only the part used), plus what you'd
+    need to buy (whole packages, for what's not in the kitchen). Prices are never made up: unpriced foods are listed."""
+    t = t or today()
+    book = book or PriceBook(c)
+    lines, unpriced, total, approx = [], [], 0.0, False
+    for n in _recipe_needs(rec, scale, set(), c, create=False):
+        if n["qty"] is None or not n["food"]:   # "to taste", "a pinch": too small to price
+            continue
+        r = _cost_line(book, n["key"], n["food"], n["qty"], n["unit"], t)
+        if r is None:
+            unpriced.append(n["food"])
+            continue
+        total += r["cost"]
+        approx = approx or r["approx"]
+        lines.append({"food": n["food"], "cost": n_prices.money(r["cost"]), "approx": r["approx"], "source": r["source"]})
+    servings = float(rec.get("recipeServings") or 0) * float(scale or 1) or None
+    out = {"total": n_prices.money(total), "per_serving": n_prices.money(total / servings) if servings and total else None,
+           "servings": servings, "approx": approx or bool(unpriced), "unpriced": list(dict.fromkeys(unpriced)), "lines": lines}
+    if stock is not None:
+        chk = recipe_check(c, rec, stock, staple_keys(c), t, scale)
+        out["to_buy"] = missing_cost(c, chk["missing"], book, t)
+    return out
+
+
+def missing_cost(c, missing, book, t):
+    """Whole-package cost of the missing items (Almost there's "+$4.20", "Need to buy")."""
+    total, approx, unpriced, lines = 0.0, False, [], []
+    for m in missing:
+        key = _ing_key(m.get("food") or "", c, create=False) if m.get("food") else ""
+        r = _cost_line(book, key, m.get("food") or "", m.get("qty"), m.get("unit"), t, to_buy=True) if key else None
+        if r is None:
+            unpriced.append(m.get("food") or m.get("text"))
+            continue
+        total += r["cost"]
+        approx = approx or r["approx"]
+        lines.append({"food": m.get("food"), "cost": n_prices.money(r["cost"]), "packages": r["packages"], "approx": r["approx"]})
+    return {"total": n_prices.money(total), "approx": approx or bool(unpriced), "unpriced": unpriced, "lines": lines}
+
+
+def recipe_cost_api(slug, q):
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        base = float(rec.get("recipeServings") or 0) or None
+        want = _num(q.get("servings"))
+        scale = (want / base) if (want and base) else 1.0
+        return recipe_cost(c, rec, scale, stock=_make_stock(c, today()))
+
+
+_cost_cache = {"at": 0.0, "key": None, "data": {}}
+
+
+def recipe_costs_all():
+    """{recipe id: {per_serving, total, approx}} for every recipe (cached briefly; used by the planner and picker)."""
+    with db() as c:
+        key = (c.execute("SELECT COUNT(*), MAX(id), MAX(observed_on) FROM prices").fetchone()[:],
+               c.execute("SELECT COUNT(*), MAX(id) FROM purchases").fetchone()[:],
+               c.execute("SELECT COUNT(*), MAX(updated_at) FROM recipes").fetchone()[:])
+        if _cost_cache["key"] == key and time.time() - _cost_cache["at"] < 600:
+            return _cost_cache["data"]
+        book, out = PriceBook(c), {}
+        for row in c.execute("SELECT id, data FROM recipes").fetchall():
+            rc = recipe_cost(c, json.loads(row["data"]), 1.0, book)
+            if rc["total"]:
+                out[row["id"]] = {"per_serving": rc["per_serving"], "total": rc["total"], "approx": rc["approx"]}
+    _cost_cache.update(at=time.time(), key=key, data=out)
+    return out
+
+
+def plan_cost(start, end):
+    """GET /api/costs/plan: what the planned meals cost (amounts used) and per meal."""
+    require_native()
+    t = today()
+    with db() as c:
+        book = PriceBook(c)
+        rows = c.execute("SELECT * FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL AND skipped_at IS NULL "
+                         "ORDER BY date", (iso(start), iso(end))).fetchall()
+        per, total, approx, unpriced = [], 0.0, False, set()
+        for e in rows:
+            rec = n_recipes.get(c, e["recipe_id"])
+            if not rec:
+                continue
+            rc = recipe_cost(c, rec, e["scale"] or 1, book, t=t)
+            total += rc["total"]
+            approx = approx or rc["approx"]
+            unpriced.update(rc["unpriced"])
+            per.append({"id": e["id"], "date": e["date"], "cost": rc["total"], "per_serving": rc["per_serving"], "approx": rc["approx"]})
+    return {"total": n_prices.money(total), "approx": approx, "entries": per, "unpriced": sorted(unpriced),
+            "start": iso(start), "end": iso(end)}
+
+
+def _list_item_food(c, r):
+    """The food on a list row: its parsed food, else its canonical food, else (for "milk") the text itself."""
+    if r["food"]:
+        return r["food"]
+    if r["food_id"] is not None:
+        f = n_foods.get(c, r["food_id"])
+        if f:
+            return f["name"]
+    return (r["text"] or "").strip() if r["food_id"] is not None else ""
+
+
+def list_costs():
+    """GET /api/costs/list: each unchecked item at whole-package prices, totals per store, and how many have no price."""
+    require_native()
+    t = today()
+    with db() as c:
+        book = PriceBook(c)
+        lid = n_lists.single_list(c)
+        stores = {s["id"]: s["name"] for s in n_lists.list_stores(c)}
+        items, per_store, total, approx, unpriced = {}, {}, 0.0, False, 0
+        for r in c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0", (lid,)).fetchall():
+            food = _list_item_food(c, r)
+            if not food:
+                unpriced += 1
+                continue
+            key = f"f:{r['food_id']}" if r["food_id"] is not None else food_key(clean_food(food))
+            res = _cost_line(book, key, food, r["quantity"], r["unit"] or "", t, to_buy=True)
+            if res is None:
+                unpriced += 1
+                items[r["id"]] = None
+                continue
+            cost = n_prices.money(res["cost"])
+            items[r["id"]] = {"cost": cost, "approx": res["approx"], "packages": res["packages"], "source": res["source"]}
+            sid = r["store_id"] if r["store_id"] in stores else None
+            st = per_store.setdefault(sid, {"id": sid, "name": stores.get(sid) or ANY_STORE, "total": 0.0, "approx": False})
+            st["total"] = n_prices.money(st["total"] + cost)
+            st["approx"] = st["approx"] or res["approx"]
+            total += cost
+            approx = approx or res["approx"]
+    order = list(stores) + [None]
+    return {"items": items, "stores": sorted(per_store.values(), key=lambda s: order.index(s["id"]) if s["id"] in order else 99),
+            "total": n_prices.money(total), "approx": approx, "unpriced": unpriced}
+
+
+# ---- the budget
+
+def _household_tz():
+    name = (get_settings().get("budget") or {}).get("timezone") or os.environ.get("TZ") or ""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def budget_today():
+    return n_prices.local_today(datetime.now(timezone.utc), _household_tz())
+
+
+def spent_between(c, start, end, store_id=None):
+    """Money spent on grocery trips in [start, end]: the trip total when known, else the priced items on it."""
+    q = "SELECT t.id, t.total, t.store_id, (SELECT SUM(price) FROM purchases p WHERE p.trip_id=t.id) AS items " \
+        "FROM trips t WHERE t.date BETWEEN ? AND ? AND t.status='done'"
+    args = [iso(start), iso(end)]
+    if store_id is not None:
+        q += " AND t.store_id=?"
+        args.append(store_id)
+    return n_prices.money(sum((r["total"] if r["total"] else (r["items"] or 0)) for r in c.execute(q, args)))
+
+
+def budget_status(day=None):
+    """GET /api/budget: this period's goal, what's spent, and the warning level (80% / 100%)."""
+    b = get_settings().get("budget") or {}
+    amount = float(b.get("amount") or 0)
+    kind = b.get("period") or "week"
+    day = day or budget_today()
+    start, end = n_prices.period_bounds(kind, day, b.get("week_start") or "mon")
+    out = {"period": kind, "start": iso(start), "end": iso(end), "amount": amount, "on": amount > 0}
+    with db() as c:
+        spent = spent_between(c, start, end)
+        stores = {s["id"]: s["name"] for s in n_lists.list_stores(c)} if NATIVE else {}
+        per = []
+        for sid, amt in (b.get("stores") or {}).items():
+            if sid in stores and float(amt or 0) > 0:
+                s_spent = spent_between(c, start, end, sid)
+                per.append({"id": sid, "name": stores[sid], "amount": float(amt), "spent": s_spent,
+                            "level": n_prices.budget_level(s_spent, float(amt))})
+    out.update(spent=spent, left=n_prices.money(amount - spent) if amount else None, level=n_prices.budget_level(spent, amount),
+               stores=per, days_left=(end - day).days + 1)
+    if NATIVE and amount:
+        try:
+            pc = plan_cost(max(day, start), end)
+            out["planned"] = pc["total"]
+            out["planned_approx"] = pc["approx"]
+        except ApiError:
+            pass
+    return out
+
+
+def notify_budget():
+    """Once per period and level: "80% of this week's grocery budget"."""
+    st = budget_status()
+    if not st["on"] or not st["level"] or not any(channels_ready().values()):
+        return
+    flag = f"budget_{st['start']}_{st['level']}"
+    if get_internal(flag):
+        return
+    set_internal(flag, True)
+    pct = 100 if st["level"] == "over" else 80
+    word = "week" if st["period"] == "week" else "month"
+    deliver({"subject": f"🛒 Groceries at {pct}% of this {word}'s budget",
+             "text": f"${st['spent']:.2f} of your ${st['amount']:.2f} {word}ly grocery budget spent.",
+             "html": email_wrap(f"<p>${st['spent']:.2f} of your ${st['amount']:.2f} {word}ly grocery budget spent.</p>"), "files": []})
+
+
+# ---- the spending page
+
+def _food_category(c, food_id, name):
+    if food_id is not None:
+        f = n_foods.get(c, food_id)
+        if f and f.get("category"):
+            return f["category"]
+    return aisle_for(name) or "Other"
+
+
+def spending(q):
+    """GET /api/spending?by=week|month&n=8: totals per period, by store and category, waste, cost per meal."""
+    require_native()
+    by = "month" if q.get("by") == "month" else "week"
+    n = max(1, min(24, int(_num(q.get("n")) or 8)))
+    b = get_settings().get("budget") or {}
+    periods = n_prices.previous_periods(by, budget_today(), n, b.get("week_start") or "mon")
+    start, end = periods[0][0], periods[-1][1]
+    t = today()
+    with db() as c:
+        book = PriceBook(c)
+        rows = []
+        for s, e in periods:
+            spent = spent_between(c, s, e)
+            meals = c.execute("SELECT COUNT(*) FROM diary WHERE kind='cooked' AND substr(cooked_at,1,10) BETWEEN ? AND ?",
+                              (iso(s), iso(e))).fetchone()[0]
+            rows.append({"start": iso(s), "end": iso(e), "spent": spent, "meals": meals,
+                         "per_meal": n_prices.money(spent / meals) if meals and spent else None})
+        stores = {}
+        for r in c.execute("SELECT t.store_name, t.total, (SELECT SUM(price) FROM purchases p WHERE p.trip_id=t.id) AS items "
+                           "FROM trips t WHERE t.date BETWEEN ? AND ? AND t.status='done'", (iso(start), iso(end))):
+            nm = r["store_name"] or "Other"
+            stores[nm] = n_prices.money(stores.get(nm, 0) + (r["total"] or r["items"] or 0))
+        cats = {}
+        for r in c.execute("SELECT food_id, name, price FROM purchases WHERE price>0 AND date BETWEEN ? AND ?", (iso(start), iso(end))):
+            k = _food_category(c, r["food_id"], r["name"])
+            cats[k] = n_prices.money(cats.get(k, 0) + r["price"])
+        waste, waste_items, waste_approx = 0.0, [], False
+        for r in c.execute("SELECT pi.*, (SELECT price FROM purchases p WHERE p.pantry_item_id=pi.id AND p.price>0 LIMIT 1) AS paid "
+                           "FROM pantry_items pi WHERE pi.status='tossed' AND pi.finished_on BETWEEN ? AND ?", (iso(start), iso(end))):
+            key = f"f:{r['food_id']}" if r["food_id"] is not None else food_key(clean_food(r["name"]))
+            v, ap = n_prices.waste_value(r["amount_left"], r["paid"], book.records(key, r["name"]), r["original_qty"] or r["qty"],
+                                         r["unit"] or "", t, n_units.convert, n_units.dimension)
+            if v:
+                waste += v
+                waste_approx = waste_approx or ap
+                waste_items.append({"name": r["name"], "value": n_prices.money(v), "approx": ap, "date": r["finished_on"]})
+    total = n_prices.money(sum(r["spent"] for r in rows))
+    meals = sum(r["meals"] for r in rows)
+    return {"by": by, "periods": rows, "total": total, "meals": meals, "per_meal": n_prices.money(total / meals) if meals and total else None,
+            "stores": sorted(({"name": k, "total": v} for k, v in stores.items()), key=lambda x: -x["total"]),
+            "categories": sorted(({"name": k, "total": v} for k, v in cats.items()), key=lambda x: -x["total"]),
+            "waste": {"total": n_prices.money(waste), "approx": waste_approx, "items": sorted(waste_items, key=lambda x: -x["value"])[:20]},
+            "budget": budget_status()}
+
+
+# ---- price sources
+
+def _save_price(c, source, food, price, qty, unit, store="", url="", note="", observed=None, replace=True):
+    """Store one price for a food (one per source and store unless replace=False)."""
+    fid = n_foods.lookup(c, food) if food and n_foods.normalize(food) else None
+    key = f"f:{fid}" if fid is not None else food_key(clean_food(food))
+    if not key:
+        raise ApiError(400, "Which food?")
+    if replace:
+        c.execute("DELETE FROM prices WHERE source=? AND food_key=? AND store=?", (source, key, store or ""))
+    up, base = n_prices.unit_price(price, qty, unit, n_units.convert, n_units.dimension)
+    if not up:
+        raise ApiError(400, "That price or size couldn't be read.")
+    cur = c.execute("INSERT INTO prices(food_id, food_key, name, source, store, price, qty, unit, unit_price, base, url, note, "
+                    "observed_on, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fid, key, food, source, store or "", float(price), qty, unit or "", up, base, url or "", note or "",
+                     iso(observed or today()), datetime.now().isoformat(timespec="seconds")))
+    return cur.lastrowid
+
+
+def price_set(b):
+    """POST /api/prices {food, price, size?, store?}: a price you know (beats everything but your receipts)."""
+    require_native()
+    food = " ".join(_s(b.get("food"), 80).split())
+    price = n_prices.parse_money(_s(b.get("price"), 30)) if isinstance(b.get("price"), str) else _num(b.get("price"))
+    if not food or not price:
+        raise ApiError(400, "Give the food and its price.")
+    if price > 10_000:
+        raise ApiError(400, "That price looks too high.")
+    qty, unit = _pack_of(_s(b.get("size"), 40)) if b.get("size") else (1, "")
+    with db() as c:
+        pid = _save_price(c, "manual", food, price, qty or 1, unit or "", _s(b.get("store"), 40))
+    _cost_cache["at"] = 0
+    return {"ok": True, "id": pid}
+
+
+def price_delete(pid):
+    require_native()
+    with db() as c:
+        c.execute("DELETE FROM prices WHERE id=?", (pid,))
+    _cost_cache["at"] = 0
+    return {"ok": True}
+
+
+def _kroger_auth():
+    cid, sec = cfg("kroger_client_id"), cfg("kroger_client_secret")
+    if not (cid and sec):
+        raise ApiError(400, "Add your Kroger API client ID and secret first.")
+    if _kroger_token["token"] and time.time() < _kroger_token["until"] - 60:
+        return _kroger_token["token"]
+    basic = base64.b64encode(f"{cid}:{sec}".encode()).decode()
+    res = _https_json(f"{KROGER_API}/connect/oauth2/token", data=b"grant_type=client_credentials&scope=product.compact",
+                      ctype="application/x-www-form-urlencoded", headers={"Authorization": f"Basic {basic}"}, method="POST")
+    tok = res.get("access_token")
+    if not tok:
+        raise ApiError(502, "Kroger didn't accept those credentials.")
+    _kroger_token.update(token=tok, until=time.time() + float(res.get("expires_in") or 1800))
+    return tok
+
+
+def kroger_locations(zip_code):
+    """Stores near a ZIP code, for the store picker."""
+    z = re.sub(r"\D", "", zip_code or "")[:5]
+    if len(z) != 5:
+        raise ApiError(400, "Enter a 5-digit ZIP code.")
+    tok = _kroger_auth()
+    res = _https_json(f"{KROGER_API}/locations?" + urllib.parse.urlencode({"filter.zipCode.near": z, "filter.limit": 10}),
+                      headers={"Authorization": f"Bearer {tok}"})
+    out = []
+    for l in res.get("data") or []:
+        a = l.get("address") or {}
+        out.append({"id": l.get("locationId"), "name": f"{l.get('chain') or ''} {l.get('name') or ''}".strip(),
+                    "address": ", ".join(x for x in (a.get("addressLine1"), a.get("city")) if x)})
+    return {"locations": out}
+
+
+def kroger_price(food):
+    """The first matching product with a price at the chosen store -> (price, qty, unit, url, product name) or None."""
+    loc = cfg("kroger_location_id")
+    if not loc:
+        return None
+    tok = _kroger_auth()
+    res = _https_json(f"{KROGER_API}/products?" + urllib.parse.urlencode(
+        {"filter.term": food[:60], "filter.locationId": loc, "filter.limit": 8}), headers={"Authorization": f"Bearer {tok}"})
+    for p in res.get("data") or []:
+        for it in p.get("items") or []:
+            pr = it.get("price") or {}
+            price = pr.get("promo") or pr.get("regular")
+            qty, unit = _pack_of(it.get("size") or "")
+            if price and float(price) > 0 and qty:
+                return (float(price), qty, unit, f"https://www.kroger.com/p/-/{p.get('productId')}" if p.get("productId") else "",
+                        p.get("description") or "")
+    return None
+
+
+AI_PRICE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["price", "size", "url", "store"],
+                   "properties": {"price": {"type": "string"}, "size": {"type": "string"}, "url": {"type": "string"},
+                                  "store": {"type": "string"}}}
+
+
+def ai_price(food, store=""):
+    """A web-search estimate. Kept only when the page was really cited and both price and size can be read."""
+    where = f" at {store}" if store else " at a large US supermarket chain"
+    prompt = (f"Find the current shelf price of one typical package of {food}{where}, from a store's own product page. "
+              "price = the price as shown (e.g. '$3.49'); size = the package size as shown (e.g. '1 gal', '16 oz'); "
+              "url = that product page (one of your sources); store = the store's name. If you can't find a real listing, "
+              "leave every field empty. Never estimate.")
+    key, model = cfg("openai_key"), cfg("openai_model") or "gpt-5-mini"
+    if not key or _ai_over_budget():
+        return None
+    payload = {"model": model, "input": prompt, "tools": [{"type": "web_search"}],
+               "text": {"format": {"type": "json_schema", "name": "price", "strict": True, "schema": AI_PRICE_SCHEMA}}}
+    if re.match(r"^(gpt-5|o[134])", model):
+        payload["reasoning"] = {"effort": "low"}
+    res = _https_json("https://api.openai.com/v1/responses", payload=payload, headers={"Authorization": f"Bearer {key}"}, timeout=180)
+    u = res.get("usage") or {}
+    log_ai("price estimate", res.get("model") or model, u.get("input_tokens"), u.get("output_tokens"), food[:60])
+    return _ai_price_result(res)
+
+
+def _ai_price_result(res):
+    text, cited = "", set()
+    for item in res.get("output") or []:
+        for part in (item.get("content") or []) if item.get("type") == "message" else []:
+            if part.get("type") == "output_text":
+                text += part.get("text") or ""
+                cited |= {_url_norm(a.get("url")) for a in part.get("annotations") or [] if a.get("type") == "url_citation"}
+    try:
+        d = json.loads(text or "{}")
+    except ValueError:
+        return None
+    url = (d.get("url") or "").strip()
+    price = n_prices.parse_money(d.get("price"))
+    qty, unit = _pack_of(d.get("size") or "")
+    if not (url.startswith("https://") and _url_norm(url) in cited and price and qty):
+        return None   # no cited page, or no price/size we can read: nothing is kept
+    return price, qty, unit, url, " ".join(str(d.get("store") or "").split())[:40]
+
+
+def bls_refresh():
+    """Monthly US average prices from the Bureau of Labor Statistics (fallback estimates)."""
+    body = {"seriesid": list(BLS_SERIES), "latest": True}
+    if cfg("bls_key"):
+        body["registrationkey"] = cfg("bls_key")
+    res = _https_json(BLS_API, payload=body, timeout=40)
+    n = 0
+    with db() as c:
+        for s in (res.get("Results") or {}).get("series") or []:
+            meta = BLS_SERIES.get(s.get("seriesID"))
+            data = s.get("data") or []
+            if not meta or not data:
+                continue
+            row = data[0]
+            try:
+                price = float(row.get("value"))
+            except (TypeError, ValueError):
+                continue
+            month = re.sub(r"\D", "", row.get("period") or "")
+            observed = date(int(row.get("year")), int(month or 1), 1) if (row.get("year") or "").isdigit() else today()
+            food, qty, unit = meta
+            _save_price(c, "bls", food, price, qty, unit, url=f"https://data.bls.gov/timeseries/{s['seriesID']}",
+                        note=f"US city average, {row.get('periodName') or ''} {row.get('year') or ''}".strip(), observed=observed)
+            n += 1
+    if n:
+        set_internal("prices_bls_at", datetime.now().isoformat(timespec="seconds"))
+    return n
+
+
+def _price_targets(c):
+    """Foods worth pricing, most useful first: the list, the next week's plan, then what's bought often."""
+    t = today()
+    out = []
+    lid = n_lists.single_list(c)
+    for r in c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0", (lid,)).fetchall():
+        nm = _list_item_food(c, r)
+        if nm:
+            out.append(nm)
+    skeys = staple_keys(c)
+    for e in c.execute("SELECT recipe_id FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL AND cooked_at IS NULL",
+                       (iso(t), iso(t + timedelta(days=7)))).fetchall():
+        rec = n_recipes.get(c, e["recipe_id"])
+        if rec:
+            out += [n["food"] for n in _recipe_needs(rec, 1, skeys, c, create=False) if n["food"]]
+    for r in c.execute("SELECT name, COUNT(*) n FROM purchases WHERE date>=? GROUP BY food_id, name HAVING n>=2 ORDER BY n DESC LIMIT 40",
+                       (iso(t - timedelta(days=90)),)):
+        out.append(r["name"])
+    seen, uniq = set(), []
+    for f in out:
+        k = food_key(clean_food(f))
+        if k and k not in seen:
+            seen.add(k)
+            uniq.append(f)
+    return uniq
+
+
+def prices_refresh(force=False, ai_limit=5, kroger_limit=25):
+    """Bring prices up to date: BLS monthly, Kroger weekly per food, AI estimates at most monthly per food."""
+    if not NATIVE or not _price_lock.acquire(blocking=False):
+        return PRICE_REFRESH
+    PRICE_REFRESH.update(running=True, errors=[], done={})
+    try:
+        t = today()
+        last_bls = parse_date((get_internal("prices_bls_at") or "")[:10])
+        if force or not last_bls or (t - last_bls).days >= 30:
+            try:
+                PRICE_REFRESH["done"]["bls"] = bls_refresh()
+            except ApiError as e:
+                PRICE_REFRESH["errors"].append(f"US averages: {e.message}")
+        with db() as c:
+            targets = _price_targets(c)
+            book = PriceBook(c)
+        kn = an = 0
+        for food in targets:
+            key = food_key(clean_food(food))
+            recs = book.records(key, food)
+            have = {r["source"]: r for r in recs}
+            if cfg("kroger_location_id") and kn < kroger_limit:
+                k = have.get("kroger")
+                if force or not k or n_prices.is_stale(k, t) or (t - date.fromisoformat(k["observed_on"])).days >= 7:
+                    kn += 1
+                    try:
+                        got = kroger_price(food)
+                        if got:
+                            with db() as c:
+                                _save_price(c, "kroger", food, got[0], got[1], got[2], cfg("kroger_location_name") or "Kroger", got[3], got[4])
+                    except ApiError as e:
+                        PRICE_REFRESH["errors"].append(f"Kroger: {e.message}")
+                        kn = kroger_limit
+            if get_settings().get("price_ai") and cfg("openai_key") and an < ai_limit:
+                fresh = [r for r in recs if r["source"] in ("receipt", "manual", "kroger") and not n_prices.is_stale(r, t)]
+                a = have.get("ai")
+                if not fresh and (not a or (t - date.fromisoformat(a["observed_on"])).days >= 30):
+                    an += 1
+                    try:
+                        got = ai_price(food)
+                        if got:
+                            with db() as c:
+                                _save_price(c, "ai", food, got[0], got[1], got[2], got[4], got[3])
+                    except ApiError as e:
+                        PRICE_REFRESH["errors"].append(f"Web estimate: {e.message}")
+                        an = ai_limit
+        PRICE_REFRESH["done"].update(kroger=kn, ai=an, foods=len(targets))
+        PRICE_REFRESH["last"] = datetime.now().isoformat(timespec="seconds")
+        set_internal("prices_refresh_at", PRICE_REFRESH["last"])
+        _cost_cache["at"] = 0
+    finally:
+        PRICE_REFRESH["running"] = False
+        _price_lock.release()
+    return PRICE_REFRESH
+
+
+def prices_overview():
+    """GET /api/prices: the sources, when they were refreshed, and every food's best price."""
+    require_native()
+    t = today()
+    with db() as c:
+        book = PriceBook(c)
+        counts = {s: 0 for s in n_prices.SOURCES}
+        foods = {}
+        seen = set()
+        for key, recs in book.by.items():
+            for r in recs:
+                if id(r) in seen:
+                    continue
+                seen.add(id(r))
+                counts[r["source"]] += 1
+            label = next((r.get("name") for r in recs if r.get("name")), "")
+            if key.startswith("f:"):
+                f = n_foods.get(c, int(key[2:]))
+                label = (f or {}).get("name") or label
+            if not label:
+                continue
+            b = n_prices.best(recs, t)
+            if b:
+                foods.setdefault(label.lower(), {"food": label, "best": {**b, "approx": n_prices.approx(b, t), "label": n_prices.LABEL[b["source"]],
+                                                                         "stale": n_prices.is_stale(b, t)},
+                                                 "sources": sorted({r["source"] for r in recs}, key=n_prices.RANK.get)})
+    s = get_settings()
+    return {"sources": [{"key": k, "label": n_prices.LABEL[k], "count": counts[k], "estimate": k in n_prices.ESTIMATE_SOURCES} for k in n_prices.SOURCES],
+            "foods": sorted(foods.values(), key=lambda x: x["food"].lower()),
+            "kroger": {"connected": bool(cfg("kroger_client_id") and cfg("kroger_client_secret")), "location": cfg("kroger_location_name") or "",
+                       "location_id": cfg("kroger_location_id") or ""},
+            "ai": {"on": bool(s.get("price_ai")), "key": bool(cfg("openai_key"))},
+            "bls": {"at": get_internal("prices_bls_at"), "key": bool(cfg("bls_key"))},
+            "refresh": {k: PRICE_REFRESH[k] for k in ("running", "done", "errors")} | {"last": get_internal("prices_refresh_at")}}
+
+
+def prices_config(b):
+    """PUT /api/prices/config: Kroger credentials and store, BLS key."""
+    require_native()
+    up = {}
+    for k in ("kroger_client_id", "kroger_client_secret", "bls_key"):
+        if k in b:
+            up[k] = _s(b.get(k), 200).strip()
+    if "location_id" in b:
+        up["kroger_location_id"] = _s(b.get("location_id"), 40).strip()
+        up["kroger_location_name"] = _s(b.get("location_name"), 80).strip()
+    if up:
+        set_cfg(**up)
+        _kroger_token.update(token="", until=0)
+    return prices_overview()
+
+
 # ============================================================ what can I make?
 
 MAKE_EXPIRING_DAYS = 3   # "Use it up": expiring within this many days
@@ -8115,9 +8828,9 @@ def _make_need_text(n):
     return n["line"]
 
 
-def recipe_check(c, rec, stock, skeys, t):
+def recipe_check(c, rec, stock, skeys, t, scale=1):
     """One recipe against the inventory: what's missing (or short) and which expiring foods it would use."""
-    needs = _recipe_needs(rec, 1, skeys, c, create=False)
+    needs = _recipe_needs(rec, scale, skeys, c, create=False)
     groups = {}
     for n in needs:
         groups.setdefault(n["key"], []).append(n)
@@ -8129,7 +8842,8 @@ def recipe_check(c, rec, stock, skeys, t):
             alt = food_key(clean_food(ns[0]["food"]))
             ents = stock.get(alt) or []
         if not ents:
-            missing.append({"food": ns[0]["food"] or ns[0]["line"], "text": _make_need_text(ns[0]), "short": False})
+            missing.append({"food": ns[0]["food"] or ns[0]["line"], "text": _make_need_text(ns[0]), "short": False,
+                            "qty": ns[0]["qty"], "unit": ns[0]["unit"]})
             continue
         first = ns[0]
         qty = None
@@ -8138,7 +8852,7 @@ def recipe_check(c, rec, stock, skeys, t):
             qty = sum(conv) if all(v is not None for v in conv) else None
         if not n_whatcan.enough(qty, first["unit"], [(e["free"], e["row"]["unit"] or "") for e in ents], n_units.convert):
             missing.append({"food": first["food"], "text": _make_need_text({**first, "qty": qty}), "short": True,
-                            "have": pantry_left_text(ents[0]["row"])})
+                            "have": pantry_left_text(ents[0]["row"]), "qty": qty, "unit": first["unit"]})
         for e in ents:
             r = e["row"]
             if r["expires_on"] and r["expires_on"] <= soon and r["id"] not in seen:
@@ -8175,6 +8889,11 @@ def what_can_i_make():
             "SELECT * FROM pantry_items WHERE status='active' AND expires_on IS NOT NULL AND expires_on>=? AND expires_on<=? "
             "ORDER BY expires_on", (iso(t), soon))]
     out = n_whatcan.buckets(cands)
+    with db() as c:
+        book = PriceBook(c)
+        for r in out["almost"] + [x for x in out["use_up"] if x["missing"]]:
+            if "to_buy" not in r:
+                r["to_buy"] = missing_cost(c, r["missing"], book, t)
     out["expiring"] = exp
     out["planned_skipped"] = sum(1 for x in cands if x["planned_soon"])
     out["recipes"] = len(cands)
@@ -8989,6 +9708,15 @@ def scheduler():
                     deliver({"subject": "🧺 Time for a quick inventory check",
                              "text": f"It's been {ck['days_since']} days. Open TablePlan → Inventory → Check-in to confirm what's left. It takes about a minute.",
                              "html": email_wrap("<p>Time for a quick inventory check. Open TablePlan → Inventory → <b>Check-in</b>.</p>"), "files": []})
+            # Prices: refreshed in the background (each source keeps its own pace), and the grocery budget alert
+            if NATIVE and now.hour >= 4:
+                last = get_internal("prices_refresh_at") or ""
+                if not last or (now - datetime.fromisoformat(last)).total_seconds() > 6 * 3600:
+                    prices_refresh()
+                try:
+                    notify_budget()
+                except ApiError as e:
+                    log("budget alert not sent:", e.message)
             # Monthly AI budget alert (80% and 100%)
             budget = float(s.get("ai_budget") or 0)
             if budget > 0 and any(channels_ready().values()):
@@ -9025,7 +9753,7 @@ EXPENSIVE = [
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish|adjust)"), "ai"),
     (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
-    (re.compile(r"/api/scan/photo|/api/scan/identify|/api/receipt|/api/make/web"), "ai"),
+    (re.compile(r"/api/scan/photo|/api/scan/identify|/api/receipt|/api/make/web|/api/prices/refresh"), "ai"),
     (re.compile(r"/api/(upc/\d+|scan|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
 ]
@@ -9515,6 +10243,37 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/scan":
             require_native()
             return self.send(200, scan_add(self.body()))
+        if path == "/api/prices" and m in ("GET", "POST"):
+            require_native()
+            return self.send(200, prices_overview() if m == "GET" else price_set(self.body()))
+        mm = re.fullmatch(r"/api/prices/(\d{1,12})", path)
+        if m == "DELETE" and mm:
+            return self.send(200, price_delete(int(mm.group(1))))
+        if m == "PUT" and path == "/api/prices/config":
+            return self.send(200, prices_config(self.body()))
+        if m == "GET" and path == "/api/prices/kroger/locations":
+            require_native()
+            return self.send(200, kroger_locations(_s(q.get("zip"), 10)))
+        if m == "POST" and path == "/api/prices/refresh":
+            require_native()
+            if not PRICE_REFRESH["running"]:
+                threading.Thread(target=prices_refresh, kwargs={"force": True}, daemon=True, name="tp-prices").start()
+            return self.send(200, {"ok": True, "running": True})
+        mm = re.fullmatch(r"/api/costs/recipe/([^/]{1,200})", path)
+        if m == "GET" and mm:
+            return self.send(200, recipe_cost_api(urllib.parse.unquote(mm.group(1)), q))
+        if m == "GET" and path == "/api/costs/plan":
+            start, end = date_range(q.get("start"), q.get("end"))
+            return self.send(200, plan_cost(start, end))
+        if m == "GET" and path == "/api/costs/list":
+            return self.send(200, list_costs())
+        if m == "GET" and path == "/api/costs/recipes":
+            require_native()
+            return self.send(200, {"costs": recipe_costs_all()})
+        if m == "GET" and path == "/api/budget":
+            return self.send(200, budget_status())
+        if m == "GET" and path == "/api/spending":
+            return self.send(200, spending(q))
         if m == "GET" and path == "/api/make":
             return self.send(200, what_can_i_make())
         if m == "POST" and path == "/api/make/web":
