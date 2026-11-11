@@ -371,7 +371,7 @@ function homeContextCard(s, tonight) {
   const soon = [tonight, s.week.find((e) => e.date === tomorrow && e.entry_type === "dinner")].find((e) => e && !e.cooked && +e.missing);
   if (soon) {
     const when = soon.date === isoDate(today()) ? "Tonight's" : "Tomorrow's";
-    return `<button class="nudge" id="ctx-missing" data-slug="${esc(soon.recipe?.slug || "")}"><span class="ic bg-orange">${ic("cart")}</span><span><b>${esc(when)} ${esc(soon.entry_type)} is missing ${esc(plural(+soon.missing, "item"))}</b><small>${esc(entryName(soon))}: check your shopping list before you go.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+    return `<button class="nudge" id="ctx-missing" data-slug="${esc(soon.recipe?.slug || "")}"><span class="ic bg-orange">${ic("cart")}</span><span><b>Missing ${esc(plural(+soon.missing, "item"))} for ${esc(when === "Tonight's" ? (soon.entry_type === "dinner" ? "tonight" : `today's ${soon.entry_type}`) : (soon.entry_type === "dinner" ? "tomorrow" : `tomorrow's ${soon.entry_type}`))}</b><small>${esc(entryName(soon))}</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
   }
   const st = s.plan_status;
   if (st && st.reminder_days && st.days_left <= st.reminder_days) {
