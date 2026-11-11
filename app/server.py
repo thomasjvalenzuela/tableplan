@@ -4844,6 +4844,7 @@ def recipe_detail(slug):
         "unparsed": 0, "total_minutes": round(int(r.get("totalTimeSeconds") or 0) / 60) or None,
         "missing": recipe_missing(r["id"]), "cook_entry": cook_entry_for(r["id"]),
         "eta": eta_view(r["id"], eta_base(r)),
+        "cooked_today": cooked_today(r["id"]),
         "original": _original(r),
         "name_suggested": ((r.get("extras") or {}).get("title_source") == "suggested") if isinstance(r.get("extras"), dict) else False,
     }
@@ -7159,8 +7160,6 @@ def recipe_cooked(slug, b):
                 continue
             if row["id"] not in snap:
                 snap[row["id"]] = {k: row[k] for k in COOK_SNAPSHOT}
-                event(c, row["id"], "cooked", json.dumps({"token": token, "before": snap[row["id"]],
-                                                          "recipe": rec.get("name") or ""}))
             used_txt = n_units.fmt(need, unit, name) if need is not None else name
             amt = n_units.convert(need, unit, row["unit"]) if (need is not None and row["qty"] is not None) else None
             if amt is not None:
@@ -7189,6 +7188,10 @@ def recipe_cooked(slug, b):
             else:
                 c.execute("UPDATE pantry_items SET amount_left=? WHERE id=?", (left, row["id"]))
             unknown.append(row["name"])
+        for iid, before in snap.items():   # the ledger: each item before and after, so undo and edits are exact
+            after = pantry_row(c, iid)
+            event(c, iid, "cooked", json.dumps({"token": token, "before": before, "after": {k: after[k] for k in COOK_SNAPSHOT},
+                                                "recipe": rec.get("name") or ""}))
         if entry:
             prev = n_plans.set_cooked(c, plan_id, now)
             c.execute("INSERT INTO pantry_events(item_id, at, action, detail) VALUES (NULL,?,?,?)",
@@ -7287,7 +7290,32 @@ def diary_update(did, b):
             raise ApiError(404, "Diary entry not found")
         rating = _rating_arg(b["rating"]) if "rating" in b else r["rating"]
         note = _s(b.get("note"), 2000).strip() if "note" in b else r["note"]
-        c.execute("UPDATE diary SET rating=?, note=? WHERE id=?", (rating, note, did))
+        cooked_at = r["cooked_at"]
+        if b.get("date"):
+            d = _strict_date(b.get("date"), "date")
+            if d > today():
+                raise ApiError(400, "That date is in the future.")
+            cooked_at = iso(d) + (r["cooked_at"][10:] if len(r["cooked_at"] or "") > 10 else "T19:00:00")
+        servings = r["servings"]
+        if "servings" in b and b["servings"] not in (None, ""):
+            try:
+                new = float(b["servings"])
+            except (TypeError, ValueError):
+                raise ApiError(400, "Servings must be a number.")
+            if not 0 < new <= 1000:
+                raise ApiError(400, "Servings must be between 0 and 1000.")
+            if r["undo_token"] and servings and abs(new - servings) > 1e-9:
+                # cooked a different amount: give back (or take) the difference from the inventory
+                k = 1 - new / servings
+                for ev, d in _cook_events(c, r["undo_token"]):
+                    if ev["action"] == "cooked" and ev["item_id"] is not None:
+                        _cook_give_back(c, ev["item_id"], d.get("before") or {}, d.get("after") or {}, k)
+                        now_row = pantry_row(c, ev["item_id"])
+                        d["after"] = {x: now_row[x] for x in COOK_SNAPSHOT}
+                        c.execute("UPDATE pantry_events SET detail=? WHERE id=?", (json.dumps(d), ev["id"]))
+                sync_plan_list(c)
+            servings = new
+        c.execute("UPDATE diary SET rating=?, note=?, cooked_at=?, servings=? WHERE id=?", (rating, note, cooked_at, servings, did))
     _recipe_cache["at"] = 0
     return next((x for x in diary_list(limit=500) if x["id"] == did), {"id": did})
 
@@ -7309,12 +7337,23 @@ def diary_photo(did, b):
     return next((x for x in diary_list(limit=500) if x["id"] == did), {"id": did})
 
 
-def diary_delete(did):
+def diary_delete(did, restore=False):
+    """Delete a diary entry. restore=True also puts the ingredients back (a full undo of that cook)."""
     with db() as c:
-        r = c.execute("SELECT photo FROM diary WHERE id=?", (did,)).fetchone()
+        r = c.execute("SELECT * FROM diary WHERE id=?", (did,)).fetchone()
         if not r:
             raise ApiError(404, "Diary entry not found")
+        token, plan_id = r["undo_token"], r["plan_entry_id"]
+    if restore and token:
+        cooked_undo({"undo_token": token})
+        return {"ok": True, "restored": True}
+    with db() as c:
         c.execute("DELETE FROM diary WHERE id=?", (did,))
+        if plan_id is not None and r["kind"] == "cooked":   # it wasn't cooked after all: the plan entry goes back too
+            try:
+                n_plans.set_cooked(c, plan_id, None)
+            except KeyError:
+                pass
     _diary_photo_remove(r["photo"])
     _recipe_cache["at"] = 0
     return {"ok": True}
@@ -7457,27 +7496,69 @@ def recipe_version_restore(slug, n):
     return recipe_detail(slug)
 
 
+def _cook_events(c, token, include_undone=False):
+    rows = c.execute("SELECT * FROM pantry_events WHERE (action IN ('cooked', 'cooked-plan', 'cooked-recipe') OR action LIKE '% (undone)') "
+                     "AND detail LIKE ? ORDER BY id DESC", (f'%"token": "{token}"%',)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            d = json.loads(r["detail"])
+        except (TypeError, ValueError):
+            continue
+        if d.get("token") == token and (include_undone or not r["action"].endswith("(undone)")):
+            out.append((r, d))
+    return out
+
+
+def _cook_give_back(c, iid, before, after, k):
+    """Return k × what one cook took from an item (k < 0 takes more). Exact when nothing else touched the item since."""
+    cur = pantry_row(c, iid)
+    if not cur or not after:
+        return False
+    if k == 1 and all(cur[x] == after.get(x) for x in COOK_SNAPSHOT):
+        c.execute(f"UPDATE pantry_items SET {', '.join(f'{x}=?' for x in COOK_SNAPSHOT)} WHERE id=?",
+                  (*(before.get(x) for x in COOK_SNAPSHOT), iid))
+        return True
+    f = {}
+    if cur["qty"] is not None and before.get("qty") is not None and after.get("qty") is not None:
+        q = max(0.0, cur["qty"] + k * (before["qty"] - after["qty"]))
+        orig = max(q, cur["original_qty"] or 0) or None
+        f.update(qty=q, original_qty=orig, amount_left=max(0.0, min(1.0, q / orig)) if orig else 0.0)
+    elif before.get("amount_left") is not None and after.get("amount_left") is not None:
+        f["amount_left"] = max(0.0, min(1.0, (cur["amount_left"] or 0) + k * (before["amount_left"] - after["amount_left"])))
+    left = f.get("amount_left", cur["amount_left"] or 0)
+    if left > 1e-6 and cur["status"] == "used" and before.get("status") == "active":
+        f.update(status="active", finished_on=None)
+    elif left <= 1e-6 and cur["status"] == "active":
+        f.update(status="used", finished_on=iso(today()))
+    if f:
+        c.execute(f"UPDATE pantry_items SET {', '.join(f'{x}=?' for x in f)} WHERE id=?", (*f.values(), iid))
+    return bool(f)
+
+
 def cooked_undo(b):
-    """Put the pantry back the way it was before a "cooked", and un-cook the plan entry."""
+    """Put the pantry back the way it was before a "cooked", remove its diary entry and un-cook the plan entry.
+    Doing it twice is harmless."""
     require_native()
     token = _s((b or {}).get("undo_token"), 64).strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", token):
         raise ApiError(400, "Nothing to undo.")
     restored = 0
     with db() as c:
-        rows = c.execute("SELECT * FROM pantry_events WHERE action IN ('cooked', 'cooked-plan', 'cooked-recipe') "
-                         "AND detail LIKE ? ORDER BY id DESC", (f'%"token": "{token}"%',)).fetchall()
-        rows = [(r, json.loads(r["detail"])) for r in rows]
-        rows = [(r, d) for r, d in rows if d.get("token") == token]
+        rows = _cook_events(c, token)
         if not rows:
+            if _cook_events(c, token, include_undone=True):
+                return {"ok": True, "restored": 0, "already": True}
             raise ApiError(404, "That can't be undone any more.")
         for r, d in rows:
             if r["action"] == "cooked" and r["item_id"] is not None:
-                before = {k: d["before"].get(k) for k in COOK_SNAPSHOT}
-                c.execute(f"UPDATE pantry_items SET {', '.join(f'{k}=?' for k in COOK_SNAPSHOT)} WHERE id=?",
-                          (*before.values(), r["item_id"]))
+                if _cook_give_back(c, r["item_id"], d.get("before") or {}, d.get("after") or d.get("before") or {}, 1):
+                    restored += 1
+                elif not d.get("after"):   # an older ledger entry (no "after"): put the snapshot back
+                    c.execute(f"UPDATE pantry_items SET {', '.join(f'{k}=?' for k in COOK_SNAPSHOT)} WHERE id=?",
+                              (*(d["before"].get(k) for k in COOK_SNAPSHOT), r["item_id"]))
+                    restored += 1
                 event(c, r["item_id"], "cook undone")
-                restored += 1
             elif r["action"] == "cooked-plan":
                 try:
                     n_plans.set_cooked(c, d["plan_id"], d.get("before"))
@@ -7488,7 +7569,40 @@ def cooked_undo(b):
             _diary_photo_remove(d["photo"])
             c.execute("DELETE FROM diary WHERE id=?", (d["id"],))
         sync_plan_list(c)
+    _recipe_cache["at"] = 0
     return {"ok": True, "restored": restored}
+
+
+def cooked_today(recipe_id):
+    """The latest undoable cook of this recipe today: {diary_id, undo_token} or None."""
+    if not NATIVE:
+        return None
+    with db() as c:
+        r = c.execute("SELECT id, undo_token FROM diary WHERE recipe_id=? AND kind='cooked' AND undo_token IS NOT NULL AND "
+                      "substr(cooked_at, 1, 10)=? ORDER BY id DESC LIMIT 1", (recipe_id, iso(today()))).fetchone()
+    return {"diary_id": r["id"], "undo_token": r["undo_token"]} if r else None
+
+
+def plan_uncook(entry_id):
+    """"Not cooked yet": undo the cook that ticked this plan entry (or just clear the tick if there's no record)."""
+    require_native()
+    with db() as c:
+        e = n_plans.get_entry(c, entry_id)
+        if not e:
+            raise ApiError(404, "Plan entry not found")
+        token = None
+        for r in c.execute("SELECT detail FROM pantry_events WHERE action='cooked-plan' ORDER BY id DESC LIMIT 200"):
+            try:
+                d = json.loads(r["detail"])
+            except ValueError:
+                continue
+            if d.get("plan_id") == entry_id:
+                token = d.get("token")
+                break
+        if not token:
+            n_plans.set_cooked(c, entry_id, None)
+            return {"ok": True, "restored": 0}
+    return cooked_undo({"undo_token": token})
 
 
 def cook_entry_for(recipe_id):
@@ -9126,7 +9240,7 @@ class Handler(BaseHTTPRequestHandler):
             if m == "PATCH" and not mm.group(2):
                 return self.send(200, diary_update(did, self.body()))
             if m == "DELETE" and not mm.group(2):
-                return self.send(200, diary_delete(did))
+                return self.send(200, diary_delete(did, q.get("restore") == "1"))
         mm = re.fullmatch(r"/img/diary/(\d{1,12})", path)
         if m == "GET" and mm:
             with db() as c:
@@ -9195,6 +9309,9 @@ class Handler(BaseHTTPRequestHandler):
         mm = re.fullmatch(r"/api/plan/(\d{1,15})", path)
         if m == "DELETE" and mm:
             return self.send(200, plan_delete(int(mm.group(1))))
+        mm = re.fullmatch(r"/api/plan/(\d{1,15})/uncook", path)
+        if m == "POST" and mm:
+            return self.send(200, plan_uncook(int(mm.group(1))))
         mm = re.fullmatch(r"/api/plan/(\d{1,15})/eat-at", path)
         if m == "PUT" and mm:
             return self.send(200, plan_eat_at(int(mm.group(1)), self.body()))

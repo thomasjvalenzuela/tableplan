@@ -1,5 +1,13 @@
 [
  {
+  "id": "cook-undo",
+  "date": "2026-11-16",
+  "icon": "refresh",
+  "color": "blue",
+  "title": "Cooked by mistake? Undo it",
+  "text": "Every “cooked” can be undone and puts the ingredients back exactly. On the plan, ✓ Cook now needs a second tap, and a cooked meal's ⋯ menu has “Not cooked yet”. Diary entries can be edited or deleted."
+ },
+ {
   "id": "scan-recipes",
   "date": "2026-11-15",
   "icon": "camera",

@@ -145,7 +145,7 @@ function toast(msg, actionLabel, action) {
   if (actionLabel) $("button", t).onclick = () => { t.classList.remove("on"); action(); };
   requestAnimationFrame(() => t.classList.add("on"));
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("on"), actionLabel ? 6000 : 3200);
+  toastTimer = setTimeout(() => t.classList.remove("on"), actionLabel ? 8000 : 3200);
 }
 const fail = (e) => toast(e.message || String(e));
 const c_native = () => state.cfg?.backend === "native";
@@ -511,7 +511,13 @@ async function drawBoard() {
     if (Date.now() < DND.quietUntil) return;
     const more = ev.target.closest("[data-more]"), pick = ev.target.closest("[data-pick]"), card = ev.target.closest(".bcard");
     const cook = ev.target.closest("[data-cook]"), add = ev.target.closest("[data-add]");
-    if (cook) { const e = find(cook.dataset.cook); if (e) cookEntry(e, cook); return; }
+    if (cook) {   // the board's ✓ Cook needs a second tap (or a long press), so it can't happen by accident
+      const e = find(cook.dataset.cook); if (!e) return;
+      if (cook.dataset.armed === "1") { clearTimeout(cook._t); cookEntry(e, cook); return; }
+      cook.dataset.armed = "1"; cook.classList.add("armed"); const label = cook.innerHTML; cook.textContent = "Tap again to mark cooked";
+      cook._t = setTimeout(() => { cook.dataset.armed = ""; cook.classList.remove("armed"); cook.innerHTML = label; }, 3000);
+      return;
+    }
     if (add) return openPicker(add.dataset.add, firstOpenType(byDay[add.dataset.add] || []), null, { anyType: true });
     if (more) return entryMenu(more, find(more.dataset.more));
     if (pick) return openPicker(pick.dataset.pick, pick.dataset.type);
@@ -519,6 +525,12 @@ async function drawBoard() {
   };
   board.onkeydown = (ev) => { const card = ev.target.closest?.(".bcard"); if (card && ev.target === card && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); card.click(); } };
   board.oncontextmenu = (ev) => { if (ev.target.closest(".bcard")) ev.preventDefault(); };
+  board.addEventListener("pointerdown", (ev) => {   // long-press ✓ Cook also marks it cooked
+    const cook = ev.target.closest("[data-cook]"); if (!cook) return;
+    const t = setTimeout(() => { const e = find(cook.dataset.cook); cook.dataset.armed = "1"; DND.quietUntil = Date.now() + 500; try { navigator.vibrate?.(15); } catch (_) {} if (e) cookEntry(e, cook); }, 650);
+    const stop = () => { clearTimeout(t); window.removeEventListener("pointerup", stop); window.removeEventListener("pointercancel", stop); };
+    window.addEventListener("pointerup", stop); window.addEventListener("pointercancel", stop);
+  });
   boardDnD(board, (id, from, to, swapWith) => moveEntry(find(id), to, true, swapWith));
 }
 
@@ -733,6 +745,7 @@ function entryMenu(anchor, e) {
   const main = () => `<button data-act="open" ${e.recipe?.slug ? "" : "disabled"}>${ic("book")} Open recipe</button>
     <button data-act="swap">${ic("shuffle")} Swap</button><button data-act="move">${ic("cal")} Move to…</button>
     <button data-act="eat">${ic("clock")} Eat at ${esc(e.eat_at ? clock12(e.eat_at) : "…")}</button>
+    ${e.cooked ? `<button data-act="uncook">${ic("refresh")} Not cooked yet (undo)</button>` : ""}
     <button data-act="rm" class="red">${ic("trash")} Remove</button>`;
   popover(anchor, main(), (el, p) => {
     const bind = () => {
@@ -741,6 +754,10 @@ function entryMenu(anchor, e) {
         if (a === "open") { closePop(); openRecipe(e.recipe.slug); }
         if (a === "swap") { closePop(); openPicker(e.date, e.entry_type, e); }
         if (a === "rm") { closePop(); removeEntry(e); }
+        if (a === "uncook") {
+          closePop();
+          api("POST", `/api/plan/${enc(e.id)}/uncook`).then((r) => { toast(r.restored ? `Not cooked · ${plural(r.restored, "ingredient")} put back` : "Marked not cooked"); replan(); }).catch(fail);
+        }
         if (a === "eat") {
           el.innerHTML = `<div class="pop-h">When do you want to eat ${esc(entryName(e))}?</div>
             <form class="eat-form"><input type="time" id="eat-t" value="${esc(e.eat_at || "18:30")}" step="300" aria-label="Eat at"><button class="btn small" type="submit">Save</button></form>

@@ -138,8 +138,7 @@ class Cooked(unittest.TestCase):
             for k in S.COOK_SNAPSHOT:
                 self.assertEqual(r[k], b[k], k)
         self.assertFalse(S.get_plans(S.today(), S.today())[0]["cooked"])
-        with self.assertRaises(S.ApiError):
-            S.cooked_undo({"undo_token": out["undo_token"]})
+        self.assertTrue(S.cooked_undo({"undo_token": out["undo_token"]})["already"])   # a second undo changes nothing
         with self.assertRaises(S.ApiError):
             S.cooked_undo({"undo_token": "x"})
 
@@ -520,3 +519,88 @@ class DangerZone(unittest.TestCase):
             self.assertEqual(self.count(t), 0, t)
         self.assertGreater(self.count("stores"), 0)
         self.assertGreater(self.count("foods"), 0)
+
+
+class CookUndo(unittest.TestCase):
+    """Accidental "Mark as cooked": exact undo, idempotent; diary edits and deletes (with or without restoring)."""
+
+    def setUp(self):
+        with S.db() as c:
+            for t in ("meal_plans", "shopping_items", "pantry_items", "pantry_events", "diary"):
+                c.execute(f"DELETE FROM {t}")
+        S._recipe_cache["at"] = 0
+        self.slug, self.rid = new_recipe(f"Undo Eggs {id(self)}", 2, ["4 tbsp heavy cream", "2 eggs", "1 cup spinach"])
+
+    def add(self, name, qty=None, unit=None):
+        with S.db() as c:
+            return S.add_pantry_item(c, name, "fridge", None, "", qty=qty, unit=unit)
+
+    def row(self, pid):
+        with S.db() as c:
+            return dict(S.pantry_row(c, pid))
+
+    def test_undo_restores_exact_quantities_and_is_idempotent(self):
+        cream, eggs, spinach = self.add("Heavy cream", 1, "cup"), self.add("Eggs", 12, ""), self.add("Spinach")
+        before = {p: self.row(p) for p in (cream, eggs, spinach)}
+        with S.db() as c:
+            pid = S.n_plans.add_entry(c, S.iso(S.today()), "dinner", self.rid)
+        out = S.recipe_cooked(self.slug, {"plan_id": pid})
+        self.assertEqual(self.row(eggs)["qty"], 10)
+        self.assertEqual(S.cooked_today(self.rid)["undo_token"], out["undo_token"])
+        S.cooked_undo({"undo_token": out["undo_token"]})
+        for p in (cream, eggs, spinach):
+            r = self.row(p)
+            for k in S.COOK_SNAPSHOT:
+                self.assertEqual(r[k], before[p][k], (p, k))
+        with S.db() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM diary").fetchone()[0], 0)
+            self.assertIsNone(S.n_plans.get_entry(c, pid)["cooked_at"])
+        again = S.cooked_undo({"undo_token": out["undo_token"]})           # double undo: harmless
+        self.assertTrue(again["already"])
+        self.assertEqual(self.row(eggs)["qty"], 12)
+
+    def test_undo_after_other_changes_gives_back_only_what_it_took(self):
+        eggs = self.add("Eggs", 12, "")
+        first = S.recipe_cooked(self.slug, {})
+        S.recipe_cooked(self.slug, {})                                      # another cook in between
+        self.assertEqual(self.row(eggs)["qty"], 8)
+        S.cooked_undo({"undo_token": first["undo_token"]})
+        self.assertEqual(self.row(eggs)["qty"], 10)
+
+    def test_plan_entry_uncook(self):
+        eggs = self.add("Eggs", 12, "")
+        with S.db() as c:
+            pid = S.n_plans.add_entry(c, S.iso(S.today()), "dinner", self.rid)
+        S.recipe_cooked(self.slug, {"plan_id": pid})
+        S.plan_uncook(pid)
+        self.assertEqual(self.row(eggs)["qty"], 12)
+        with S.db() as c:
+            self.assertIsNone(S.n_plans.get_entry(c, pid)["cooked_at"])
+
+    def test_servings_edit_adjusts_the_difference(self):
+        eggs = self.add("Eggs", 12, "")
+        out = S.recipe_cooked(self.slug, {"servings": 2})                  # 2 eggs
+        S.diary_update(out["diary_id"], {"servings": 4})                    # actually cooked double
+        self.assertEqual(self.row(eggs)["qty"], 8)
+        S.diary_update(out["diary_id"], {"servings": 1})                    # …no, half
+        self.assertEqual(self.row(eggs)["qty"], 11)
+        S.diary_update(out["diary_id"], {"date": S.iso(S.today() - timedelta(days=2)), "rating": 4, "note": "Good"})
+        e = [x for x in S.diary_list() if x["id"] == out["diary_id"]][0]
+        self.assertEqual((e["date"], e["rating"], e["servings"]), (S.iso(S.today() - timedelta(days=2)), 4, 1.0))
+        S.cooked_undo({"undo_token": out["undo_token"]})                    # undo still lands on the original amount
+        self.assertEqual(self.row(eggs)["qty"], 12)
+
+    def test_delete_with_and_without_restore(self):
+        eggs = self.add("Eggs", 12, "")
+        with S.db() as c:
+            pid = S.n_plans.add_entry(c, S.iso(S.today()), "dinner", self.rid)
+        a = S.recipe_cooked(self.slug, {"plan_id": pid})
+        S.diary_delete(a["diary_id"], restore=False)                        # keep inventory as is
+        self.assertEqual(self.row(eggs)["qty"], 10)
+        with S.db() as c:
+            self.assertIsNone(S.n_plans.get_entry(c, pid)["cooked_at"])
+        b = S.recipe_cooked(self.slug, {})
+        S.diary_delete(b["diary_id"], restore=True)                          # put the ingredients back
+        self.assertEqual(self.row(eggs)["qty"], 10)
+        with S.db() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM diary").fetchone()[0], 0)

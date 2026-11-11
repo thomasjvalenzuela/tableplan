@@ -176,21 +176,60 @@ function drawSelBar() {
 // ------------------------------------------------------------------ cooking diary
 const stars = (n) => (n ? "★".repeat(n) + "☆".repeat(5 - n) : "");
 const dayHead = (iso) => { const d = Math.round((today() - parseISO(iso)) / 864e5); return d === 0 ? "Today" : d === 1 ? "Yesterday" : d < 7 ? fmt(parseISO(iso), { weekday: "long" }) : fmt(parseISO(iso), { month: "short", day: "numeric", year: parseISO(iso).getFullYear() === today().getFullYear() ? undefined : "numeric" }); };
+const DY = {};   // diary entries shown, by id (for the ⋯ menu)
 function diaryTimeline(entries, { showRecipe = true } = {}) {
   let html = "", last = "";
   for (const e of entries) {
+    DY[e.id] = e;
     const h = dayHead(e.date);
     if (h !== last) { html += `<div class="dy-h">${esc(h)}</div>`; last = h; }
     const img = e.photo || (showRecipe ? e.recipe_image : null);
     const time = (e.cooked_at || "").slice(11, 16);
-    html += `<button class="dy-row" data-dslug="${esc(e.slug || "")}" data-did="${esc(e.id)}">${img ? `<img class="dy-img" src="${esc(img)}" alt="">` : `<span class="dy-img emo">${e.kind === "adjusted" ? "✏️" : e.kind === "note" ? "📝" : "🍽️"}</span>`}
+    html += `<div class="dy-item"><button class="dy-row" data-dslug="${esc(e.slug || "")}" data-did="${esc(e.id)}">${img ? `<img class="dy-img" src="${esc(img)}" alt="">` : `<span class="dy-img emo">${e.kind === "adjusted" ? "✏️" : e.kind === "note" ? "📝" : "🍽️"}</span>`}
       <span class="main">${showRecipe ? `<span class="a">${esc(e.recipe_name || "Recipe")}</span>` : ""}<span class="b">${esc(e.kind === "cooked" ? `Cooked${time ? ` at ${time}` : ""}` : e.kind === "adjusted" ? "Adjusted" : "Note")}${e.rating ? ` · <span class="stars" aria-label="${esc(e.rating)} stars">${stars(e.rating)}</span>` : ""}</span>
-      ${e.note ? `<span class="dy-note">${esc(e.note.split("\n")[0])}</span>` : ""}</span></button>`;
+      ${e.note ? `<span class="dy-note">${esc(e.note.split("\n")[0])}</span>` : ""}</span></button>
+      <button class="mini dy-more" data-dmore="${esc(e.id)}" aria-label="Edit or delete this diary entry">${ic("more")}</button></div>`;
   }
   return `<div class="dy">${html}</div>`;
 }
-function bindDiaryTimeline(box) {
+function bindDiaryTimeline(box, after) {
   $$(".dy-row[data-dslug]", box).forEach((b) => (b.onclick = () => { if (b.dataset.dslug) { state.diaryFocus = true; openRecipe(b.dataset.dslug); } }));
+  const redo = after || (() => (location.hash === "#diary" ? renderDiary() : refresh()));
+  $$("[data-dmore]", box).forEach((b) => (b.onclick = () => {
+    const e = DY[b.dataset.dmore]; if (!e) return;
+    popover(b, `<button data-a="edit">${ic("edit")} Edit</button><button data-a="del" class="red">${ic("trash")} Delete</button>`, (el) => {
+      $("[data-a=edit]", el).onclick = () => { closePop(); editDiary(e, redo); };
+      $("[data-a=del]", el).onclick = () => {
+        if (e.kind !== "cooked") { closePop(); return deleteDiary(e, false, redo); }
+        el.innerHTML = `<div class="pop-h">Delete this cook. What about the ingredients it used?</div>
+          <button data-r="1">${ic("refresh")} Put ingredients back</button><button data-r="0">${ic("box")} Keep inventory as is</button>`;
+        $$("[data-r]", el).forEach((x) => (x.onclick = () => { closePop(); deleteDiary(e, x.dataset.r === "1", redo); }));
+      };
+    });
+  }));
+}
+async function deleteDiary(e, restore, after) {
+  try { await api("DELETE", `/api/diary/${enc(e.id)}${restore ? "?restore=1" : ""}`); toast(restore ? "Deleted · ingredients put back" : "Deleted"); after(); }
+  catch (x) { fail(x); }
+}
+function editDiary(e, after) {
+  openSheet("Edit diary entry", `<form id="de-f"><div class="group">
+      <div class="field"><label for="de-date">Date</label><input type="date" id="de-date" value="${esc(e.date)}" max="${esc(isoDate(today()))}"></div>
+      ${e.kind === "cooked" ? `<div class="field"><label for="de-serv">Servings cooked<small class="lh">Changing this gives back (or takes) the difference from your inventory.</small></label><input type="number" id="de-serv" min="0.25" max="1000" step="0.25" value="${esc(e.servings || "")}"></div>` : ""}
+      <div class="field"><label>Rating</label><div class="how-stars" id="de-stars" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map((n) => `<button type="button" data-star="${n}" role="radio" aria-checked="${e.rating === n}" aria-label="${n} star${n > 1 ? "s" : ""}">${n <= (e.rating || 0) ? "★" : "☆"}</button>`).join("")}</div></div>
+      <div class="field col"><label for="de-note">Note</label><textarea id="de-note" rows="3" maxlength="2000">${esc(e.note || "")}</textarea></div>
+    </div><div style="height:12px"></div><button class="btn" type="submit">Save</button></form>`);
+  let rating = e.rating || null;
+  $$("#de-stars [data-star]").forEach((b) => (b.onclick = () => {
+    rating = rating === +b.dataset.star ? null : +b.dataset.star;
+    $$("#de-stars [data-star]").forEach((x) => { x.textContent = +x.dataset.star <= (rating || 0) ? "★" : "☆"; x.setAttribute("aria-checked", String(+x.dataset.star === rating)); });
+  }));
+  $("#de-f").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = { date: $("#de-date").value, rating: rating || 0, note: $("#de-note").value };
+    if ($("#de-serv") && $("#de-serv").value) body.servings = +$("#de-serv").value;
+    try { await api("PATCH", `/api/diary/${enc(e.id)}`, body); closeSheet(); toast("Saved"); after(); } catch (x) { fail(x); }
+  };
 }
 async function renderDiary() {
   state.tab = "recipes"; renderTabs();
@@ -341,7 +380,8 @@ async function renderRecipe(slug) {
         <span class="mp stepper">${ic("users")}<button data-s="-1" aria-label="Fewer servings">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More servings">+</button></span>
       </div>
       ${(rec.categories || []).length ? `<div class="cat-pills">${rec.categories.map((c) => `<span class="cat-pill">${esc(c)}</span>`).join("")}</div>` : ""}
-      ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>` : ""}
+      ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>`
+        : rec.cooked_today ? `<div class="cook-due"><span>✓ Cooked today</span><button class="link-btn" id="rd-uncook">Undo</button></div>` : ""}
     </div>
     <div class="rd-sheet"><div class="grabber" aria-hidden="true"></div>
       ${state.justCooked && state.justCooked.slug === rec.slug ? howWasItHtml() : ""}
@@ -384,6 +424,10 @@ async function renderRecipe(slug) {
     try { await markCooked(rec.slug, body, () => { if (location.hash === "#recipe/" + encodeURIComponent(slug)) renderRecipe(slug); }); }
     catch (x) { fail(x); btn.disabled = false; }
   };
+  $("#rd-uncook") && ($("#rd-uncook").onclick = async () => {
+    try { await api("POST", "/api/cooked/undo", { undo_token: rec.cooked_today.undo_token }); toast("Undone · ingredients put back"); renderRecipe(slug); }
+    catch (x) { fail(x); }
+  });
   drawContent();
   drawCookReady();
 }
