@@ -1839,7 +1839,8 @@ from native import timers as n_timers  # noqa: E402
 from native import eta as n_eta  # noqa: E402
 from native import users as n_users  # noqa: E402
 from native import dupes as n_dupes  # noqa: E402
-from native import barcodes as n_barcodes  # noqa: E402
+from native import barcodes as n_barcodes
+from native import whatcan as n_whatcan  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -4782,9 +4783,19 @@ def _num(v):
 def recipe_detail(slug):
     r = mealie("GET", f"/api/recipes/{_q(slug)}")
     with db() as c:
-        pantry = {}
-        for it in list_pantry(c):
+        pantry = {}   # soonest-expiring first, so an ingredient shows the item to use up
+        for it in sorted(list_pantry(c), key=lambda x: (x["days_left"] is None, x["days_left"] if x["days_left"] is not None else 0)):
+            if it.get("review"):
+                continue
             pantry.setdefault(food_key(it["name"]), it)
+            if it.get("food_id") is not None:
+                pantry.setdefault(f"f:{it['food_id']}", it)
+        fid_of = {}
+        if NATIVE:
+            for ing in r.get("recipeIngredient") or []:
+                nm = (ing.get("food") or {}).get("name") or _ing_food_name(ing.get("note") or ing.get("display") or ing.get("originalText") or "")
+                if nm and n_foods.normalize(nm):
+                    fid_of[nm] = n_foods.lookup(c, nm)
     ings, ref_index = [], {}
     for i, ing in enumerate(r.get("recipeIngredient") or []):
         food = ing.get("food") or {}
@@ -4796,7 +4807,8 @@ def recipe_detail(slug):
             local = parse_ing_text(ing.get("note") or ing.get("display") or ing.get("originalText") or "")
             if local:
                 fname = local["food"]
-        pantry_hit = (pantry.get(food_key(fname)) or pantry.get(food_key(clean_food(fname)))) if fname else None
+        pantry_hit = (pantry.get(f"f:{fid_of.get(fname)}") if fid_of.get(fname) is not None else None) if fname else None
+        pantry_hit = pantry_hit or ((pantry.get(food_key(fname)) or pantry.get(food_key(clean_food(fname)))) if fname else None)
         if ing.get("referenceId"):
             ref_index[ing["referenceId"]] = i
         if local:
@@ -5934,10 +5946,20 @@ def scan_add(b):
             if lookup_error:
                 out["error"] = lookup_error
             return out
-        # never a dead end: add it now as an unknown item to review later (no typing during a scan session)
+        # never a dead end: add it now as an unknown item to review later (no typing during a scan session).
+        # The same unknown code in the same place again counts up the placeholder that's already waiting.
+        kind, place = split_place(loc or "pantry")
+        with db() as c:
+            same = c.execute("SELECT id FROM pantry_items WHERE status='active' AND review=1 AND upc=? AND location=? "
+                             "AND COALESCE(place,'')=? ORDER BY id LIMIT 1", (code, kind or "pantry", place or "")).fetchone()
+        if same:
+            out = scan_more(same["id"], 1)
+            return {"ok": True, "unknown": True, "again": True, "code": code, "item": out["item"], "list_checked": None,
+                    "list_ask": None, "error": lookup_error}
         with db() as c:
             pid = add_pantry_item(c, f"Unknown item · {code}", loc or "pantry", None, "")
-            c.execute("UPDATE pantry_items SET upc=?, review=1, food_id=NULL WHERE id=?", (code, pid))
+            c.execute("UPDATE pantry_items SET upc=?, review=1, food_id=NULL, qty=1, unit=NULL, original_qty=1, pack_qty=1 "
+                      "WHERE id=?", (code, pid))   # counted in packages until its size is known
             row = pantry_json(c, pantry_row(c, pid))
         return {"ok": True, "unknown": True, "code": code, "item": row, "list_checked": None, "list_ask": None,
                 "error": lookup_error}
@@ -6019,11 +6041,19 @@ def pantry_details(pid, b):
         fid = n_foods.resolve(c, food, brand)
         canon = (n_foods.get(c, fid) or {}).get("name") or name
         qty, unit = parse_amount(size) if size else (None, None)
-        c.execute("UPDATE pantry_items SET name=?, food_id=?, product=?, quantity_text=?, review=0 WHERE id=?",
-                  (canon, fid, " · ".join(x for x in (brand, name if name.lower() != canon.lower() else "") if x) or None, size, pid))
-        if qty is not None:
-            c.execute("UPDATE pantry_items SET qty=?, unit=?, original_qty=?, pack_qty=? WHERE id=?",
-                      (qty * (r["amount_left"] or 1), n_units.normalize(unit), qty, qty, pid))
+        product = " · ".join(x for x in (brand, name if name.lower() != canon.lower() else "") if x) or None
+        targets = [r]
+        if r["review"] and r["upc"]:   # every placeholder of this code, from any session, learns the same details
+            targets += [x for x in c.execute("SELECT * FROM pantry_items WHERE status='active' AND review=1 AND upc=? AND id<>? "
+                                             "ORDER BY id", (r["upc"], pid))]
+        for t in targets:
+            c.execute("UPDATE pantry_items SET name=?, food_id=?, product=?, quantity_text=?, review=0 WHERE id=?",
+                      (canon, fid, product, size, t["id"]))
+            if qty is not None:
+                n = _pack_count(t)
+                c.execute("UPDATE pantry_items SET qty=?, unit=?, original_qty=?, pack_qty=? WHERE id=?",
+                          (qty * n * (t["amount_left"] or 1), n_units.normalize(unit), qty * n, qty, t["id"]))
+        others = [t["id"] for t in targets[1:]]
         if r["upc"]:
             c.execute("INSERT OR REPLACE INTO upc_local(code, food_id, name, quantity, at, brand) VALUES (?,?,?,?,?,?)",
                       (r["upc"], fid, canon, size, iso(today()), brand))
@@ -6035,6 +6065,35 @@ def pantry_details(pid, b):
         blob, ctype = decode_upload(b["image"])
         _pantry_image_blob(pid, blob, ctype)
     with db() as c:
+        out = pantry_json(c, pantry_row(c, pid))
+        out["same_code"] = [pantry_json(c, x) for x in (pantry_row(c, i) for i in others) if x]
+    return out
+
+
+def _pack_count(r):
+    """Packages in a row counted by the package (no unit yet): qty / pack_qty, at least 1."""
+    if r["unit"] or not r["pack_qty"] or r["qty"] is None:
+        return 1
+    return max(1, round(float(r["qty"]) / float(r["pack_qty"])))
+
+
+def pantry_merge(pid, b):
+    """POST /api/pantry/{id}/merge {ids}: fold same-barcode items into this one (package counts add up)."""
+    ids = [_int_id(x, "item") for x in (b.get("ids") or [])][:50]
+    with db() as c:
+        r = pantry_row(c, pid)
+        if not r:
+            raise ApiError(404, "Item not found")
+        rows = [x for x in (pantry_row(c, i) for i in ids if i != pid) if x and x["status"] == "active"]
+        if any(x["upc"] != r["upc"] or not r["upc"] or (x["unit"] or "") != (r["unit"] or "") for x in rows):
+            raise ApiError(400, "Only items with the same barcode and size can be merged.")
+        if r["qty"] is not None:
+            q = r["qty"] + sum(x["qty"] or 0 for x in rows)
+            o = (r["original_qty"] or r["qty"]) + sum((x["original_qty"] or x["qty"] or 0) for x in rows)
+            c.execute("UPDATE pantry_items SET qty=?, original_qty=?, amount_left=? WHERE id=?", (q, o, min(1.0, q / o) if o else 1, pid))
+        for x in rows:
+            c.execute("DELETE FROM pantry_items WHERE id=?", (x["id"],))
+        event(c, pid, "merged", f"{len(rows)} merged in")
         return pantry_json(c, pantry_row(c, pid))
 
 
@@ -6695,15 +6754,15 @@ def is_staple(food, keys=None, c=None):
     return food_key(clean_food(food)) in keys or food_key(food) in keys
 
 
-def _ing_key(food, c=None):
+def _ing_key(food, c=None, create=True):
     if c is not None:
-        fid = _food_id(c, food)
+        fid = _food_id(c, food) if create else (n_foods.lookup(c, food) if (food or "").strip() and n_foods.normalize(food) else None)
         if fid is not None:
             return f"f:{fid}"
     return food_key(clean_food(food)) or food_key(food)
 
 
-def _recipe_needs(rec, scale, skeys, c=None):
+def _recipe_needs(rec, scale, skeys, c=None, create=True):
     """[{key, food, qty|None, unit, amount_text, note, line}] for one planned meal (staples left out)."""
     out = []
     for ing in rec.get("recipeIngredient") or []:
@@ -6723,7 +6782,7 @@ def _recipe_needs(rec, scale, skeys, c=None):
             if is_staple(food, skeys, c):
                 continue
             amt = q.get("amount_text") or ""
-            out.append({"key": _ing_key(food, c), "food": food, "qty": None if amt else float(q["quantity"]) * float(scale or 1),
+            out.append({"key": _ing_key(food, c, create), "food": food, "qty": None if amt else float(q["quantity"]) * float(scale or 1),
                         "unit": "" if amt else n_units.normalize(q["unit"]), "amount_text": amt, "note": q.get("note") or "",
                         "line": line})
     return out
@@ -8021,6 +8080,208 @@ def recipe_have_all(slug):
     return {"ok": True, "count": n}
 
 
+# ============================================================ what can I make?
+
+MAKE_EXPIRING_DAYS = 3   # "Use it up": expiring within this many days
+MAKE_PLANNED_DAYS = 3    # recipes planned this soon are left out
+
+
+def _make_stock(c, t):
+    """{key: [{row, free}]}: active, unexpired inventory, soonest-expiring first; free = amount not reserved for a plan."""
+    reserved = {r[0]: r[1] for r in c.execute(
+        "SELECT pantry_item_id, SUM(qty) FROM allocations WHERE qty IS NOT NULL GROUP BY pantry_item_id")}
+    stock = {}
+    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND COALESCE(review,0)=0 "
+                       "AND (expires_on IS NULL OR expires_on>=?) "
+                       "ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id", (iso(t),)):
+        if r["qty"] is not None and r["qty"] <= 0:
+            continue
+        free = None if r["qty"] is None else max(0.0, r["qty"] - (reserved.get(r["id"]) or 0))
+        keys = {food_key(clean_food(r["name"])), food_key(r["name"])}
+        if r["food_id"] is not None:
+            keys.add(f"f:{r['food_id']}")
+        ent = {"row": r, "free": free}
+        for k in keys:
+            if k:
+                stock.setdefault(k, []).append(ent)
+    return stock
+
+
+def _make_need_text(n):
+    if n["food"] and n["qty"]:
+        return n_units.fmt(n["qty"], n["unit"] or "", n["food"])
+    if n["food"]:
+        return n["food"]
+    return n["line"]
+
+
+def recipe_check(c, rec, stock, skeys, t):
+    """One recipe against the inventory: what's missing (or short) and which expiring foods it would use."""
+    needs = _recipe_needs(rec, 1, skeys, c, create=False)
+    groups = {}
+    for n in needs:
+        groups.setdefault(n["key"], []).append(n)
+    soon = iso(t + timedelta(days=MAKE_EXPIRING_DAYS))
+    missing, expiring, seen = [], [], set()
+    for k, ns in groups.items():
+        ents = stock.get(k) or []
+        if not ents and (ns[0]["food"] or "").strip():
+            alt = food_key(clean_food(ns[0]["food"]))
+            ents = stock.get(alt) or []
+        if not ents:
+            missing.append({"food": ns[0]["food"] or ns[0]["line"], "text": _make_need_text(ns[0]), "short": False})
+            continue
+        first = ns[0]
+        qty = None
+        if all(n["qty"] is not None for n in ns):
+            conv = [n_units.convert(n["qty"], n["unit"], first["unit"]) for n in ns]
+            qty = sum(conv) if all(v is not None for v in conv) else None
+        if not n_whatcan.enough(qty, first["unit"], [(e["free"], e["row"]["unit"] or "") for e in ents], n_units.convert):
+            missing.append({"food": first["food"], "text": _make_need_text({**first, "qty": qty}), "short": True,
+                            "have": pantry_left_text(ents[0]["row"])})
+        for e in ents:
+            r = e["row"]
+            if r["expires_on"] and r["expires_on"] <= soon and r["id"] not in seen:
+                seen.add(r["id"])
+                d = (parse_date(r["expires_on"]) - t).days
+                expiring.append({"id": r["id"], "name": r["name"], "days_left": d})
+                break
+    expiring.sort(key=lambda x: x["days_left"])
+    return {"missing": missing, "expiring": expiring, "need_n": len(groups)}
+
+
+def what_can_i_make():
+    """GET /api/make: Make right now / Almost there / Use it up."""
+    require_native()
+    t = today()
+    pool = {r["id"]: r for r in recipe_pool()}
+    with db() as c:
+        skeys = staple_keys(c)
+        stock = _make_stock(c, t)
+        planned = {r[0] for r in c.execute(
+            "SELECT DISTINCT recipe_id FROM meal_plans WHERE recipe_id IS NOT NULL AND cooked_at IS NULL AND skipped_at IS NULL "
+            "AND date BETWEEN ? AND ?", (iso(t), iso(t + timedelta(days=MAKE_PLANNED_DAYS))))}
+        cands = []
+        for rid, p in pool.items():
+            rec = n_recipes.get(c, rid)
+            if not rec:
+                continue
+            chk = recipe_check(c, rec, stock, skeys, t)
+            cands.append({"id": rid, "slug": p["slug"], "name": p["name"], "has_image": p["has_image"], "image_v": p["image_v"],
+                          "rating": p.get("rating") or 0, "minutes": p.get("eta_min") or p.get("minutes"),
+                          "planned_soon": rid in planned, **chk})
+        soon = iso(t + timedelta(days=MAKE_EXPIRING_DAYS))
+        exp = [pantry_json(c, r) for r in c.execute(
+            "SELECT * FROM pantry_items WHERE status='active' AND expires_on IS NOT NULL AND expires_on>=? AND expires_on<=? "
+            "ORDER BY expires_on", (iso(t), soon))]
+    out = n_whatcan.buckets(cands)
+    out["expiring"] = exp
+    out["planned_skipped"] = sum(1 for x in cands if x["planned_soon"])
+    out["recipes"] = len(cands)
+    return out
+
+
+# ---- web suggestions: AI web search, then every link is opened and must be a real recipe page
+WEB_SUGGEST_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["recipes"],
+                      "properties": {"recipes": {"type": "array", "items": {
+                          "type": "object", "additionalProperties": False, "required": ["title", "url"],
+                          "properties": {"title": {"type": "string"}, "url": {"type": "string"}}}}}}
+
+
+def _responses_web_search(prompt, feature, detail=""):
+    """OpenAI Responses API with web search. Returns (parsed JSON, set of cited URLs)."""
+    key, model = cfg("openai_key"), cfg("openai_model") or "gpt-5-mini"
+    if not key:
+        raise ApiError(400, "Web suggestions need AI. Add your OpenAI key in Settings → AI recipe import.")
+    if _ai_over_budget():
+        raise ApiError(402, "This month's AI budget is used up. Raise it in Settings → AI spending.")
+    payload = {"model": model, "input": prompt, "tools": [{"type": "web_search"}],
+               "text": {"format": {"type": "json_schema", "name": "suggestions", "strict": True, "schema": WEB_SUGGEST_SCHEMA}}}
+    if re.match(r"^(gpt-5|o[134])", model):
+        payload["reasoning"] = {"effort": "low"}
+    res = _https_json("https://api.openai.com/v1/responses", payload=payload, headers={"Authorization": f"Bearer {key}"}, timeout=180)
+    u = res.get("usage") or {}
+    log_ai(feature, res.get("model") or model, u.get("input_tokens"), u.get("output_tokens"), detail)
+    text, cited = "", set()
+    for item in res.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if part.get("type") == "output_text":
+                text += part.get("text") or ""
+                for a in part.get("annotations") or []:
+                    if a.get("type") == "url_citation" and a.get("url"):
+                        cited.add(_url_norm(a["url"]))
+    try:
+        return json.loads(text or "{}"), cited
+    except ValueError:
+        raise AIUnreadable("web search")
+
+
+def _url_norm(u):
+    """Compare links without tracking junk: scheme-less, no fragment, no utm_* parameters, no trailing slash."""
+    try:
+        p = urllib.parse.urlsplit((u or "").strip())
+    except ValueError:
+        return ""
+    q = urllib.parse.urlencode([(k, v) for k, v in urllib.parse.parse_qsl(p.query) if not k.lower().startswith("utm_")])
+    return f"{p.netloc.lower().removeprefix('www.')}{p.path.rstrip('/')}" + (f"?{q}" if q else "")
+
+
+def make_web_suggestions(b):
+    """POST /api/make/web {foods?}: recipes on the web that use what's expiring. Only links the search actually cited,
+    that open, and that hold a real recipe are shown; what each one uses is read from its own ingredient list."""
+    require_native()
+    t = today()
+    with db() as c:
+        skeys = staple_keys(c)
+        stock = _make_stock(c, t)
+        soon = iso(t + timedelta(days=MAKE_EXPIRING_DAYS))
+        foods = [" ".join(_s(x, 60).split()) for x in (b.get("foods") or []) if isinstance(x, str)][:6]
+        if not foods:
+            foods = [r["name"] for r in c.execute(
+                "SELECT name FROM pantry_items WHERE status='active' AND expires_on BETWEEN ? AND ? ORDER BY expires_on LIMIT 5",
+                (iso(t), soon))]
+        have = [r["name"] for r in c.execute("SELECT DISTINCT name FROM pantry_items WHERE status='active' LIMIT 40")]
+        known = {_url_norm(r["data"] and json.loads(r["data"]).get("orgURL") or "") for r in c.execute("SELECT data FROM recipes")}
+    if not foods:
+        raise ApiError(400, "Nothing is expiring soon. Pick a food to use up.")
+    prompt = ("Find up to 6 well-reviewed home-cooking recipes on the web that use these foods, which need using up soon: "
+              + ", ".join(foods) + ". The kitchen also has: " + ", ".join(have[:30]) + ". Prefer recipes that need few other "
+              "ingredients. Only give recipe pages you actually found in the search (each url must be one of your sources); "
+              "no videos, no roundups or list articles. title = the recipe's name as written on the page.")
+    data, cited = _responses_web_search(prompt, "make suggestions", ", ".join(foods)[:80])
+    picks, seen = [], set()
+    for x in data.get("recipes") or []:
+        url = (x.get("url") or "").strip()
+        n = _url_norm(url)
+        if not re.match(r"^https://", url) or not n or n in seen or n not in cited or n in known:
+            continue
+        seen.add(n)
+        picks.append(url)
+
+    def verify(url):
+        try:
+            rec = n_scraper.scrape(url, _fetch_page)
+        except Exception:
+            return None
+        return url, rec
+
+    out = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        found = [r for r in ex.map(verify, picks[:8]) if r]
+    with db() as c:
+        for url, rec in found:
+            rec = {**rec, "recipeIngredient": [{"note": x} if isinstance(x, str) else x for x in rec.get("recipeIngredient") or []]}
+            chk = recipe_check(c, rec, stock, skeys, t)
+            out.append({"title": rec.get("name") or "", "url": url, "site": urllib.parse.urlsplit(url).netloc.removeprefix("www."),
+                        "image_url": rec.get("image_url") or "", "minutes": recipe_minutes(rec),
+                        "uses": [e["name"] for e in chk["expiring"]], "missing": [m["text"] for m in chk["missing"]][:8],
+                        "missing_n": len(chk["missing"]), "need_n": chk["need_n"]})
+    out.sort(key=lambda r: (-len(r["uses"]), r["missing_n"]))
+    return {"foods": foods, "suggestions": out[:6], "checked": len(picks)}
+
+
 # ============================================================ recipe export, print and share
 
 PRINT_SIZES = {   # page size, sheet inches, margin, base font pt, minimum font pt, two columns, title pt
@@ -8764,7 +9025,7 @@ EXPENSIVE = [
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish|adjust)"), "ai"),
     (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
-    (re.compile(r"/api/scan/photo|/api/scan/identify|/api/receipt"), "ai"),
+    (re.compile(r"/api/scan/photo|/api/scan/identify|/api/receipt|/api/make/web"), "ai"),
     (re.compile(r"/api/(upc/\d+|scan|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
 ]
@@ -9254,17 +9515,22 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/scan":
             require_native()
             return self.send(200, scan_add(self.body()))
+        if m == "GET" and path == "/api/make":
+            return self.send(200, what_can_i_make())
+        if m == "POST" and path == "/api/make/web":
+            return self.send(200, make_web_suggestions(self.body()))
         if m == "POST" and path == "/api/scan/identify":
             require_native()
             return self.send(200, scan_identify(self.body()))
         if m == "GET" and path == "/api/scan/test":
             require_native()
             return self.send(200, upc_diagnose(_s(q.get("code"), 20)))
-        mm = re.fullmatch(r"/api/pantry/(\d{1,12})/(details|relookup)", path)
+        mm = re.fullmatch(r"/api/pantry/(\d{1,12})/(details|relookup|merge)", path)
         if m == "POST" and mm:
             require_native()
             pid = int(mm.group(1))
-            out = pantry_details(pid, self.body()) if mm.group(2) == "details" else pantry_relookup(pid)
+            act = mm.group(2)
+            out = pantry_details(pid, self.body()) if act == "details" else pantry_merge(pid, self.body()) if act == "merge" else pantry_relookup(pid)
             self._sync_after = NATIVE
             return self.send(200, out)
         if m == "POST" and path == "/api/scan/photo":

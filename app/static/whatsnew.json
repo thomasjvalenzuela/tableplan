@@ -1,5 +1,13 @@
 [
  {
+  "id": "what-can-i-make",
+  "date": "2026-11-18",
+  "icon": "sparkle",
+  "color": "green",
+  "title": "What can I make?",
+  "text": "Recipes → What can I make? checks every recipe against your inventory: Make now (everything's here), Almost there (1–3 things missing, added to your list in one tap) and Use it up (recipes for food expiring in the next 3 days). Expiring ingredients are marked wherever ingredients show, Home counts what's expiring soon, and with AI you can search the web for more recipes. Every link is opened and checked first, and importing still spots duplicates."
+ },
+ {
   "id": "scan-never-stuck",
   "date": "2026-11-17",
   "icon": "scan",

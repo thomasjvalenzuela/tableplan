@@ -134,6 +134,25 @@ class Unknowns(unittest.TestCase):
         self.assertIn("error 503", log)
         S._UPCITEMDB["until"] = 0
 
+    def test_repeat_unknowns_count_up_then_learn_and_merge(self):
+        code = "0852390000111"
+        with mock.patch.object(S, "_https_json", return_value={"status": 0, "items": []}):
+            a = S.scan_add({"code": code, "location": "pantry"})
+            b = S.scan_add({"code": code, "location": "pantry"})
+            f = S.scan_add({"code": code, "location": "fridge"})
+        self.assertEqual(a["item"]["id"], b["item"]["id"])
+        self.assertTrue(b["again"])
+        self.assertEqual(b["item"]["qty"], 2)
+        self.assertNotEqual(f["item"]["id"], a["item"]["id"])
+        out = S.pantry_details(a["item"]["id"], {"name": "Oat milk", "size": "64 oz"})
+        self.assertEqual((out["qty"], out["unit"], out["review"]), (128, "oz", False))
+        self.assertEqual([x["id"] for x in out["same_code"]], [f["item"]["id"]])
+        self.assertEqual((out["same_code"][0]["name"], out["same_code"][0]["qty"], out["same_code"][0]["review"]), ("Oat milk", 64, False))
+        merged = S.pantry_merge(a["item"]["id"], {"ids": [f["item"]["id"]]})
+        self.assertEqual(merged["qty"], 192)
+        with S.db() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM pantry_items WHERE upc=? AND status='active'", (code,)).fetchone()[0], 1)
+
     def test_identify_keeps_only_confident_fields(self):
         reply = {"name": "Greek yogurt", "brand": "Fage", "size_text": "32 oz", "category": "Dairy & Eggs", "food": "greek yogurt",
                  "confident": {"name": True, "brand": False, "size_text": True, "category": True, "food": True}}

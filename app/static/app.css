@@ -729,7 +729,9 @@ body.selecting .toast{bottom:calc(176px + var(--safe-b))}
 .sb-name-row .sz{flex:0 1 130px}
 .sb-name-row .pill-btn{box-shadow:none}
 body.scanning #app{padding-bottom:calc(320px + var(--safe-b))}
-body.scanning .toast{bottom:calc(60vh + 10px)}
+/* while scanning, toasts sit at the top (below the notch) so they never cover the scan bar */
+body.scanning .toast{bottom:auto;top:calc(var(--safe-t) + 8px);transform:translate(-50%,-16px);padding:8px 10px 8px 14px;font-size:13.5px;gap:10px}
+body.scanning .toast.on{transform:translate(-50%,0)}
 @media (min-width:1024px){.scan-bar{left:var(--sidebar);bottom:0}}
 /* inventory: slot grid (stack counts and durability bars) */
 .topbar .grow{flex:1}
@@ -1308,3 +1310,30 @@ h1.title{font-size:34px;line-height:1.08;color:var(--title)}
 .dt-photo{display:flex;align-items:center;gap:12px;margin-top:10px}
 .dt-thumb{width:64px;height:64px;border-radius:12px;background:var(--card2);display:grid;place-items:center;overflow:hidden;flex:none;color:var(--sub)}
 .dt-thumb img{width:100%;height:100%;object-fit:cover}
+
+/* What can I make? */
+.use.big{font-size:16px;padding:7px 13px 7px 9px}
+.use.exp{box-shadow:inset 0 0 0 1.5px var(--soon-fg)}
+.use.exp::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--soon-fg);margin-left:2px}
+.mk-exp{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.mk-cards{display:grid;gap:10px;margin-top:12px}
+@media (min-width:900px){.mk-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.mk-card{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow);padding:10px;display:flex;flex-direction:column;gap:8px}
+.mk-main{display:flex;gap:12px;align-items:flex-start;text-align:left;background:none;border:0;padding:0;color:inherit;width:100%}
+.mk-img{width:76px;height:76px;border-radius:12px;background:var(--fill) center/cover no-repeat;flex:none;display:grid;place-items:center;color:var(--sub)}
+.mk-txt{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.mk-txt .a{font-weight:600;font-size:16px;color:var(--text);text-decoration:none}
+.mk-txt .b{font-size:13px;color:var(--sub)}
+.mk-uses{display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:13px;color:var(--sub)}
+.mk-uses .pill{font-size:11.5px;padding:2px 8px}
+.mk-miss{font-size:13px;color:var(--text)}
+.mk-ok{font-size:13px;color:var(--ok-fg);font-weight:600;display:inline-flex;align-items:center;gap:4px}
+.mk-ok svg{width:14px;height:14px}
+.mk-acts{display:flex;flex-wrap:wrap;gap:8px;padding-left:88px}
+.mk-acts .pill-btn{padding:7px 12px;font-size:13.5px;box-shadow:none;background:var(--fill)}
+.mk-acts .pill-btn svg{width:16px;height:16px}
+.mk-web{margin-top:16px}
+.mk-web-row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 0;border-top:.5px solid var(--sep)}
+.mk-web-row .mk-txt{flex:1 1 200px}
+.mk-web-row .mk-res{flex-basis:100%}
+@media (max-width:420px){.mk-acts{padding-left:0}}

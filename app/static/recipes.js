@@ -41,11 +41,13 @@ async function renderRecipes() {
   rstate.sel = null;
   app.innerHTML = topbar(`<button class="text-btn" id="btn-select">Select</button><button class="round-btn" id="btn-rmore" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
     `<h1 class="title">All recipes</h1><div id="rqueue"></div>
+    ${c_native() ? `<div class="toolbar"><button class="pill-btn" id="btn-make">${ic("sparkle")} What can I make?</button></div>` : ""}
     <div class="search">${ic("search")}<input id="rq" placeholder="Search recipes" value="${esc(rstate.q)}" autocomplete="off"></div>
     <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div><div class="sel-bar" id="sel-bar" hidden></div>`;
   bindTopbar();
   $("#btn-add").onclick = openAddRecipe;
   $("#btn-select").onclick = () => setSelect(!rstate.sel);
+  $("#btn-make") && ($("#btn-make").onclick = () => { location.hash = "make"; });
   api("GET", "/api/import/queue").then((d) => {   // scans being read, and any that need a quick look
     const box = $("#rqueue"); if (!box || !d.jobs.length) return;
     const busy = d.counts.waiting + d.counts.reading, rv = d.counts.review;
@@ -435,8 +437,11 @@ const factor = () => (R.rec.servings ? R.servings / R.rec.servings : 1);
 function pantryTag(x) {
   if (!x.pantry) return "";
   const d = x.pantry.days_left;
-  return d != null && d <= 3 ? `<span class="pill soon">Use soon</span>` : `<span class="pill ok">In ${esc(x.pantry.location)}</span>`;
+  if (d != null && d <= 3) return `<span class="pill ${d <= 0 ? "bad" : "soon"}">${esc(d < 0 ? "Expired" : d === 0 ? "Use today" : d === 1 ? "Use by tomorrow" : `Use in ${d} days`)}</span>`;
+  return `<span class="pill ok">In ${esc(x.pantry.location)}</span>`;
 }
+// a step's ingredient chip: marked when that ingredient in your kitchen expires within 3 days
+const useExp = (x) => (x.pantry && x.pantry.days_left != null && x.pantry.days_left <= 3 ? ` exp" title="${esc(x.pantry.days_left <= 0 ? "Use today" : `Use within ${x.pantry.days_left} days`)}` : "");
 function ingPic(x) {
   const src = safeUrl(x.img, true);
   return `<div class="pic" data-ing="${esc(x.food || "")}">${src ? `<img src="${esc(src)}" alt="" loading="lazy" data-fb="${esc(x.emoji)}">` : esc(x.emoji)}</div>`;
@@ -479,7 +484,7 @@ async function drawContent() {
     const g = R.guide;
     let html = `<div class="section-h" style="margin-top:20px"><h2>Step by step</h2><span class="muted" style="font-size:13px">${g.source === "ai" ? "✨ AI-arranged" : "Auto-arranged"} · ${esc(state.cfg.settings.stove)} stove</span></div>`;
     g.steps.forEach((s, n) => {
-      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
+      const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use${useExp(x)}">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
       html += `<div class="step-card"><div class="num">${n + 1}. ${esc(s.title || "")}</div><div class="txt">${esc(s.text)}</div>
         ${uses ? `<div class="uses">${uses}</div>` : ""}
         <div class="badges">${s.temperature ? `<span class="badge2">🌡️ ${esc(s.temperature)}</span>` : ""}${s.heat ? `<span class="badge2">🔥 ${esc(s.heat)}</span>` : ""}${stepTimers(s).map((t) => `<span class="badge2 blue">⏱ ${esc(t.label)}</span>`).join("")}${s.cue && !stepTimers(s).length ? `<span class="badge2 blue">👀 ${esc(s.cue)}</span>` : ""}</div>
@@ -747,7 +752,7 @@ const presetRow = (k) => `<div class="tpresets" role="group" aria-label="Start a
 function drawCook() {
   const el = $("#cook"); if (!el) return;
   const s = C.steps[C.i], rec = R.rec, f = factor(), n = C.steps.length;
-  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use" style="font-size:16px;padding:7px 13px 7px 9px">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
+  const uses = s.ingredients.map((u) => { const x = rec.ingredients[u.i]; if (!x) return ""; const l = ingLine(x, f, u.portion); return `<span class="use big${useExp(x)}">${esc(x.emoji)} <b>${esc(l.amt)}</b> ${esc(l.name)}</span>`; }).join("");
   const mine = loadTimers().filter((t) => t.slug === C.slug && t.step === C.i);
   const stated = stepTimers(s);
   const timerCards = stated.map((t, k) => {
@@ -1154,12 +1159,13 @@ async function pumpScans() {
 }
 async function sessionScan(code) {
   if (!SS.active && !$("#sc-rows")) startScanSession();
-  const prev = SS.rows.find((r) => r.code === code || r.raw === code);
+  const here = SS.loc || "pantry";
+  const prev = SS.rows.find((r) => (r.code === code || r.raw === code) && (r.loc || "pantry") === here);
   if (prev) { scanBeep(prev.unknown ? "unknown" : "ok"); return bumpScan(prev, 1); }
   try {
     const r = await api("POST", "/api/scan", { code, location: SS.loc || "pantry" });
     if (r.misread) { scanBeep("bad"); toast(r.error || "That barcode didn't read cleanly. Scan it again."); return; }
-    const row = { code: r.code || code, raw: code, item: r.item, count: 1, list: !!r.list_checked, unknown: !!r.unknown };
+    const row = { code: r.code || code, raw: code, item: r.item, count: 1, list: !!r.list_checked, unknown: !!r.unknown, again: !!r.again, loc: here };
     SS.rows.push(row);
     drawSession();
     if (row.unknown) { scanBeep("unknown"); return; }   // the row says "Not found · Review later": no modal, keep scanning
@@ -1171,6 +1177,10 @@ async function sessionScan(code) {
 }
 async function bumpScan(row, d) {
   if (!row) return;
+  if (d < 0 && row.count <= 1 && row.again) {   // counted up a placeholder from an earlier scan: take back just this one
+    try { await api("POST", `/api/scan/${enc(row.item.id)}/less`, {}); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); toast(`Removed one ${row.item.name}`); } catch (e) { fail(e); }
+    return;
+  }
   if (d < 0 && row.count <= 1) {
     try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); toast(`Removed ${row.item.name}`); } catch (e) { fail(e); }
     return;
@@ -1300,11 +1310,27 @@ function openItemDetails(it, after) {
         $("#dt-save").disabled = true;
         try {
           const item = await api("POST", `/api/pantry/${enc(it.id)}/details`, { name, brand: $("#dt-brand").value.trim(), size: $("#dt-size").value.trim(), ...(photo ? { image: photo } : {}) });
-          toast(code ? `${item.name} · remembered for next time` : `${item.name} saved`);
+          (item.same_code || []).forEach(scanRowsUpdate);
           done(item);
+          offerMerge(item, code);
         } catch (x) { fail(x); $("#dt-save").disabled = false; }
       };
     },
+  });
+}
+// Saving details also named the other placeholders of this barcode (any session); offer to fold them into one item
+function offerMerge(item, code) {
+  const others = item.same_code || [];
+  if (!others.length) { toast(code ? `${item.name} · remembered for next time` : `${item.name} saved`); return; }
+  const where = [...new Set(others.map((o) => o.place_label || cap(o.location)))].join(", ");
+  toast(`${others.length} more ${item.name} (${where}) updated too`, "Merge into one", async () => {
+    try {
+      const m = await api("POST", `/api/pantry/${enc(item.id)}/merge`, { ids: others.map((o) => o.id) });
+      SS.rows = SS.rows.filter((r) => !others.some((o) => r.item && r.item.id === o.id));
+      scanRowsUpdate(m); drawSession();
+      toast(`Merged into one: ${m.name}${m.left_text ? ` · ${m.left_text}` : ""}`);
+      if (state.tab === "pantry" && !SS.active) renderPantry();
+    } catch (x) { fail(x); }
   });
 }
 async function openReviewItems(after) {
@@ -1626,4 +1652,99 @@ function openEta(rec) {
     <div class="group eta-parts">${parts}</div>
     ${(e.long || []).length ? `<p class="hint">Plus ${esc(e.long.join(", ").toLowerCase())} of waiting (marinating, chilling or rising), not counted above.</p>` : ""}
     <p class="hint">Estimated: prep counts about a minute per ingredient plus knife work, the oven preheats while you prep, and stated times start at the low end.${e.speed ? ` Adjusted for your kitchen: you usually take ${Math.round(e.speed * 100)}% of the estimate.` : ""} Cooking in cook mode teaches TablePlan how long things really take you.</p>`);
+}
+
+// ------------------------------------------------------------------ What can I make? (route #make, #make/use, #make/almost)
+const MK = { tab: "ready", data: null, web: null };
+const expTag = (e) => {
+  const d = e.days_left;
+  return `<span class="pill ${d <= 0 ? "bad" : "soon"}">${esc(e.name)} · ${esc(d < 0 ? "expired" : d === 0 ? "today" : d === 1 ? "tomorrow" : `${d} days`)}</span>`;
+};
+async function renderMake(tab) {
+  state.tab = "recipes"; renderTabs();
+  if (tab) MK.tab = tab;
+  app.innerHTML = `${topbar(`<button class="round-btn left" id="mk-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="mk-refresh" aria-label="Refresh">${ic("refresh")}</button>`)}
+    <h1 class="title">What can I make?</h1><div class="subtitle" id="mk-sub">Checking your kitchen…</div>
+    <div class="seg" id="mk-seg" role="tablist" aria-label="Show"></div><div id="mk-list">${loading()}</div>`;
+  bindTopbar();
+  $("#mk-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
+  $("#mk-refresh").onclick = () => { MK.data = null; renderMake(); };
+  try { MK.data = await api("GET", "/api/make"); } catch (e) { if ($("#mk-list")) $("#mk-list").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  if (!$("#mk-list")) return;
+  drawMake();
+}
+function drawMake() {
+  const d = MK.data, tabs = [["ready", "Make now"], ["almost", "Almost there"], ["use_up", "Use it up"]];
+  $("#mk-sub").textContent = `${plural(d.recipes, "recipe")} checked against your inventory${d.planned_skipped ? ` · ${d.planned_skipped} already planned left out` : ""}`;
+  $("#mk-seg").innerHTML = tabs.map(([k, l]) => `<button data-t="${k}" class="${MK.tab === k ? "on" : ""}" role="tab" aria-selected="${MK.tab === k}">${esc(l)} ${esc(d[k].length)}</button>`).join("");
+  $$("#mk-seg [data-t]").forEach((b) => (b.onclick = () => { MK.tab = b.dataset.t; history.replaceState(null, "", MK.tab === "ready" ? "#make" : `#make/${MK.tab === "use_up" ? "use" : "almost"}`); lastHash = location.hash; drawMake(); }));
+  const rows = d[MK.tab];
+  let html = "";
+  if (MK.tab === "use_up") {
+    html += d.expiring.length ? `<div class="group-label">Use soon</div><div class="mk-exp">${d.expiring.map((i) => expTag(i)).join("")}</div>`
+      : `<div class="all-set">Nothing in your inventory expires in the next 3 days ✓</div>`;
+  }
+  const empty = { ready: "Nothing is fully in stock right now. Try Almost there.", almost: "No recipes are 1–3 items away.", use_up: d.expiring.length ? "None of your recipes use what's expiring. Look for one online below." : "" };
+  html += rows.length ? `<div class="mk-cards">${rows.map(mkCard).join("")}</div>` : empty[MK.tab] ? `<div class="empty">${esc(empty[MK.tab])}</div>` : "";
+  if (MK.tab === "use_up" && d.expiring.length && state.cfg?.ai_key) {
+    html += `<section class="home-card mk-web" aria-label="Recipes online"><div class="hc-h"><h2>Find recipes online</h2></div>
+      <p class="muted small">Searches the web for recipes using ${esc(d.expiring.slice(0, 4).map((i) => i.name).join(", "))}. Every link is opened and checked before it's shown.</p>
+      <div id="mk-web">${MK.web ? "" : `<button class="btn sec" id="mk-web-go">${ic("search")} Search the web</button>`}</div></section>`;
+  }
+  $("#mk-list").innerHTML = html;
+  bindMakeCards($("#mk-list"), rows);
+  if (MK.web) drawWeb(); else $("#mk-web-go") && ($("#mk-web-go").onclick = searchWeb);
+}
+function mkCard(r) {
+  const img = imgUrl(r), miss = r.missing || [];
+  const meta = [r.minutes ? fmtDur(r.minutes * 60).trim() : "", r.rating ? `★ ${(+r.rating).toFixed(r.rating % 1 ? 1 : 0)}` : ""].filter(Boolean).join(" · ");
+  return `<div class="mk-card" data-mk="${esc(r.id)}"><button class="mk-main" data-open="${esc(r.slug)}"><span class="mk-img ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}</span>
+    <span class="mk-txt"><span class="a">${esc(r.name)}</span>${meta ? `<span class="b">${esc(meta)}</span>` : ""}
+      ${(r.expiring || []).length ? `<span class="mk-uses">Uses ${r.expiring.map(expTag).join("")}</span>` : ""}
+      ${miss.length ? `<span class="mk-miss">Missing ${esc(miss.map((m) => (m.short ? `${m.text} (have ${m.have || "some"})` : m.text)).join(", "))}</span>` : `<span class="mk-ok">${ic("check")} Everything's here</span>`}</span></button>
+    <div class="mk-acts">${miss.length ? `<button class="pill-btn" data-tolist>${ic("cart")} Add ${esc(plural(miss.length, "item"))} to list</button>` : ""}<button class="pill-btn" data-plan>${ic("cal")} Plan it</button></div></div>`;
+}
+function bindMakeCards(box, rows) {
+  $$(".mk-card", box).forEach((el) => {
+    const r = rows.find((x) => String(x.id) === el.dataset.mk); if (!r) return;
+    $("[data-open]", el).onclick = () => openRecipe(r.slug);
+    $("[data-plan]", el).onclick = () => planRecipe({ id: r.id, slug: r.slug, name: r.name });
+    const tl = $("[data-tolist]", el);
+    if (tl) tl.onclick = async () => {
+      tl.disabled = true;
+      try {
+        await api("POST", "/api/list/items", { items: r.missing.map((m) => m.text) });
+        tl.innerHTML = `${ic("check")} On your list`;
+        toast(`Added ${plural(r.missing.length, "item")} to your list`, "View", () => go("list"));
+      } catch (e) { tl.disabled = false; fail(e); }
+    };
+  });
+}
+async function searchWeb() {
+  const box = $("#mk-web"); if (!box) return;
+  box.innerHTML = `<div class="muted small">${loading()} Searching and checking each link… this takes up to a minute.</div>`;
+  try { MK.web = await api("POST", "/api/make/web", {}); } catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div><button class="btn sec" id="mk-web-go" style="margin-top:8px">Try again</button>`; $("#mk-web-go").onclick = searchWeb; return; }
+  drawWeb();
+}
+function drawWeb() {
+  const box = $("#mk-web"); if (!box) return;
+  const w = MK.web;
+  if (!w.suggestions.length) { box.innerHTML = `<div class="muted small">No recipe pages could be confirmed this time.</div><button class="link-btn" id="mk-web-go">Search again</button>`; $("#mk-web-go").onclick = () => { MK.web = null; searchWeb(); }; return; }
+  box.innerHTML = w.suggestions.map((s, i) => `<div class="mk-web-row" data-w="${i}"><div class="mk-txt"><a class="a" ${extLink(s.url)}>${esc(s.title)}</a>
+      <span class="b">${esc([s.site, s.minutes ? fmtDur(s.minutes * 60).trim() : ""].filter(Boolean).join(" · "))}</span>
+      ${s.uses.length ? `<span class="mk-uses">Uses ${s.uses.map((u) => `<span class="pill soon">${esc(u)}</span>`).join("")}</span>` : ""}
+      <span class="mk-miss">${s.missing_n ? `Missing ${esc(s.missing.join(", "))}${s.missing_n > s.missing.length ? "…" : ""}` : "Everything's here"}</span></div>
+    <button class="pill-btn ink" data-imp>${ic("plus")} Import</button><div class="mk-res"></div></div>`).join("") + `<p class="hint">Found with AI web search. Each page was opened and its recipe read before showing it here.</p>`;
+  $$(".mk-web-row", box).forEach((el) => {
+    const s = w.suggestions[+el.dataset.w];
+    $("[data-imp]", el).onclick = async (e) => {
+      const b = e.currentTarget; b.disabled = true; b.textContent = "Importing…";
+      const done = (r) => { b.remove(); $(".mk-res", el).innerHTML = `<button class="link-btn" data-o>${ic("check")} Added · Open</button>`; $("[data-o]", el).onclick = () => openRecipe(r.slug); rstate.list = null; };
+      try { done(await api("POST", "/api/import/url", { url: s.url })); }
+      catch (x) {
+        if (x.data && x.data.duplicate) { b.remove(); return duplicateCard($(".mk-res", el), x, done); }
+        b.disabled = false; b.innerHTML = `${ic("plus")} Import`; fail(x);
+      }
+    };
+  });
 }

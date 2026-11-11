@@ -217,6 +217,7 @@ function route() {
   if (h.startsWith("recipe/")) { window.scrollTo(0, 0); return renderRecipe(h.slice(7)); }
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
   if (h === "diary") { window.scrollTo(0, 0); return renderDiary(); }
+  if (h === "make" || h.startsWith("make/")) { window.scrollTo(0, 0); return renderMake({ use: "use_up", almost: "almost" }[h.slice(5)] || "ready"); }
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
 const upd = () => !!state.update?.update_available;
@@ -337,6 +338,7 @@ async function renderHome() {
     bindDiaryTimeline(box);
   }).catch(() => {});
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
+  $("#stat-exp") && ($("#stat-exp").onclick = () => { location.hash = "make/use"; });
   $("#fix-mealie") && ($("#fix-mealie").onclick = () => openSetupSection("mealie", "Recipe library", reloadCfg));
   $$(".wk-day[data-entry]").forEach((b) => (b.onclick = () => { const e = s.week.find((x) => String(x.id) === b.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else openEntry(e); }));
   $$("[data-plan-day]").forEach((b) => (b.onclick = () => openPicker(b.dataset.planDay, "dinner", null, { seq: true })));
@@ -362,12 +364,14 @@ async function renderHome() {
 // Stat tiles: big number, small label, a tiny tag.
 function homeStats(s, list) {
   const exp = (s.expiring || []), gone = exp.filter((i) => +i.days_left < 0).length;
+  const soon = exp.filter((i) => i.days_left != null && +i.days_left >= 0 && +i.days_left <= 3);
   const toBuy = ((list && list.items) || []).filter((i) => !i.checked);
   const week = (s.week || []).filter((e) => e.recipe && !e.cooked && !e.skipped);
   const mins = week.reduce((n, e) => n + (+(e.recipe.eta?.shown || e.recipe.minutes) || 0), 0);
   const hrs = mins >= 60 ? `${Math.round(mins / 6) / 10} h` : `${mins} min`;
   return `<div class="stats" role="group" aria-label="At a glance">
-    <button class="stat" data-go="pantry"><b>${esc(s.pantry_count || 0)}</b><span>in inventory</span>${exp.length ? `<i class="${gone ? "bad" : "warn"}">${gone ? `${esc(gone)} expired` : `${esc(exp.length)} use soon`}</i>` : `<i>all fresh</i>`}</button>
+    ${soon.length ? `<button class="stat" id="stat-exp"><b>${esc(soon.length)}</b><span>expiring soon</span><i class="warn">What can I make?</i></button>`
+      : `<button class="stat" data-go="pantry"><b>${esc(s.pantry_count || 0)}</b><span>in inventory</span>${gone ? `<i class="bad">${esc(gone)} expired</i>` : `<i>all fresh</i>`}</button>`}
     <button class="stat" data-go="list"><b>${esc(toBuy.length)}</b><span>to buy</span><i>${esc(plural(new Set(toBuy.flatMap((i) => (i.uses || []).map((u) => u.date))).size, "day"))}</i></button>
     <button class="stat" data-go="meals"><b>${esc(mins ? hrs : week.length)}</b><span>${mins ? "cooking this week" : "meals this week"}</span><i>${esc(plural(week.length, "meal"))}</i></button></div>`;
 }
