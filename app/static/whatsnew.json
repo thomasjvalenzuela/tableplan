@@ -1,5 +1,13 @@
 [
  {
+  "id": "scan-never-stuck",
+  "date": "2026-11-17",
+  "icon": "scan",
+  "color": "green",
+  "title": "Scanning never gets stuck",
+  "text": "Scan as fast as you like: every code is handled in order, double reads are ignored, and a barcode nobody knows goes straight in as “Unknown item” to review later, with no typing mid-scan. Add details when it suits you: photograph the package, type a name, add a product photo. TablePlan remembers it for next time (only in your household). Misreads are caught, and Settings → Test barcode lookup shows what each database says."
+ },
+ {
   "id": "cook-undo",
   "date": "2026-11-16",
   "icon": "refresh",

@@ -144,7 +144,7 @@ if __name__ == "__main__":
 
 
 OFF = {
-    "0001234567890": {"status": 1, "product": {"product_name": "Morton Iodized Table Salt", "brands": "Morton",
+    "0001234567895": {"status": 1, "product": {"product_name": "Morton Iodized Table Salt", "brands": "Morton",
                                                "quantity": "26 oz", "categories_tags": ["en:salts", "en:table-salts"]}},
     "0009999999999": {"status": 1, "product": {"product_name": "Cola", "brands": "Fizz", "quantity": "12 × 355 ml",
                                                "categories_tags": ["en:sodas"]}},
@@ -156,7 +156,7 @@ def fake_https(url, **kw):
     if "openfoodfacts" not in url:
         return {"status": 0, "items": []}
     code = url.split("/product/")[1].split(".json")[0]
-    return OFF[code]
+    return OFF.get(code) or OFF.get("0" + code) or {"status": 0}
 
 
 class Barcodes(unittest.TestCase):
@@ -178,7 +178,7 @@ class Barcodes(unittest.TestCase):
     def test_scan_resolves_food_and_ticks_the_list(self):
         S.list_add({"items": ["1 tsp table salt"]})
         with mock.patch.object(S, "_https_json", side_effect=fake_https), mock.patch.object(S, "_pantry_image", return_value=None):
-            out = S.scan_add({"code": "0001234567890", "location": "pantry"})
+            out = S.scan_add({"code": "0001234567895", "location": "pantry"})
         it = out["item"]
         self.assertEqual((it["name"], it["qty"], it["unit"], it["product"]), ("Table salt", 26.0, "oz", "Morton · Morton Iodized Table Salt"))
         self.assertIsNotNone(out["list_checked"])
@@ -206,7 +206,7 @@ class Barcodes(unittest.TestCase):
 
     def test_unknown_code_is_learned(self):
         with mock.patch.object(S, "_https_json", side_effect=fake_https) as h:
-            self.assertEqual(S.scan_add({"code": "0005555555555"}), {"ok": False, "code": "0005555555555", "needs_name": True})
+            self.assertEqual(S.scan_add({"code": "0005555555555", "placeholder": False}), {"ok": False, "code": "0005555555555", "needs_name": True})
             out = S.scan_add({"code": "0005555555555", "name": "Sea salt", "quantity": "17.6 oz"})
             calls = h.call_count
             again = S.scan_add({"code": "0005555555555"})
@@ -251,9 +251,9 @@ class LookupChain(unittest.TestCase):
                 return {"status": 0}
             return {"items": [{"title": "Great Value Iodized Salt 26 oz", "brand": "Great Value", "images": []}]}
         with mock.patch.object(S, "_https_json", side_effect=fake):
-            p = S.upc_lookup("0007874200001")
-            S.upc_lookup("0007874200001")
-        self.assertEqual(calls, ["world.openfoodfacts.org", "world.openproductsfacts.org", "api.upcitemdb.com"])
+            p = S.upc_lookup("0007874200017")
+            S.upc_lookup("0007874200017")
+        self.assertEqual(calls, ["world.openfoodfacts.org"] * 2 + ["world.openproductsfacts.org"] * 2 + ["api.upcitemdb.com"])
         self.assertEqual((p["source"], p["food_name"], p["pack"]["qty"], p["pack"]["unit"]), ("UPCitemdb", "Table salt", 26.0, "oz"))
 
         def busy(url, **kw):
@@ -261,20 +261,20 @@ class LookupChain(unittest.TestCase):
                 raise S.ApiError(429, "HTTP 429")
             return {"status": 0}
         with mock.patch.object(S, "_https_json", side_effect=busy) as h:
-            S.upc_lookup("0007874200002")
+            S.upc_lookup("0007874200024")
             n = h.call_count
-            S.upc_lookup("0007874200003")   # UPCitemdb is resting: not called again
-            self.assertEqual(h.call_count - n, 2)
+            S.upc_lookup("0007874200031")   # UPCitemdb is resting: not called again
+            self.assertEqual(h.call_count - n, 4)   # two spellings × OFF, OPF
 
     def test_snap_the_product(self):
         S.set_cfg(openai_key="sk-test")
         try:
             with mock.patch.object(S, "_https_json", return_value={"status": 0}), \
                     mock.patch.object(S, "openai_chat", return_value={"name": "Iodized table salt", "brand": "Morton", "size_text": "26 oz"}):
-                out = S.scan_photo({"code": "0001112223334", "image": "data:image/jpeg;base64,AAAA"})
+                out = S.scan_photo({"code": "0001112223332", "image": "data:image/jpeg;base64,AAAA"})
             self.assertEqual((out["item"]["name"], out["item"]["qty"], out["item"]["product"]), ("Table salt", 26.0, "Morton · Iodized table salt"))
             with S.db() as c:
-                self.assertEqual(c.execute("SELECT name FROM upc_local WHERE code='0001112223334'").fetchone()[0], "Table salt")
+                self.assertEqual(c.execute("SELECT name FROM upc_local WHERE code='0001112223332'").fetchone()[0], "Table salt")
         finally:
             S.set_cfg(openai_key="")
 

@@ -286,6 +286,7 @@ async function renderHome() {
   if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie">${esc(s.error)}</button>`;
   html += zoomNudge();
   if (+s.review_count) html += `<button class="nudge" id="home-review"><span class="ic bg-ink">${ic("book")}</span><span><b>${esc(plural(+s.review_count, "recipe"))} ${+s.review_count === 1 ? "needs" : "need"} a quick look</b><small>Scanned recipes waiting for a name or an answer</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
+  if (+s.review_items) html += `<button class="nudge" id="home-inv-review"><span class="ic bg-ink">${ic("scan")}</span><span><b>${esc(plural(+s.review_items, "item"))} to review</b><small>Scanned items the product databases didn't know</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
   html += homeContextCard(s, tonight);
   html += homeStats(s, list);
   html += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
@@ -326,6 +327,7 @@ async function renderHome() {
   app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
   homeChecklist($("#home-cl"));
   $("#home-review") && ($("#home-review").onclick = () => openReview());
+  $("#home-inv-review") && ($("#home-inv-review").onclick = () => openReviewItems(renderHome));
   setReviewBadge(+s.review_count || 0);
   api("GET", "/api/diary?limit=3").then((d) => {
     const box = $("#home-diary"); if (!box || !(d.entries || []).length) return;
@@ -1398,7 +1400,7 @@ function slotHtml(it) {
   const st = stackText(it), on = INV.sel && INV.sel.has(it.id);
   return `<button class="slot ${on ? "sel" : ""}" data-id="${esc(it.id)}" ${INV.sel ? `aria-pressed="${!!on}"` : ""} aria-label="${esc(it.name)}${st ? `, ${esc(st)}` : ""}${it.days_left != null ? `, ${esc(relExpiry(it))}` : ""}">${invMark(it)}
     ${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span class="slot-emo">${esc(it.emoji || "🥫")}</span>`}
-    ${st ? `<b class="stack">${esc(st)}</b>` : ""}${durability(it)}<span class="slot-name">${esc(it.name)}</span></button>`;
+    ${st ? `<b class="stack">${esc(st)}</b>` : ""}${it.review ? `<span class="rv-badge">Review later</span>` : ""}${durability(it)}<span class="slot-name">${esc(it.name)}</span></button>`;
 }
 async function renderPantry() {
   const view = invView();
@@ -1425,7 +1427,8 @@ async function renderPantry() {
   items.forEach((i) => counts[i.location]++);
   const shown = f === "all" ? items : items.filter((i) => i.location === f);
   const soon = items.filter((i) => i.days_left !== null && i.days_left <= 3).length;
-  let html = `<div class="subtitle">${items.length} items${soon ? ` · ${soon} to use soon` : ""}</div>
+  const toReview = items.filter((i) => i.review).length;
+  let html = `<div class="subtitle">${items.length} items${soon ? ` · ${soon} to use soon` : ""}</div>${toReview ? `<button class="nudge" id="inv-review"><span class="ic bg-ink">${ic("scan")}</span><span><b>${esc(plural(toReview, "item"))} to review</b><small>Add a name, size or photo so the next scan is instant</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>` : ""}
     <div class="seg">${[["all", "All"], ["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([k, l]) =>
       `<button data-f="${k}" class="${f === k ? "on" : ""}">${l}${counts[k] ? ` ${counts[k]}` : ""}</button>`).join("")}</div>`;
   if (!shown.length) {
@@ -1442,12 +1445,13 @@ async function renderPantry() {
     html += `<div class="group" style="margin-top:12px">${shown.map((it) => {
       const left = Math.round(it.amount_left * 100);
       return `<button class="row ${INV.sel && INV.sel.has(it.id) ? "sel" : ""}" data-id="${esc(it.id)}" ${INV.sel ? `aria-pressed="${INV.sel.has(it.id)}"` : ""}>${invMark(it)}${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
-        <div class="main"><div class="a">${esc(it.name)}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.place_label ? `${esc(it.place_label)} · ` : ""}${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
+        <div class="main"><div class="a">${esc(it.name)}${it.review ? ` <span class="rv-badge inline">Review later</span>` : ""}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.place_label ? `${esc(it.place_label)} · ` : ""}${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
         ${left < 100 ? `<div class="meter"><i style="width:${left}%;background:${left <= 25 ? "var(--orange)" : "var(--green)"}"></i></div>` : ""}</div>${expiryPill(it)}</button>`;
     }).join("")}</div>`;
   }
   $("#inv-items").innerHTML = html;
   $$("[data-f]").forEach((b) => (b.onclick = () => { state.pantryFilter = b.dataset.f; renderPantry(); }));
+  $("#inv-review") && ($("#inv-review").onclick = () => openReviewItems(renderPantry));
   $$("#inv-items [data-id]").forEach((b) => (b.onclick = () => {
     const it = items.find((i) => String(i.id) === b.dataset.id);
     if (!INV.sel) return openPantryItem(it, renderPantry);
@@ -1506,6 +1510,7 @@ function openPantryItem(it, after) {
     const ruleLine = rule ? `${rule.name}` : "No match — set one so opened items get a countdown";
     const srcLabel = { package: "printed date", manual: "set by you", opened: "countdown since opening", frozen: "countdown since freezing", none: "" }[it.expiry_source] || "";
     sheetBody().innerHTML = `
+      ${it.review ? `<button class="nudge" id="pi-details"><span class="ic bg-ink">${ic("scan")}</span><span><b>Add details</b><small>The product databases didn't know barcode ${esc(it.upc || "")}</small></span><span class="chev">${ic("chevR")}</span></button>` : ""}
       <div style="display:flex;align-items:center;gap:10px;margin:-4px 2px 12px">${expiryPill(it)}<span class="muted">${esc(relExpiry(it))}${srcLabel ? ` · ${esc(srcLabel)}` : ""}</span></div>
       <div class="group"><div class="kv">
         <div><small>Bought</small><b>${esc(fmt(parseISO(it.purchased_on), { month: "short", day: "numeric" }))}</b></div>
@@ -1553,6 +1558,7 @@ function openPantryItem(it, after) {
     $("#pi-date").onchange = async (e) => { const r = await act({ action: "set_date", expires_on: e.target.value }, "Date saved"); if (r) { draw(r); after && after(); } };
     $("#pi-rule").onclick = () => pickRule(it, async (rule) => { const r = await act({ action: "rule", rule_id: rule ? rule.id : null }, rule ? "Shelf life updated" : null); draw(r || it); after && after(); });
     $("#pi-toss").onclick = async () => { const r = await act({ action: "toss" }); if (r) { toast(`${it.name} tossed`, "Undo", async () => { await act({ action: "restore" }); after && after(); }); done(); } };
+    $("#pi-details") && ($("#pi-details").onclick = () => { closeSheet(true); openItemDetails(it, after); });
     $("#pi-open") && ($("#pi-open").onclick = async () => { const r = await act({ action: "open" }, "Marked opened"); if (r) { draw(r); after && after(); } });
   };
   openSheet(it.name, "", { onMount: () => draw(it) });
@@ -1883,6 +1889,7 @@ async function openSettings() {
         <div class="row"><div class="main"><div class="a">USDA FoodKeeper</div><div class="b">${counts.usda ? `${esc(counts.usda)} foods · synced ${esc((c.usda_synced_at || "").replace("T", " "))}` : "Not synced yet — using starter table"}</div></div></div>
         <button class="row" id="st-sync"><div class="main"><div class="a" style="color:var(--blue)">${counts.usda ? "Re-sync now" : "Sync now"}</div></div></button>
         <button class="row" id="st-rules"><div class="main"><div class="a">House rules & edits</div><div class="b">${esc(counts.custom || 0)} custom · ${esc(counts.starter || 0)} starter</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-bctest"><div class="main"><div class="a">Test barcode lookup</div><div class="b">See what each product database says about a code</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
 
       <div class="group-label">Your data</div>
@@ -1944,6 +1951,7 @@ async function openSettings() {
       draw();
     };
     $("#st-rules").onclick = () => rulesBrowser(draw);
+    $("#st-bctest").onclick = () => openBarcodeTest();
   };
   openSheet("Settings", loading(), { onMount: draw });
 }

@@ -988,7 +988,7 @@ const BC_OPTS = { formats: ["EAN13", "EAN8", "UPCA", "UPCE"], tryHarder: true, m
 // A keyboard-wedge scanner "types" the digits fast and ends with Enter. Every scan adds to the pantry at once (with
 // Undo), ticks it off the shopping list if it's there, and scanning the same code again adds one more.
 const scanLocs = () => { const ps = invPlaces(); return [...ps.filter(([k]) => k === "pantry"), ...ps.filter(([k]) => k !== "pantry")]; };
-const SS = { active: false, loc: (() => { try { return localStorage.getItem("tp.scanLoc") || ""; } catch (_) { return ""; } })(), rows: [], naming: null, queue: [], busy: false, foods: null, after: null };
+const SS = { active: false, loc: (() => { try { return localStorage.getItem("tp.scanLoc") || ""; } catch (_) { return ""; } })(), rows: [], foods: null, after: null };
 const scanCount = () => SS.rows.reduce((n, r) => n + r.count, 0);
 const STOCK_METHODS = [["scanner", "Scanner"], ["camera", "Camera"], ["type", "Type it"], ["receipt", "Receipt"]];
 const stockMethod = () => { try { return localStorage.getItem("tp.stockMethod") || "scanner"; } catch (_) { return "scanner"; } };
@@ -1000,8 +1000,8 @@ function startStockUp(after) {
 }
 function startScanSession(after) {
   if (after) SS.after = after;
-  if (SS.active) { drawSession(); $("#sb-code")?.focus(); return; }
-  SS.active = true; SS.rows = []; SS.naming = null; SS.queue = [];
+  if (SS.active) { drawSession(); focusWedge(); return; }
+  SS.active = true; SS.rows = [];
   document.body.classList.add("scanning");
   document.body.insertAdjacentHTML("beforeend", `<div class="scan-bar" id="scan-bar" role="region" aria-label="Stock up">
     <div class="sb-head"><b>How do you want to stock up?</b><span class="grow"></span><button class="text-btn strong" id="sb-done">Done</button></div>
@@ -1011,7 +1011,7 @@ function startScanSession(after) {
     <div class="sb-opts"><label class="sb-toggle"><input type="checkbox" id="sb-counting" ${counting() ? "checked" : ""}> Counting what I already have</label>
       <label class="sb-all">Set date for all <input type="date" id="sb-all-date" aria-label="Use-by date for every item this session"></label></div>
     <div class="muted small" id="sb-n" aria-live="polite"></div>
-    <div id="sb-name"></div><div class="sb-rows" id="sb-rows"></div></div>`);
+    <div class="sb-rows" id="sb-rows"></div></div>`);
   $("#sb-done").onclick = endScanSession;
   $("#sb-counting").onchange = (e) => { try { localStorage.setItem("tp.counting", e.target.checked ? "1" : "0"); } catch (_) {} drawSession(); };
   $("#sb-all-date").onchange = async (e) => {
@@ -1022,6 +1022,7 @@ function startScanSession(after) {
     drawSession(); toast(`Use-by date set for ${plural(SS.rows.length, "item")}`);
   };
   drawSession();
+  focusWedge();
 }
 function drawStockInput() {
   const box = $("#sb-input"); if (!box) return;
@@ -1049,9 +1050,10 @@ function drawStockInput() {
       } catch (x) { fail(x); }
     };
   } else {
-    box.innerHTML = `<form class="sb-form" id="sb-form" autocomplete="off"><input id="sb-code" inputmode="numeric" placeholder="${m === "camera" ? "Or type a barcode or produce code" : "Ready, scan away (or paste a code)"}" aria-label="Barcode or produce code" maxlength="20"><button class="pill-btn ink" type="submit">Add</button>${m === "camera" ? `<button class="pill-btn" type="button" id="sb-cam">${ic("camera")}</button>` : ""}</form>`;
-    $("#sb-form").onsubmit = (e) => { e.preventDefault(); const v = $("#sb-code").value.replace(/\D/g, ""); $("#sb-code").value = ""; if (v.length >= 4) sessionScan(v); else toast("Enter the numbers under the barcode, or a 4–5 digit produce code"); };
+    box.innerHTML = `<form class="sb-form" id="sb-form" autocomplete="off"><input id="sb-code" inputmode="numeric" placeholder="${m === "camera" ? "Or type a barcode or produce code" : "Ready, scan away (or paste a code)"}" aria-label="Barcode or produce code" maxlength="20"><button class="pill-btn ink" type="submit">Add</button>${m === "camera" ? `<button class="pill-btn" type="button" id="sb-cam">${ic("camera")}</button>` : ""}</form>${m === "scanner" ? `<input id="sb-wedge" class="wedge-catch" inputmode="none" autocomplete="off" tabindex="-1" aria-hidden="true">` : ""}`;
+    $("#sb-form").onsubmit = (e) => { e.preventDefault(); const v = $("#sb-code").value.replace(/\D/g, ""); $("#sb-code").value = ""; if (v.length >= 4) enqueueScan(v); else toast("Enter the numbers under the barcode, or a 4–5 digit produce code"); };
     $("#sb-cam") && ($("#sb-cam").onclick = () => openScanner(SS.after));
+    if (m === "scanner") setTimeout(focusWedge, 0);
   }
 }
 function endScanSession() {
@@ -1071,13 +1073,13 @@ const counting = () => { try { return localStorage.getItem("tp.counting") === "1
 const fillLabel = (v) => (FILLS.find(([f]) => Math.abs(f - v) < 0.02) || [0, `${Math.round(v * 100)}%`])[1];
 const plusDays = (n) => isoDate(addDays(today(), n));
 function scanRowHtml(r, i) {
-  if (r.naming) return "";
   const it = r.item, sub = [it.product, it.quantity_text].filter(Boolean).join(" · ");
   const left = it.amount_left ?? 1, open = r.fillOpen ?? counting();
   const exp = it.expires_on ? (it.expiry_label || fmt(parseISO(it.expires_on), { month: "short", day: "numeric" })) : "No date";
   return `<div class="sb-row" data-i="${i}"><div class="sb-line">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="sb-img emo">${esc(it.emoji || "🥫")}</span>`}
     <div class="main"><div class="a">${esc(it.name)}</div><div class="b">${esc(sub || cap(it.location))}${r.list ? ` · <span class="ok-note">✓ Checked off your list</span>` : ""}</div></div>
     <div class="sb-count"><button class="mini" data-less aria-label="One fewer ${esc(it.name)}">−</button><b>${esc(r.count)}</b><button class="mini" data-more aria-label="One more ${esc(it.name)}">+</button></div></div>
+    ${r.unknown ? `<div class="sb-nf" role="status"><b>Not found</b> · <span class="ok-note">Review later ✓</span> · <button class="link-btn" data-details>Add details</button></div>` : ""}
     <div class="sb-ctl">${open
       ? `<span class="fill-chips" role="radiogroup" aria-label="How full">${FILLS.map(([f, l]) => `<button class="chip-s ${Math.abs(f - left) < 0.02 ? "on" : ""}" data-fill="${f}" role="radio" aria-checked="${Math.abs(f - left) < 0.02}">${esc(l)}</button>`).join("")}</span>`
       : `<button class="chip-s" data-fill-open aria-expanded="false">${esc(fillLabel(left))} ▾</button>`}
@@ -1106,71 +1108,66 @@ function drawSession() {
     drawStockInput();
     $("#sb-locs").innerHTML = scanLocs().map(([k, l]) => `<button class="filter sm ${loc === k ? "on" : ""}" data-sl="${esc(k)}" role="radio" aria-checked="${loc === k}">${esc(l)}</button>`).join("");
     $$("#sb-locs [data-sl]").forEach((b) => (b.onclick = () => { SS.loc = b.dataset.sl; try { localStorage.setItem("tp.scanLoc", SS.loc); } catch (_) {} drawSession(); }));
-    const n = scanCount();
-    $("#sb-n").textContent = n ? `${plural(n, "item")} added` : stockMethod() === "scanner" ? "Ready, scan away" : "";
+    const n = scanCount(), waiting = SCANQ.q.length + (SCANQ.busy ? 1 : 0);
+    $("#sb-n").textContent = [n ? `${plural(n, "item")} added` : stockMethod() === "scanner" ? "Ready, scan away" : "", waiting > 1 ? `${waiting} scans in line` : ""].filter(Boolean).join(" · ");
   }
   const rowsHtml = SS.rows.map(scanRowHtml).reverse().join("");
   [$("#sb-rows"), $("#sc-rows")].forEach((box) => {
     if (!box) return;
     box.innerHTML = rowsHtml;
     $$("[data-more],[data-less]", box).forEach((b) => (b.onclick = () => bumpScan(SS.rows[+b.closest("[data-i]").dataset.i], b.hasAttribute("data-more") ? 1 : -1)));
-    SS.rows.forEach((r) => !r.naming && bindScanRow(box, r));
+    SS.rows.forEach((r) => bindScanRow(box, r));
+    $$("[data-details]", box).forEach((b) => (b.onclick = () => { const row = SS.rows[+b.closest("[data-i]").dataset.i]; if (row) openItemDetails(row.item, null); }));
   });
-  [$("#sb-name"), $("#sc-name")].forEach((box) => { if (box) drawNaming(box); });
 }
-function drawNaming(box) {
-  if (!SS.naming) { box.innerHTML = ""; return; }
-  const code = SS.naming;
-  box.innerHTML = `<form class="sb-naming" autocomplete="off"><div class="muted small">Barcode ${esc(code)} isn't known yet. Name this item:</div>
-    <div class="sb-name-row"><input class="nm" list="sb-foods" placeholder="e.g. Greek yogurt" maxlength="80" aria-label="Item name" required>
-    <input class="sz" placeholder="Size (e.g. 32 oz)" maxlength="40" aria-label="Size"><button class="pill-btn ink" type="submit">Save</button></div>
-    <datalist id="sb-foods">${(SS.foods || []).map((f) => `<option value="${esc(f)}"></option>`).join("")}</datalist>
-    ${SS.queue.length ? `<div class="muted small">${esc(plural(SS.queue.length, "more scan"))} waiting</div>` : ""}
-    <div class="sb-name-row">${state.cfg?.ai_key ? `<label class="pill-btn sb-snap">${ic("camera")} Snap the product<input type="file" accept="image/*" capture="environment" hidden></label>` : ""}<button type="button" class="link-btn sb-skip">Skip this one</button></div></form>`;
-  const f = $("form", box);
-  if (!SS.foods) api("GET", "/api/foods").then((d) => { SS.foods = (d.foods || []).map((x) => x.name); const dl = $("#sb-foods", box); if (dl) dl.innerHTML = SS.foods.map((n) => `<option value="${esc(n)}"></option>`).join(""); }).catch(() => {});
-  setTimeout(() => $(".nm", f)?.focus(), 30);
-  f.onsubmit = async (e) => {
-    e.preventDefault();
-    const name = $(".nm", f).value.trim(); if (!name) return;
-    SS.naming = null;
-    await sessionScan(code, { name, quantity: $(".sz", f).value.trim() });
-    nextQueued();
-  };
-  $(".sb-skip", f).onclick = () => { SS.naming = null; drawSession(); nextQueued(); };
-  const snap = $(".sb-snap input", f);
-  if (snap) snap.onchange = async (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    const lbl = $(".sb-snap", f); lbl.classList.add("busy"); lbl.firstChild && (lbl.lastChild.previousSibling.textContent = " Reading…");
-    try {
-      const r = await api("POST", "/api/scan/photo", { code, image: await shrink(file), location: SS.loc || "pantry" });
-      SS.naming = null;
-      if (r.ok) {
-        const row = { code, item: r.item, count: 1, list: !!r.list_checked };
-        SS.rows.push(row);
-        toast(`${r.item.name} · remembered for next time`, "Undo", async () => { try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); } catch (x) { fail(x); } });
-      }
-      drawSession(); nextQueued();
-    } catch (x) { fail(x); lbl.classList.remove("busy"); }
-  };
-}
-function nextQueued() { const c = SS.queue.shift(); if (c) sessionScan(c); }
-async function sessionScan(code, named) {
-  if (!SS.active && !$("#sc-rows")) startScanSession();
-  if (SS.naming && !named) { if (code !== SS.naming) SS.queue.push(code); drawSession(); return; }
-  const prev = SS.rows.find((r) => r.code === code && !named);
-  if (prev) return bumpScan(prev, 1);
-  try { navigator.vibrate?.(40); } catch (_) {}
+// Scan feedback you can hear and feel: found = one short high tone; not found = two low tones and a double buzz.
+let ACX = null;
+function scanBeep(kind) {
+  try { navigator.vibrate?.(kind === "unknown" ? [40, 70, 40] : kind === "bad" ? [140] : 35); } catch (_) {}
   try {
-    const r = await api("POST", "/api/scan", { code, location: SS.loc || "pantry", ...(named || {}) });
-    if (!r.ok && r.needs_name) { SS.naming = code; drawSession(); return; }
-    const row = { code, item: r.item, count: 1, list: !!r.list_checked };
+    ACX = ACX || new (window.AudioContext || window.webkitAudioContext)();
+    const tones = kind === "unknown" ? [[520, 0], [390, 0.15]] : kind === "bad" ? [[220, 0]] : [[1040, 0]];
+    for (const [f, at] of tones) {
+      const o = ACX.createOscillator(), g = ACX.createGain(), t = ACX.currentTime + at;
+      o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.12, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+      o.connect(g).connect(ACX.destination); o.start(t); o.stop(t + 0.12);
+    }
+  } catch (_) {}
+}
+// One scan at a time, in order. The same code twice within 1.5 s is the scanner double-firing, not a second item.
+const SCANQ = { q: [], busy: false, recent: new Map() };
+function enqueueScan(code) {
+  const now = Date.now(), last = SCANQ.recent.get(code);
+  if (last && now - last < 1500) return false;
+  SCANQ.recent.set(code, now);
+  for (const [k, t] of SCANQ.recent) if (now - t > 5000) SCANQ.recent.delete(k);
+  SCANQ.q.push(code);
+  pumpScans();
+  return true;
+}
+async function pumpScans() {
+  if (SCANQ.busy) return;
+  SCANQ.busy = true;
+  try { while (SCANQ.q.length) { const c = SCANQ.q.shift(); drawSession(); await sessionScan(c); } }
+  finally { SCANQ.busy = false; drawSession(); }
+}
+async function sessionScan(code) {
+  if (!SS.active && !$("#sc-rows")) startScanSession();
+  const prev = SS.rows.find((r) => r.code === code || r.raw === code);
+  if (prev) { scanBeep(prev.unknown ? "unknown" : "ok"); return bumpScan(prev, 1); }
+  try {
+    const r = await api("POST", "/api/scan", { code, location: SS.loc || "pantry" });
+    if (r.misread) { scanBeep("bad"); toast(r.error || "That barcode didn't read cleanly. Scan it again."); return; }
+    const row = { code: r.code || code, raw: code, item: r.item, count: 1, list: !!r.list_checked, unknown: !!r.unknown };
     SS.rows.push(row);
     drawSession();
+    if (row.unknown) { scanBeep("unknown"); return; }   // the row says "Not found · Review later": no modal, keep scanning
+    scanBeep("ok");
     toast(`${r.item.name}${r.list_checked ? " · checked off your list" : ""}`, "Undo", async () => {
       try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); } catch (e) { fail(e); }
     });
-  } catch (e) { fail(e); }
+  } catch (e) { scanBeep("bad"); fail(e); }
 }
 async function bumpScan(row, d) {
   if (!row) return;
@@ -1183,28 +1180,166 @@ async function bumpScan(row, d) {
     row.item = { ...row.item, ...r.item }; row.count += d; drawSession();
   } catch (e) { fail(e); }
 }
-// keyboard-wedge burst: >= 6 digits, < 50 ms apart, then Enter, while no text field is focused
-const WEDGE = { buf: "", last: 0 };
+// Keyboard-wedge scanners "type" a code very fast and end it with Enter, Tab, or nothing at all (a pause).
+// The scan fields (and an off-screen catcher that's focused only while the scanner method is on) are watched. If you
+// tapped a real text field, focus stays there: a scanner burst is taken back out of it (and never submits the form).
+const WEDGE = { buf: "", last: 0, timer: 0, field: null, GAP: 70, MIN: 6 };
+const SCAN_FIELDS = new Set(["sb-wedge", "sb-code", "sc-code"]);
+const realField = (t) => !!t && !SCAN_FIELDS.has(t.id) && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+const wedgeOn = () => state.tab === "pantry" || SS.active || !!$("#sc-rows");
+const wedgeReset = () => { WEDGE.buf = ""; WEDGE.field = null; clearTimeout(WEDGE.timer); };
+function wedgeFire() {
+  clearTimeout(WEDGE.timer);
+  const code = WEDGE.buf, f = WEDGE.field || document.activeElement;
+  wedgeReset();
+  if (code.length < WEDGE.MIN || !wedgeOn()) return false;
+  if (f && SCAN_FIELDS.has(f.id)) f.value = "";
+  else if (f && "value" in f && String(f.value).endsWith(code)) f.value = f.value.slice(0, -code.length);
+  if (stockMethod() !== "scanner" && !$("#sc-rows")) { setStockMethod("scanner"); if (SS.active) drawSession(); }   // a scanner just spoke: switch to it
+  enqueueScan(code);
+  return true;
+}
 document.addEventListener("keydown", (e) => {
-  const t = e.target, typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
-  if (typing) { WEDGE.buf = ""; return; }
+  const t = e.target, real = realField(t);
+  if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || (real && (t.inputMode === "numeric" || t.tagName === "SELECT" || t.type === "date"))) { wedgeReset(); return; }
   const now = performance.now();
   if (/^\d$/.test(e.key)) {
-    if (now - WEDGE.last > 50) WEDGE.buf = "";
-    WEDGE.buf += e.key; WEDGE.last = now;
+    if (now - WEDGE.last > WEDGE.GAP || WEDGE.field !== (real ? t : null)) WEDGE.buf = "";
+    WEDGE.buf += e.key; WEDGE.last = now; WEDGE.field = real ? t : null;
+    clearTimeout(WEDGE.timer);
+    if (WEDGE.buf.length >= 8) WEDGE.timer = setTimeout(wedgeFire, 220);   // no terminator: a short pause ends the code
     return;
   }
-  if (e.key === "Enter" && WEDGE.buf.length >= 6 && now - WEDGE.last <= 50) {
-    const code = WEDGE.buf; WEDGE.buf = "";
-    if (state.tab === "pantry" || SS.active || $("#sc-rows")) {
-      e.preventDefault();
-      if (stockMethod() !== "scanner" && !$("#sc-rows")) setStockMethod("scanner");   // a scanner just spoke: switch to it
-      sessionScan(code);
-    }
+  if ((e.key === "Enter" || e.key === "Tab") && WEDGE.buf.length >= WEDGE.MIN && now - WEDGE.last <= 3 * WEDGE.GAP) {
+    if (wedgeFire()) { e.preventDefault(); e.stopPropagation(); }
     return;
   }
-  WEDGE.buf = "";
-});
+  if (e.key === "Shift") return;
+  wedgeReset();
+}, true);
+// The off-screen catcher: focus it while the scanner method is on and nothing else has focus. Never take focus
+// away from a field the cook tapped, and never while a sheet is open.
+function focusWedge() {
+  const w = $("#sb-wedge"); if (!w || !SS.active || stockMethod() !== "scanner") return;
+  const a = document.activeElement;
+  if (realField(a) || $("#layer")?.firstChild) return;
+  if (a && a.id === "sb-code") return;
+  try { w.focus({ preventScroll: true }); } catch (_) {}
+}
+document.addEventListener("focusout", () => setTimeout(() => { if (SS.active && (!document.activeElement || document.activeElement === document.body)) focusWedge(); }, 0));
+
+// ------------------------------------------------------------------ unknown items: add details, retry, review list
+function squarePhoto(file, size = 800) {   // centre-cropped square JPEG; re-encoding drops EXIF (location etc.)
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const s = Math.min(img.width, img.height), k = Math.min(1, size / s);
+      const cv = document.createElement("canvas"); cv.width = cv.height = Math.max(1, Math.round(s * k));
+      cv.getContext("2d").drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url); resolve(cv.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't open that photo")); };
+    img.src = url;
+  });
+}
+function scanRowsUpdate(item) {
+  const row = SS.rows.find((r) => r.item && r.item.id === item.id);
+  if (row) { row.item = { ...row.item, ...item }; row.unknown = !!item.review; drawSession(); }
+}
+function openItemDetails(it, after) {
+  if (!it) return;
+  const code = it.upc || "", ai = !!state.cfg?.ai_key;
+  let photo = null;
+  const named = !/^Unknown item/.test(it.name || "");
+  openSheet("Add details", `
+    <p class="muted small">Barcode ${esc(code || "—")}. What you save here is remembered only in your household, so the next scan of it is instant.</p>
+    ${ai ? `<label class="btn sec full" id="dt-snap-l">${ic("camera")} <span>Photo it</span><input type="file" accept="image/*" capture="environment" id="dt-snap" hidden></label>
+      <p class="hint">Photograph the front of the package. Only what can be read clearly is filled in.</p>` : ""}
+    <form id="dt-form" autocomplete="off">
+      <div class="group"><div class="field"><label for="dt-name">Name</label><input id="dt-name" class="full" maxlength="80" placeholder="e.g. Plain Greek yogurt" value="${esc(named ? it.name : "")}" required></div>
+        <div class="field"><label for="dt-brand">Brand</label><input id="dt-brand" class="full" maxlength="60" placeholder="Optional"></div>
+        <div class="field"><label for="dt-size">Size</label><input id="dt-size" class="full" maxlength="40" placeholder="e.g. 32 oz" value="${esc(it.quantity_text || "")}"></div></div>
+      <p class="hint">Keyboard hidden? Use your scanner's keyboard toggle, or take a photo instead.</p>
+      <div class="dt-photo"><span class="dt-thumb" id="dt-thumb">${it.image ? `<img src="${esc(it.image)}" alt="">` : ic("camera")}</span>
+        <label class="pill-btn">Product photo (optional)<input type="file" accept="image/*" id="dt-photo" hidden></label></div>
+      <div class="btn-row" style="margin-top:14px"><button class="btn" type="submit" id="dt-save">Save</button>${code ? `<button class="btn sec" type="button" id="dt-retry">Retry lookup</button>` : ""}</div>
+      <button class="link-btn" type="button" id="dt-later" style="margin-top:8px">Review later</button>
+    </form>`, {
+    onMount() {
+      const done = (item) => { scanRowsUpdate(item); closeSheet(); after && after(); };
+      $("#dt-later").onclick = () => closeSheet();
+      $("#dt-photo").onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        try { photo = await squarePhoto(f); $("#dt-thumb").innerHTML = `<img src="${esc(photo)}" alt="Product photo">`; } catch (x) { fail(x); }
+      };
+      if ($("#dt-snap")) $("#dt-snap").onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        const lbl = $("#dt-snap-l span"); lbl.textContent = "Reading…";
+        try {
+          const r = await api("POST", "/api/scan/identify", { images: [await shrink(f)] });
+          const fill = [["dt-name", r.name], ["dt-brand", r.brand], ["dt-size", r.size_text]];
+          let got = 0;
+          for (const [id, v] of fill) if (v) { $("#" + id).value = v; got++; }
+          if (!photo) { try { photo = await squarePhoto(f); $("#dt-thumb").innerHTML = `<img src="${esc(photo)}" alt="Product photo">`; } catch (_) {} }
+          toast(got ? "Check what was read, then Save" : "Couldn't read the package clearly. Type what you see.");
+        } catch (x) { fail(x); }
+        lbl.textContent = "Photo it";
+      };
+      $("#dt-retry") && ($("#dt-retry").onclick = async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.textContent = "Looking…";
+        try {
+          const r = await api("POST", `/api/pantry/${enc(it.id)}/relookup`, {});
+          if (r.found) { toast(`Found it: ${r.item.name}`); return done(r.item); }
+          toast("Still not found. Add the details yourself, or try again another day.");
+        } catch (x) { fail(x); }
+        b.disabled = false; b.textContent = "Retry lookup";
+      });
+      $("#dt-form").onsubmit = async (e) => {
+        e.preventDefault();
+        const name = $("#dt-name").value.trim(); if (!name) return;
+        $("#dt-save").disabled = true;
+        try {
+          const item = await api("POST", `/api/pantry/${enc(it.id)}/details`, { name, brand: $("#dt-brand").value.trim(), size: $("#dt-size").value.trim(), ...(photo ? { image: photo } : {}) });
+          toast(code ? `${item.name} · remembered for next time` : `${item.name} saved`);
+          done(item);
+        } catch (x) { fail(x); $("#dt-save").disabled = false; }
+      };
+    },
+  });
+}
+async function openReviewItems(after) {
+  let items;
+  try { items = (await api("GET", "/api/pantry")).items.filter((i) => i.review); } catch (e) { return fail(e); }
+  if (!items.length) { toast("Nothing to review"); after && after(); return; }
+  openSheet("Items to review", `<p class="muted small">The product databases didn't know these barcodes. Add a name (or a photo) once and the next scan is instant.</p>
+    <div class="group">${items.map((i) => `<button class="row" data-rv="${esc(i.id)}"><span class="emo">${esc(i.emoji || "🥫")}</span><div class="main"><div class="a">${esc(i.name)}</div><div class="b">${esc([i.upc, i.place_label || cap(i.location)].filter(Boolean).join(" · "))}</div></div><span class="chev">${ic("chevR")}</span></button>`).join("")}</div>`, {
+    onMount() {
+      $$("[data-rv]").forEach((b) => (b.onclick = () => {
+        const it = items.find((x) => String(x.id) === b.dataset.rv);
+        closeSheet(true);
+        openItemDetails(it, () => { after && after(); setTimeout(() => openReviewItems(after), 300); });
+      }));
+    },
+  });
+}
+// Settings → Test barcode lookup: what each product database says, uncached
+function openBarcodeTest() {
+  openSheet("Test barcode lookup", `<form id="bt-form" class="sb-form" autocomplete="off"><input id="bt-code" inputmode="numeric" maxlength="20" placeholder="Barcode number" aria-label="Barcode number"><button class="pill-btn ink" type="submit">Test</button></form><div id="bt-out" style="margin-top:12px"></div>`, {
+    onMount() {
+      $("#bt-form").onsubmit = async (e) => {
+        e.preventDefault();
+        const code = $("#bt-code").value.replace(/\D/g, ""); if (code.length < 6) return toast("Enter the numbers under the barcode");
+        const out = $("#bt-out"); out.innerHTML = loading();
+        try {
+          const r = await api("GET", `/api/scan/test?code=${encodeURIComponent(code)}`);
+          if (r.misread) { out.innerHTML = `<div class="banner">The last digit doesn't match: that's a misread or a typo. Check the number.</div>`; return; }
+          out.innerHTML = `<p class="muted small">Checked as ${esc(r.code)}${r.saved_by_you ? ` · saved by you as <b>${esc(r.saved_by_you)}</b>` : ""}</p>
+            <div class="group">${r.results.map((x) => `<div class="row"><div class="main"><div class="a">${esc(x.source)} <span class="muted small">· ${esc(x.code)}</span></div><div class="b">${esc(x.status)}${x.name ? ` · ${esc(x.name)}` : ""} · ${esc(x.ms)} ms</div></div><span class="pill ${x.status === "found" ? "ok" : ""}">${x.status === "found" ? "✓" : "—"}</span></div>`).join("")}</div>`;
+        } catch (x) { out.innerHTML = `<div class="banner">${esc(x.message)}</div>`; }
+      };
+    },
+  });
+}
 
 async function openScanner(after) {
   const live = window.isSecureContext && navigator.mediaDevices?.getUserMedia;
@@ -1212,7 +1347,7 @@ async function openScanner(after) {
     ${live ? `<div class="scan-view"><video id="sc-v" playsinline muted></video><div class="aim"></div></div><p class="hint" style="text-align:center">Point at a barcode. It scans automatically.</p>` :
       `<label class="drop" style="padding:28px">${ic("camera")}<div style="margin-top:8px"><b>Take a photo of the barcode</b><br><span class="muted">Fill most of the photo with the barcode</span></div><input type="file" accept="image/*" capture="environment" id="sc-file" hidden></label>
        <p class="hint">Live scanning needs HTTPS. Set it up with Tailscale (see the README) to scan without taking photos.</p>`}
-    <div id="sc-res"></div><div id="sc-name"></div><div class="sb-rows" id="sc-rows"></div>
+    <div id="sc-res"></div><div class="sb-rows" id="sc-rows"></div>
     <form class="group sb-form" id="sc-form" style="margin-top:12px"><div class="field"><input class="full" id="sc-code" inputmode="numeric" placeholder="Or type the barcode number" maxlength="20"></div></form>
     <div style="height:10px"></div><div class="btn-row"><button class="btn sec" id="sc-look">Look up</button><button class="btn sec" id="sc-wedge">${ic("scan")} USB / Bluetooth scanner</button></div>
     <p class="hint">Product names come from Open Food Facts (free, open database). A USB or Bluetooth scanner works anywhere on the Inventory tab too.</p>`, {
@@ -1222,7 +1357,8 @@ async function openScanner(after) {
       const found = async (code) => {
         if (busy) return; busy = true;
         $("#sc-res").innerHTML = "";
-        await sessionScan(code);
+        enqueueScan(code); await pumpScans();
+        while (SCANQ.busy) await new Promise((r) => setTimeout(r, 50));
         busy = false;
         after && after();
       };
