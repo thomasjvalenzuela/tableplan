@@ -40,12 +40,20 @@ const rstate = { q: "", filter: "all", list: null, tags: [], sel: null, last: -1
 async function renderRecipes() {
   rstate.sel = null;
   app.innerHTML = topbar(`<button class="text-btn" id="btn-select">Select</button><button class="round-btn" id="btn-rmore" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
-    `<h1 class="title">All recipes</h1>
+    `<h1 class="title">All recipes</h1><div id="rqueue"></div>
     <div class="search">${ic("search")}<input id="rq" placeholder="Search recipes" value="${esc(rstate.q)}" autocomplete="off"></div>
     <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div><div class="sel-bar" id="sel-bar" hidden></div>`;
   bindTopbar();
   $("#btn-add").onclick = openAddRecipe;
   $("#btn-select").onclick = () => setSelect(!rstate.sel);
+  api("GET", "/api/import/queue").then((d) => {   // scans being read, and any that need a quick look
+    const box = $("#rqueue"); if (!box || !d.jobs.length) return;
+    const busy = d.counts.waiting + d.counts.reading, rv = d.counts.review;
+    if (!busy && !rv && !d.counts.failed) return;
+    box.innerHTML = `<button class="nudge" id="rq-open"><span class="ic bg-ink">${ic("camera")}</span><span><b>${rv ? `${esc(plural(rv, "recipe"))} ${rv === 1 ? "needs" : "need"} a quick look` : busy ? `Reading ${esc(plural(busy, "scan"))}…` : `${esc(plural(d.counts.failed, "scan"))} failed`}</b><small>${busy && rv ? `${esc(busy)} more being read · ` : ""}Tap to see the import queue</small></span>${rv ? `<span class="sdot warn" aria-hidden="true"></span>` : ""}<span class="chev">${ic("chevR")}</span></button>`;
+    $("#rq-open").onclick = () => (rv ? openReview() : openImportQueue());
+    if (busy) pollQueue();
+  }).catch(() => {});
   $("#btn-rmore").onclick = () => popover($("#btn-rmore"), `<button data-a="diary">${ic("book")} Cooking diary</button>`, (el) => {
     $("[data-a=diary]", el).onclick = () => { closePop(); location.hash = "diary"; };
   });
@@ -326,7 +334,7 @@ async function renderRecipe(slug) {
     </div>
     <div class="rd-head">
       <h1>${esc(rec.name)}</h1>
-      ${src ? `<div class="rd-src">${src}</div>` : ""}
+      ${src ? `<div class="rd-src">${src}</div>` : ""}${rec.name_suggested ? `<div class="rd-src muted small">Name suggested by TablePlan (the page had no title)</div>` : ""}
       <div class="rd-meta">
         ${rec.eta ? `<button class="mp eta-chip" id="rd-eta" aria-label="How long it takes: ${esc(rec.eta.label)}. Show the breakdown">${ic("clock")} ${esc(rec.eta.label)}</button>` : rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
         <span class="mp">${ic("chef")} ${esc(rec.difficulty)}</span>

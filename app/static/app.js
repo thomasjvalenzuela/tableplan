@@ -23,6 +23,7 @@ const P = {
   mail: '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m4 7 8 6 8-6"/>',
   print: '<path d="M7 9V3.5h10V9"/><rect x="3.5" y="9" width="17" height="8" rx="2"/><path d="M7 14h10v6.5H7z"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+  bolt: '<path d="M13 2 4.5 13.5H11L10 22l8.5-11.5H12L13 2z"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   chevL: '<path d="m15 18-6-6 6-6"/>',
@@ -108,7 +109,7 @@ async function api(method, path, body) {
   let data = null;
   try { data = await res.json(); } catch (_) {}
   if (res.status === 401 && data && data.auth && !path.startsWith("/api/login")) { renderLogin(() => location.reload()); throw new Error("Sign in required"); }
-  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  if (!res.ok) { const e = new Error((data && data.error) || `Request failed (${res.status})`); e.status = res.status; e.data = data; throw e; }
   return data;
 }
 
@@ -147,6 +148,7 @@ function toast(msg, actionLabel, action) {
   toastTimer = setTimeout(() => t.classList.remove("on"), actionLabel ? 6000 : 3200);
 }
 const fail = (e) => toast(e.message || String(e));
+const c_native = () => state.cfg?.backend === "native";
 // Inventory places: fridge, freezer, pantry and shelves like the spice cabinet → [[key, label], …]
 const invPlaces = () => ((state.cfg?.settings?.locations) || [{ key: "fridge", label: "Fridge" }, { key: "freezer", label: "Freezer" }, { key: "pantry", label: "Pantry" }]).map((p) => [p.key, p.label]);
 // "17:40" → "5:40" (the board is compact; AM/PM only when it's not the evening)
@@ -283,6 +285,7 @@ async function renderHome() {
   let html = "";
   if (!s.mealie_ok) html += `<button class="banner" id="fix-mealie">${esc(s.error)}</button>`;
   html += zoomNudge();
+  if (+s.review_count) html += `<button class="nudge" id="home-review"><span class="ic bg-ink">${ic("book")}</span><span><b>${esc(plural(+s.review_count, "recipe"))} ${+s.review_count === 1 ? "needs" : "need"} a quick look</b><small>Scanned recipes waiting for a name or an answer</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
   html += homeContextCard(s, tonight);
   html += homeStats(s, list);
   html += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
@@ -322,6 +325,8 @@ async function renderHome() {
   html += `<section class="home-card diary-w" id="home-diary" hidden aria-label="Cooking diary"></section>`;
   app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
   homeChecklist($("#home-cl"));
+  $("#home-review") && ($("#home-review").onclick = () => openReview());
+  setReviewBadge(+s.review_count || 0);
   api("GET", "/api/diary?limit=3").then((d) => {
     const box = $("#home-diary"); if (!box || !(d.entries || []).length) return;
     box.hidden = false;
@@ -1601,7 +1606,7 @@ function openAddRecipe(prefill) {
   api("GET", "/api/setup/ai").then((a) => { state.setup = { ...(state.setup || {}), ai: a }; const h = $("#ar-aihint"); if (h && a.enabled) h.textContent = "Usually takes 20–60 seconds. Check the ingredients afterwards."; }).catch(() => {});
   const imgs = [];
   openSheet("Add a Recipe", `
-    <div class="seg" id="ar-mode"><button data-m="link" class="on">Link</button><button data-m="photo">Screenshot</button><button data-m="paste">Paste</button><button data-m="type">Type it</button></div>
+    <div class="seg" id="ar-mode"><button data-m="link" class="on">Link</button><button data-m="scan">Scan</button><button data-m="photo">Screenshot</button><button data-m="paste">Paste</button><button data-m="type">Type it</button></div>
     <div id="ar-body"></div>
     <div id="ar-result"></div>`, {
     onMount() {
@@ -1640,9 +1645,7 @@ function openAddRecipe(prefill) {
         const btn = $("#ar-go"); btn.disabled = true; const label = btn.innerHTML; btn.innerHTML = "Importing…";
         $("#ar-result").innerHTML = "";
         const prog = importProgress($("#ar-result"), kind);
-        try {
-          const r = await fn();
-          prog.done();
+        const added = (r) => {
           $("#ar-body").innerHTML = "";
           $("#ar-mode").style.display = "none";
           $("#ar-result").innerHTML = `<div class="wstatus ok" style="margin-top:4px"><b>Added “${esc(r.name || r.slug)}”</b>
@@ -1651,7 +1654,13 @@ function openAddRecipe(prefill) {
           $("#ar-again").onclick = () => openAddRecipe();
           $("#ar-open").onclick = () => { closeSheet(true); openRecipe(r.slug); };
           if (state.tab === "recipes") rstate.list = null;
-        } catch (e) { prog.stop(); btn.disabled = false; btn.innerHTML = label; $("#ar-result").innerHTML = `<div class="banner" style="margin-top:12px">${esc(e.message)}</div>`; }
+        };
+        try { const r = await fn(); prog.done(); added(r); }
+        catch (e) {
+          prog.stop(); btn.disabled = false; btn.innerHTML = label;
+          if (e.data && e.data.duplicate) return duplicateCard($("#ar-result"), e, (r) => added(r));   // looks like one we have: ask
+          $("#ar-result").innerHTML = `<div class="banner" style="margin-top:12px">${esc(e.message)}</div>`;
+        }
       };
       const drawPaste = () => {
         body.innerHTML = `<div class="group" style="margin-top:12px"><textarea class="full-area" id="ar-text" rows="10" placeholder="Paste the whole recipe: title, ingredients and steps. From Notes, a Google Doc, an email or a text message."></textarea></div>
@@ -1667,7 +1676,7 @@ function openAddRecipe(prefill) {
           try { const r = await api("POST", "/api/recipes/new", { name }); closeSheet(true); location.hash = "edit/" + encodeURIComponent(r.slug); } catch (e) { fail(e); }
         };
       };
-      $$("#ar-mode button").forEach((bt) => (bt.onclick = () => { $$("#ar-mode button").forEach((x) => x.classList.toggle("on", x === bt)); ({ link: drawLink, photo: drawPhoto, paste: drawPaste, type: drawType })[bt.dataset.m](); }));
+      $$("#ar-mode button").forEach((bt) => (bt.onclick = () => { if (bt.dataset.m === "scan") return openRecipeCamera(); $$("#ar-mode button").forEach((x) => x.classList.toggle("on", x === bt)); ({ link: drawLink, photo: drawPhoto, paste: drawPaste, type: drawType })[bt.dataset.m](); }));
       drawLink();
       // Shared/deep-linked URLs are only prefilled. Anyone can craft a /?url= link, so importing always takes a tap.
       if (typeof prefill === "string" && prefill) {
@@ -2311,4 +2320,5 @@ function openUpdateHelp() {
   if (sess.needs_account) setTimeout(() => maybeAccountPrompt(sess), 500);
   else setTimeout(maybeWhatsNew, 600);
   setTimeout(() => resumeCook(), 300);   // timers survive a reload: reopen cook mode where it was
+  if (c_native()) setTimeout(pollQueue, 900);   // scans still being read, and the Recipes badge
 })();

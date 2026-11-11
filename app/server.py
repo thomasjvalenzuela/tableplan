@@ -210,6 +210,11 @@ CREATE TABLE IF NOT EXISTS cook_times (
 );
 CREATE INDEX IF NOT EXISTS ix_cook_times_recipe ON cook_times(recipe_id);
 CREATE TABLE IF NOT EXISTS plan_eat_at (entry_id TEXT PRIMARY KEY, eat_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, user_id INTEGER, pages INTEGER NOT NULL DEFAULT 0,
+  draft TEXT, image_url TEXT, meta TEXT NOT NULL DEFAULT '{}', error TEXT, slug TEXT, dismissed INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS guided_cache (
   recipe_id TEXT, profile TEXT, updated TEXT, source TEXT, data TEXT, created_at TEXT,
   PRIMARY KEY (recipe_id, profile)
@@ -1831,6 +1836,7 @@ from native import plu as n_plu  # noqa: E402
 from native import timers as n_timers  # noqa: E402
 from native import eta as n_eta  # noqa: E402
 from native import users as n_users  # noqa: E402
+from native import dupes as n_dupes  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -1939,6 +1945,27 @@ AI_RECIPE_SCHEMA = {
 }
 
 
+AI_DRAFT_SCHEMA = {**AI_RECIPE_SCHEMA,
+    "required": AI_RECIPE_SCHEMA["required"] + ["title_found", "suggested_title", "questions"],
+    "properties": {**AI_RECIPE_SCHEMA["properties"],
+        "title_found": {"type": "boolean"}, "suggested_title": {"type": "string"},
+        "questions": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["kind", "text", "choices", "ingredient", "step", "page"],
+            "properties": {"kind": {"type": "string", "enum": ["amount", "cutoff", "unreadable", "other"]}, "text": {"type": "string"},
+                           "choices": {"type": "array", "items": {"type": "string"}},
+                           "ingredient": {"type": "integer"}, "step": {"type": "integer"}, "page": {"type": "integer"}}}}}}
+DRAFT_PROMPT = (
+    " The images are pages photographed in order (page 1, page 2, …). If no recipe title is visible, set title_found=false, "
+    "leave name empty and give suggested_title: a short, plain, descriptive name built from the ingredients and method "
+    "(e.g. 'Garlic Butter Chicken Thighs'); never present it as the original title. Otherwise title_found=true and "
+    "suggested_title empty. questions: only for real gaps a cook must fill, never invented: an ingredient with no amount "
+    "where one is clearly needed (kind amount, ingredient = its 0-based index, choices = 2-4 common amounts), text cut off "
+    "at a page edge or a missing part (kind cutoff, page = the page number, choices empty), a word you can't read (kind "
+    "unreadable; write it as [?] in that ingredient or step and give 1-3 best guesses as choices; ingredient/step = its "
+    "index). Use -1 for ingredient/step and 0 for page when they don't apply. With questions, still return everything "
+    "you can read and set complete=true unless nothing usable is there.")
+
+
 def _category_prompt():
     return ("categories: pick 1-2 that fit from exactly this list (copy the names exactly): "
             + "; ".join(get_settings()["categories"]) + ".")
@@ -1975,8 +2002,9 @@ def ing_line_from(x):
     return line + (f", {note}" if note else "")
 
 
-def ai_recipe(text, images=None, feature="recipe import", detail=""):
-    """Turn free text and/or images into a recipe (Mealie-shaped dict) with OpenAI."""
+def ai_recipe(text, images=None, feature="recipe import", detail="", draft=False):
+    """Turn free text and/or images into a recipe (Mealie-shaped dict) with OpenAI. draft=True (the scan queue) also
+    returns the gaps as questions and a suggested name instead of refusing an incomplete page: (recipe, meta)."""
     if not cfg("openai_key"):
         raise ApiError(400, "This needs AI. Add your OpenAI key in Settings → AI recipe import.")
     content = [{"type": "text", "text": (
@@ -1984,7 +2012,7 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
         "quantity_text (the amount with its unit exactly as written, e.g. '1 1/2 cups', 'pinch', 'to taste', or empty), name (the clean food name, "
         "no amount, no 'of', e.g. 'heavy cream'), note (prep such as 'divided', 'minced', 'softened', or empty); put section headings in 'section' (empty if none). Steps are the instructions "
         "in order, one per item. source_url: the recipe's web address if one is visible (e.g. in a page header or footer), else empty. Use 0 for unknown numbers. If there is no recipe, set found=false. Never invent content. Set complete=false when part of the recipe is clearly missing: no ingredient list, no instructions, text cut off mid-list or mid-step (e.g. a second page or screenshot wasn't included), or steps that use ingredients the list doesn't include; then explain what's missing in 'missing' (one short sentence). Missing amounts in a spoken video recipe do not count as incomplete. " + _category_prompt())
-        + (f"\n\n{text[:30000]}" if text else "")}]
+        + (DRAFT_PROMPT if draft else "") + (f"\n\n{text[:30000]}" if text else "")}]
     for im in images or []:
         data = im.get("data") or ""
         if data.startswith("data:application/pdf"):
@@ -1994,7 +2022,8 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
             data = "data:image/jpeg;base64," + data.split(",", 1)[-1]
         content.append({"type": "image_url", "image_url": {"url": data, "detail": "high"}})
     try:
-        out = openai_chat([{"role": "user", "content": content}], "recipe", AI_RECIPE_SCHEMA, feature, detail)
+        out = openai_chat([{"role": "user", "content": content}], "recipe", AI_DRAFT_SCHEMA if draft else AI_RECIPE_SCHEMA,
+                          feature, detail)
     except AIUnreadable:
         content[0] = {"type": "text", "text": (
             "Extract the single recipe from the material below and reply in EXACTLY this plain-text format, nothing else:\n"
@@ -2004,6 +2033,20 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
             "Copy amounts exactly and never invent content. If there is no recipe, reply only: NO RECIPE. If part of the recipe is clearly missing (no ingredients, no steps, or cut off), reply only: INCOMPLETE: <what's missing>")
             + (f"\n\n{text[:30000]}" if text else "")}
         out = parse_recipe_text(openai_text([{"role": "user", "content": content}], feature + " (text)", detail))
+    meta = None
+    if draft:
+        qs = [q for q in out.get("questions") or [] if isinstance(q, dict) and q.get("text")][:12]
+        if (out.get("complete") is False or out.get("incomplete")) and not any(q.get("kind") == "cutoff" for q in qs):
+            qs.append({"kind": "cutoff", "text": out.get("missing") or out.get("incomplete") or "Part of the recipe seems to be missing.",
+                       "choices": [], "ingredient": -1, "step": -1, "page": 0})
+        meta = {"title_found": out.get("title_found", True) is not False and bool((out.get("name") or "").strip()),
+                "suggested_title": title_case((out.get("suggested_title") or "").strip())[:80],
+                "questions": [{"id": f"q{n + 1}", "kind": q.get("kind") if q.get("kind") in ("amount", "cutoff", "unreadable", "other") else "other",
+                               "text": str(q.get("text"))[:240], "choices": [str(x)[:60] for x in (q.get("choices") or [])][:4],
+                               "ingredient": int(q.get("ingredient", -1)) if isinstance(q.get("ingredient"), int) else -1,
+                               "step": int(q.get("step", -1)) if isinstance(q.get("step"), int) else -1,
+                               "page": int(q.get("page", 0)) if isinstance(q.get("page"), int) else 0} for n, q in enumerate(qs)]}
+        out["complete"] = True
     if out.get("complete") is False or out.get("incomplete"):
         raise ApiError(422, "This recipe looks incomplete, so it wasn't saved: " + (out.get("missing") or out.get("incomplete") or "part of it is missing")
                        + " Add the missing part (another screenshot or the rest of the text) and try again.")
@@ -2017,7 +2060,7 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
         g["title"], last = (g["title"] if g["title"] != last else None), g["title"] or last
     mins = lambda v: int(v) * 60 if v else None  # noqa: E731
     src = (out.get("source_url") or "").strip()
-    return {"name": out["name"] or "Untitled recipe", "description": out.get("description") or "",
+    recipe = {"name": (out["name"] or "") if draft else (out["name"] or "Untitled recipe"), "description": out.get("description") or "",
             "orgURL": src if re.match(r"^https?://", src) else "",
             "recipeServings": float(out.get("servings") or 0), "prepTimeSeconds": mins(out.get("prep_minutes")),
             "performTimeSeconds": mins(out.get("cook_minutes")),
@@ -2026,6 +2069,7 @@ def ai_recipe(text, images=None, feature="recipe import", detail=""):
             "recipeInstructions": [{"id": str(uuid.uuid4()), "title": "", "text": s, "ingredientReferences": []} for s in out["steps"] if s.strip()],
             "tags": [{"name": t} for t in (out.get("tags") or [])[:8]],
             "recipeCategory": _pick_categories(out.get("categories"))}
+    return (recipe, meta) if draft else recipe
 
 
 POLISH_SCHEMA = {
@@ -2122,8 +2166,90 @@ def polish_recipe(data, extra=""):
     return data
 
 
-def _save_new_recipe(data, image_url=None):
+class DuplicateFound(ApiError):
+    """A new import looks like a recipe we already have: it waits (as an import job) for Keep both / Replace / Cancel."""
+    def __init__(self, job_id, data, matches):
+        super().__init__(409, f"Looks like you already have “{matches[0]['name']}”.")
+        self.extra = {"duplicate": True, "job": job_id, "matches": matches,
+                      "new": {"name": data.get("name") or "", "url": data.get("orgURL") or "",
+                              "ingredients": len(data.get("recipeIngredient") or [])}}
+
+
+def recipe_index():
+    """Every saved recipe as {id, slug, name, ingredients (lines), url, has_image}, for duplicate checks."""
+    out = []
+    with db() as c:
+        for r in c.execute("SELECT id, slug, data FROM recipes"):
+            try:
+                d = json.loads(r["data"])
+            except ValueError:
+                continue
+            out.append({"id": r["id"], "slug": r["slug"], "name": d.get("name") or "", "url": d.get("orgURL") or "",
+                        "has_image": bool(d.get("image")),
+                        "ingredients": [_ing_line(g) for g in d.get("recipeIngredient") or [] if _ing_line(g)]})
+    return out
+
+
+def find_dupes(data, exclude=()):
+    new = {"name": data.get("name") or "", "url": data.get("orgURL") or "",
+           "ingredients": [_ing_line(g) for g in data.get("recipeIngredient") or [] if _ing_line(g)]}
+    return n_dupes.find(new, [r for r in recipe_index() if r["id"] not in exclude])
+
+
+def _replace_recipe(slug, data, image_url=None):
+    """Replace: new content into the existing recipe (same id and slug, so plans, diary, ratings and favourites stay);
+    the old text goes to extras.versions so it can be restored."""
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "The recipe to replace is gone.")
+        extras = dict(rec.get("extras") or {})
+        old = _version_of(rec)
+        old["label"] = "Before replacing with an import"
+        extras["versions"] = (list(extras.get("versions") or []) + [old])[-20:]
+        extras.pop("eta", None)
+        for k, v in (data.get("extras") or {}).items():
+            if k not in ("versions",):
+                extras[k] = v
+        new = dict(rec)
+        for k in ("description", "recipeIngredient", "recipeInstructions", "recipeServings", "prepTimeSeconds", "performTimeSeconds",
+                  "totalTimeSeconds", "orgURL", "tags", "recipeCategory"):
+            if k in data:
+                new[k] = data[k]
+        new["extras"] = extras
+        new = _annotate_foods(c, new)
+        slug = n_recipes.update(c, rec["id"], new)
+        invalidate_guided(c, rec["id"], slug)
+        has_image = bool(rec.get("image"))
+    if image_url and not has_image:
+        try:
+            blob, ctype = _fetch_image(image_url)
+            with db() as c:
+                n_recipes.save_image(IMG_DIR, rec["id"], blob, _ext(ctype), c=c)
+        except Exception as e:
+            log("recipe image skipped:", e)
+    _recipe_cache["at"] = 0
+    return slug
+
+
+def _save_new_recipe(data, image_url=None, dup="check", replace=None):
+    """Save an imported recipe. dup: "check" (pause with DuplicateFound when it looks like one we have), "keep" (save as
+    another recipe, adding " (2)" only to an identical title) or "skip"; replace: slug to overwrite instead."""
+    if NATIVE and dup == "check" and not replace:
+        matches = find_dupes(dict(data, name=title_case(data.get("name") or "")))
+        if matches:
+            raise DuplicateFound(import_job_create("direct", "review", draft=data, image_url=image_url,
+                                                   meta={"dups": matches}), data, matches)
     data = dict(data, name=title_case(data.get("name") or "") or "Untitled Recipe")
+    if dup == "keep" and NATIVE:
+        data["name"] = n_dupes.keep_both_name(data["name"], [r["name"] for r in recipe_index()])
+    if replace:
+        if _polish_on():
+            try:
+                data = polish_recipe(data)
+            except Exception as e:
+                log("recipe polish skipped:", getattr(e, "message", None) or e)
+        return _replace_recipe(replace, data, image_url)
     if _polish_on():
         try:
             data = polish_recipe(data)
@@ -2143,6 +2269,306 @@ def _save_new_recipe(data, image_url=None):
             log("recipe image skipped:", e)
     _recipe_cache["at"] = 0
     return slug
+
+
+# ============================================================ import queue (scan several recipes back to back)
+# A job: pages (photos on disk) → AI draft → a quick look if anything needs the cook (suggested name, questions,
+# possible duplicate) → saved. Jobs live in the database, so the queue survives a reload or a restart.
+JOB_LABEL = {"waiting": "Waiting", "reading": "Reading", "review": "Needs a quick look", "done": "Done", "failed": "Failed",
+             "cancelled": "Cancelled"}
+MAX_PAGES = 8
+_import_wake = threading.Event()
+
+
+def _job_dir(job_id):
+    return os.path.join(DATA_DIR, "import_pages", str(int(job_id)))
+
+
+def _job_page_path(job_id, n):
+    return os.path.join(_job_dir(job_id), f"{int(n)}.jpg")
+
+
+def import_job_create(kind, status, draft=None, image_url=None, meta=None, user_id=None, pages=0):
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as c:
+        return c.execute("INSERT INTO import_jobs(kind, status, user_id, pages, draft, image_url, meta, created_at, updated_at) "
+                         "VALUES (?,?,?,?,?,?,?,?,?)", (kind, status, user_id, pages, json.dumps(draft) if draft is not None else None,
+                                                        image_url, json.dumps(meta or {}), now, now)).lastrowid
+
+
+def _job_row(job_id):
+    with db() as c:
+        r = c.execute("SELECT * FROM import_jobs WHERE id=?", (int(job_id),)).fetchone()
+    if not r:
+        raise ApiError(404, "That import is gone.")
+    return r
+
+
+def _job_save(job_id, **f):
+    f["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    for k in ("draft", "meta"):
+        if k in f and not isinstance(f[k], (str, type(None))):
+            f[k] = json.dumps(f[k])
+    with db() as c:
+        c.execute(f"UPDATE import_jobs SET {', '.join(f'{k}=?' for k in f)} WHERE id=?", (*f.values(), int(job_id)))
+
+
+def _job_meta(r):
+    try:
+        m = json.loads(r["meta"] or "{}")
+    except ValueError:
+        m = {}
+    return m if isinstance(m, dict) else {}
+
+
+def _job_open_items(r, m):
+    """What still needs the cook: the name, unanswered questions, a duplicate choice."""
+    todo = []
+    if m.get("suggested_title") and not m.get("name_ok"):
+        todo.append("name")
+    answers = m.get("answers") or {}
+    todo += [q["id"] for q in m.get("questions") or [] if q["id"] not in answers]
+    if m.get("dups") and not m.get("dup_choice"):
+        todo.append("duplicate")
+    return todo
+
+
+def import_job_view(r):
+    m = _job_meta(r)
+    draft = json.loads(r["draft"]) if r["draft"] else {}
+    status = r["status"]
+    label = "Possible duplicate" if status == "review" and m.get("dups") and not m.get("dup_choice") and not m.get("questions") \
+        and not (m.get("suggested_title") and not m.get("name_ok")) else JOB_LABEL.get(status, status)
+    return {"id": r["id"], "kind": r["kind"], "status": status, "label": label, "pages": r["pages"],
+            "page_urls": [f"/api/import/queue/{r['id']}/page/{n}" for n in range(1, r["pages"] + 1)],
+            "name": draft.get("name") or m.get("suggested_title") or "", "suggested": bool(m.get("suggested_title")) and not draft.get("name"),
+            "suggested_title": m.get("suggested_title") or "", "name_ok": bool(m.get("name_ok")),
+            "questions": [{**q, "answered": q["id"] in (m.get("answers") or {})} for q in m.get("questions") or []],
+            "dups": m.get("dups") or [], "dup_choice": m.get("dup_choice"),
+            "ingredients": [_ing_line(g) for g in draft.get("recipeIngredient") or [] if _ing_line(g)][:40],
+            "steps": [(x.get("text") or "") for x in draft.get("recipeInstructions") or []][:30],
+            "url": draft.get("orgURL") or "", "todo": _job_open_items(r, m) if status == "review" else [],
+            "error": r["error"], "slug": r["slug"], "created_at": r["created_at"], "updated_at": r["updated_at"]}
+
+
+def import_queue_list():
+    cutoff = (datetime.now() - timedelta(days=1)).isoformat(timespec="seconds")
+    with db() as c:
+        rows = c.execute("SELECT * FROM import_jobs WHERE dismissed=0 AND status!='cancelled' AND (status!='done' OR updated_at>=?) "
+                         "ORDER BY id DESC LIMIT 60", (cutoff,)).fetchall()
+    jobs = [import_job_view(r) for r in rows]
+    counts = {k: sum(1 for j in jobs if j["status"] == k) for k in ("waiting", "reading", "review", "failed", "done")}
+    return {"jobs": jobs, "counts": counts}
+
+
+def import_queue_add(b, user_id=None):
+    """POST /api/import/queue {pages: [dataURL…]}: one recipe, its pages in order. Returns the job; reading happens later."""
+    require_native()
+    if not cfg("openai_key"):
+        raise ApiError(400, "Scanning recipes needs AI. Add your OpenAI key in Settings → AI recipe import.")
+    pages = b.get("pages")
+    if not isinstance(pages, list) or not 1 <= len(pages) <= MAX_PAGES:
+        raise ApiError(400, f"Send 1 to {MAX_PAGES} pages.")
+    blobs = []
+    for p in pages:
+        if not isinstance(p, str) or not re.match(r"data:image/(jpeg|png|webp);base64,", p[:40]):
+            raise ApiError(400, "Pages must be photos.")
+        try:
+            blob = base64.b64decode(p.split(",", 1)[1], validate=True)
+        except (ValueError, IndexError):
+            raise ApiError(400, "A page couldn't be read.")
+        if not n_recipes.sniff_image(blob):
+            raise ApiError(400, "A page isn't a photo.")
+        blobs.append(blob)
+    if sum(len(x) for x in blobs) > 25_000_000:
+        raise ApiError(413, "Those pages are too large together (25 MB max).")
+    jid = import_job_create("scan", "waiting", user_id=user_id, pages=len(blobs))
+    os.makedirs(_job_dir(jid), exist_ok=True)
+    for n, blob in enumerate(blobs, 1):
+        with open(_job_page_path(jid, n), "wb") as f:
+            f.write(blob)
+    _import_wake.set()
+    return import_job_view(_job_row(jid))
+
+
+def _job_pages_data(jid, n):
+    out = []
+    for k in range(1, n + 1):
+        with open(_job_page_path(jid, k), "rb") as f:
+            out.append({"data": "data:image/jpeg;base64," + base64.b64encode(f.read()).decode(), "name": f"page{k}.jpg"})
+    return out
+
+
+def import_job_process(jid):
+    r = _job_row(jid)
+    if r["status"] != "waiting":
+        return
+    _job_save(jid, status="reading", error=None)
+    try:
+        data, meta = ai_recipe("", _job_pages_data(jid, r["pages"]), "scan import", f"{r['pages']} page(s)", draft=True)
+    except ApiError as e:
+        _job_save(jid, status="failed", error=e.message)
+        return
+    except Exception as e:   # never leave a job stuck in "reading"
+        log("scan import failed:", e)
+        _job_save(jid, status="failed", error="Something went wrong reading these pages. Try again.")
+        return
+    m = {"questions": meta["questions"], "answers": {}}
+    if not meta["title_found"] or not (data.get("name") or "").strip():
+        data["name"] = ""
+        m["suggested_title"] = meta["suggested_title"] or "Untitled Recipe"
+    m["dups"] = find_dupes(dict(data, name=title_case(data.get("name") or m.get("suggested_title") or "")))
+    _job_save(jid, draft=data, meta=m, status="review")
+    import_job_finish(jid)
+
+
+def _apply_answers(data, m):
+    """Fold the cook's answers into the draft: amounts, words that couldn't be read, text that was cut off."""
+    data = json.loads(json.dumps(data))
+    ings, steps = data.get("recipeIngredient") or [], data.get("recipeInstructions") or []
+    for q in m.get("questions") or []:
+        a = (m.get("answers") or {}).get(q["id"])
+        if not isinstance(a, str) or a == "" or a == "skip":
+            continue
+        a = " ".join(a.split())[:200]
+        if q["kind"] == "amount" and 0 <= q["ingredient"] < len(ings):
+            g = ings[q["ingredient"]]
+            line = f"{a} {_ing_line(g)}".strip()
+            g.update(note=line, display=line, originalText=line, quantity=0, unit=None, food=None)
+        elif q["kind"] == "unreadable":
+            if 0 <= q["ingredient"] < len(ings):
+                g = ings[q["ingredient"]]
+                line = _ing_line(g).replace("[?]", a, 1) if "[?]" in _ing_line(g) else _ing_line(g)
+                g.update(note=line, display=line, originalText=line)
+            elif 0 <= q["step"] < len(steps):
+                steps[q["step"]]["text"] = steps[q["step"]]["text"].replace("[?]", a, 1)
+        elif q["kind"] == "cutoff":
+            steps.append({"id": str(uuid.uuid4()), "title": "", "text": a, "ingredientReferences": []})
+    for g in ings:   # anything still unreadable stays visible to the cook, never guessed
+        for k in ("note", "display", "originalText"):
+            if isinstance(g.get(k), str):
+                g[k] = g[k].replace("[?]", "(unreadable)")
+    for st in steps:
+        st["text"] = (st.get("text") or "").replace("[?]", "(unreadable)")
+    data["recipeIngredient"], data["recipeInstructions"] = ings, steps
+    return data
+
+
+def import_job_finish(jid):
+    """Save the recipe once nothing is left to ask (recipes that need nothing save silently)."""
+    r = _job_row(jid)
+    m = _job_meta(r)
+    if r["status"] != "review" or _job_open_items(r, m):
+        return import_job_view(r)
+    if m.get("dup_choice") == "cancel":
+        _job_save(jid, status="cancelled")
+        return import_job_view(_job_row(jid))
+    data = _apply_answers(json.loads(r["draft"]), m)
+    if not data.get("name"):
+        data["name"] = m.get("suggested_title") or "Untitled Recipe"
+        data["extras"] = {**(data.get("extras") or {}), "title_source": "suggested"}
+    choice = m.get("dup_choice")
+    try:
+        slug = _save_new_recipe(data, r["image_url"], dup="keep" if choice == "keep" else "skip",
+                                replace=m.get("replace_slug") if choice == "replace" else None)
+    except ApiError as e:
+        _job_save(jid, status="failed", error=e.message)
+        return import_job_view(_job_row(jid))
+    queue_guided(slug)
+    with db() as c:   # the name it was saved under (e.g. "Lemon Bars (2)")
+        saved = n_recipes.get(c, slug)
+    if saved:
+        data["name"] = saved.get("name") or data.get("name")
+    _job_save(jid, status="done", slug=slug, draft=data)
+    return import_job_view(_job_row(jid))
+
+
+def import_job_answer(jid, b):
+    """POST /api/import/queue/{id}/answer {name?, approve_name?, answers: {qid: text|"skip"}, duplicate?: keep|replace|cancel,
+    replace_slug?}. Saves the recipe as soon as everything is answered."""
+    r = _job_row(jid)
+    if r["status"] != "review":
+        raise ApiError(409, "That recipe isn't waiting for answers.")
+    m = _job_meta(r)
+    draft = json.loads(r["draft"]) if r["draft"] else {}
+    name = " ".join(_s(b.get("name"), 120).split())
+    if name:
+        draft["name"] = name
+        m["name_ok"] = True
+        m.pop("suggested_title", None)
+    elif b.get("approve_name") and m.get("suggested_title"):
+        m["name_ok"] = True
+    answers = b.get("answers") or {}
+    if not isinstance(answers, dict):
+        raise ApiError(400, "Bad answers.")
+    known = {q["id"] for q in m.get("questions") or []}
+    for k, v in answers.items():
+        if k in known and isinstance(v, str):
+            m.setdefault("answers", {})[k] = v[:200]
+    d = b.get("duplicate")
+    if d is not None:
+        if d not in ("keep", "replace", "cancel"):
+            raise ApiError(400, "Choose Keep both, Replace or Cancel.")
+        if d == "replace":
+            target = _s(b.get("replace_slug"), 200) or ((m.get("dups") or [{}])[0].get("slug") or "")
+            if target not in {x.get("slug") for x in m.get("dups") or []}:
+                raise ApiError(400, "Pick which recipe to replace.")
+            m["replace_slug"] = target
+        m["dup_choice"] = d
+    _job_save(jid, draft=draft, meta=m)
+    return import_job_finish(jid)
+
+
+def import_job_retake(jid, n, b):
+    r = _job_row(jid)
+    if r["kind"] != "scan" or not 1 <= n <= r["pages"]:
+        raise ApiError(404, "That page isn't part of this scan.")
+    p = b.get("data")
+    if not isinstance(p, str) or not re.match(r"data:image/(jpeg|png|webp);base64,", p[:40]):
+        raise ApiError(400, "Send a photo.")
+    blob = base64.b64decode(p.split(",", 1)[1])
+    if not n_recipes.sniff_image(blob) or len(blob) > 12_000_000:
+        raise ApiError(400, "That isn't a usable photo.")
+    with open(_job_page_path(jid, n), "wb") as f:
+        f.write(blob)
+    _job_save(jid, status="waiting", draft=None, meta={}, error=None)
+    _import_wake.set()
+    return import_job_view(_job_row(jid))
+
+
+def import_job_retry(jid):
+    r = _job_row(jid)
+    if r["status"] != "failed" or r["kind"] != "scan":
+        raise ApiError(409, "Only a failed scan can be retried.")
+    _job_save(jid, status="waiting", error=None)
+    _import_wake.set()
+    return import_job_view(_job_row(jid))
+
+
+def import_job_dismiss(jid):
+    _job_row(jid)
+    _job_save(jid, dismissed=1)
+    shutil.rmtree(_job_dir(jid), ignore_errors=True)
+    return {"ok": True}
+
+
+def import_worker():
+    """Reads queued scans one at a time, in the order they were taken."""
+    with db() as c:
+        c.execute("UPDATE import_jobs SET status='waiting' WHERE status='reading'")   # interrupted by a restart
+    while True:
+        _import_wake.wait(30)
+        _import_wake.clear()
+        while True:
+            with db() as c:
+                r = c.execute("SELECT id FROM import_jobs WHERE status='waiting' AND dismissed=0 ORDER BY id LIMIT 1").fetchone()
+            if not r:
+                break
+            try:
+                import_job_process(r["id"])
+            except Exception as e:
+                log("import worker error:", e)
+                _job_save(r["id"], status="failed", error="Something went wrong. Try again.")
 
 
 def _multipart_text(multipart, field):
@@ -4419,6 +4845,7 @@ def recipe_detail(slug):
         "missing": recipe_missing(r["id"]), "cook_entry": cook_entry_for(r["id"]),
         "eta": eta_view(r["id"], eta_base(r)),
         "original": _original(r),
+        "name_suggested": ((r.get("extras") or {}).get("title_source") == "suggested") if isinstance(r.get("extras"), dict) else False,
     }
 
 
@@ -8037,7 +8464,8 @@ def scheduler():
 
 # Request body limits: screenshots/PDFs and photo uploads are big, everything else is small JSON.
 BODY_LIMITS = [
-    (re.compile(r"/api/import/images|/api/receipt|/api/trip/apply"), 36_000_000),   # ~25 MB of files once base64-encoded
+    (re.compile(r"/api/import/images|/api/import/queue|/api/receipt|/api/trip/apply"), 36_000_000),
+    (re.compile(r"/api/import/queue/\d+/page/\d+"), 16_000_000),   # ~25 MB of files once base64-encoded
     (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload|/api/scan/photo|/api/diary/\d+/photo"), 12_000_000),   # 8 MB image
 ]
 BODY_LIMIT_DEFAULT = 1_000_000
@@ -8301,7 +8729,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return self.route(method, path, q)
         except ApiError as e:
-            return self.send(e.status, {"error": e.message})
+            return self.send(e.status, {"error": e.message, **(getattr(e, "extra", None) or {})})
         except (ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError) as e:
             log(f"bad request {method} {path}: {type(e).__name__}: {str(e)[:200]}")
             return self.send(400, {"error": "Bad request: " + (f"missing {e}" if isinstance(e, KeyError) else str(e)[:200])})
@@ -8501,6 +8929,30 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/import/text":
             b = self.body()
             return self.send(200, import_text(_s(b.get("text"), 200_000), _s(b.get("title"), 300)))
+        if path == "/api/import/queue":
+            if m == "POST":
+                return self.send(200, import_queue_add(self.body(), (self.user or {}).get("id")))
+            return self.send(200, import_queue_list())
+        mm = re.fullmatch(r"/api/import/queue/(\d{1,12})(?:/(answer|retry|page/(\d{1,2})))?", path)
+        if mm:
+            jid, act = int(mm.group(1)), mm.group(2)
+            if m == "GET" and act and act.startswith("page/"):
+                n = int(mm.group(3))
+                r = _job_row(jid)
+                if not 1 <= n <= r["pages"] or not os.path.exists(_job_page_path(jid, n)):
+                    raise ApiError(404, "Page not found")
+                with open(_job_page_path(jid, n), "rb") as f:
+                    return self.send(200, f.read(), "image/jpeg", {"Cache-Control": "private, max-age=3600"})
+            if m == "POST" and act and act.startswith("page/"):
+                return self.send(200, import_job_retake(jid, int(mm.group(3)), self.body()))
+            if m == "POST" and act == "answer":
+                return self.send(200, import_job_answer(jid, self.body()))
+            if m == "POST" and act == "retry":
+                return self.send(200, import_job_retry(jid))
+            if m == "GET" and not act:
+                return self.send(200, import_job_view(_job_row(jid)))
+            if m == "DELETE" and not act:
+                return self.send(200, import_job_dismiss(jid))
         if m == "POST" and path == "/api/import/images":
             b = self.body()
             return self.send(200, import_images(b.get("images") or [], b.get("text")))
@@ -8977,6 +9429,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 out["list_count"] = 0
             out["recipe_count"] = len(recipe_pool())
+            if NATIVE:
+                with db() as c:
+                    out["review_count"] = c.execute("SELECT COUNT(*) FROM import_jobs WHERE status='review' AND dismissed=0").fetchone()[0]
         except ApiError as e:
             out.update(mealie_ok=False, error=e.message, week=[], lists=[], list_count=0, recipe_count=0)
         return out
@@ -9228,7 +9683,7 @@ def look_index(data, cookie_header):
     return data
 
 
-VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js", "accounts.js")
+VERSIONED_ASSETS = ("app.css", "app.js", "recipes.js", "setup.js", "accounts.js", "scan.js")
 
 
 def _int_or_none(v):
@@ -9302,6 +9757,8 @@ def main():
         threading.Thread(target=first_sync, daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=guided_warmer, daemon=True, name="tp-guided-warm").start()
+    if NATIVE:
+        threading.Thread(target=import_worker, daemon=True, name="tp-import").start()
     if PUBLIC_MODE and not cfg("app_password_hash"):
         log(f"PUBLIC MODE · one-time setup code: {SETUP_CODE}  (enter it on the sign-in screen, then set a household password)")
     log(f"TablePlan {APP_VERSION} listening on :{LISTEN_PORT} · {'public' if PUBLIC_MODE else 'home network'} mode"

@@ -1,5 +1,13 @@
 [
  {
+  "id": "scan-recipes",
+  "date": "2026-11-15",
+  "icon": "camera",
+  "color": "orange",
+  "title": "Scan recipes back to back",
+  "text": "Point your camera at a cookbook page: it snaps when the page is sharp and steady. Add more pages, tap Done and start the next recipe while TablePlan reads the last one. Anything unclear (a missing title, an amount, a cut-off step, a recipe you already have) waits for a quick look."
+ },
+ {
   "id": "pick-your-look",
   "date": "2026-11-14",
   "icon": "sparkle",

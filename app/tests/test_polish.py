@@ -56,7 +56,7 @@ class Polish(unittest.TestCase):
 
     def save(self, reply, name="Pancakes"):
         with mock.patch.object(S, "openai_chat", return_value=reply) as oc:
-            slug = S._save_new_recipe(imported(name))
+            slug = S._save_new_recipe(imported(name), dup="skip")
         with S.db() as c:
             return S.n_recipes.get(c, slug), oc
 
@@ -92,7 +92,7 @@ class Polish(unittest.TestCase):
         self.assertEqual(rec["description"], "pancakes")
         S.save_settings({"polish_imports": True})
         with mock.patch.object(S, "openai_chat", side_effect=S.ApiError(504, "timeout")):
-            slug = S._save_new_recipe(imported("Pancakes 5"))
+            slug = S._save_new_recipe(imported("Pancakes 5"), dup="skip")
         with S.db() as c:
             self.assertEqual(S.n_recipes.get(c, slug)["description"], "pancakes")
         with self.assertRaises(S.ApiError):
@@ -136,7 +136,7 @@ if __name__ == "__main__":
 class TitleCaseOnSave(unittest.TestCase):
     def test_import_edit_and_migration(self):
         S.save_settings({"polish_imports": False})
-        slug = S._save_new_recipe(dict(imported("french toast with berries")))
+        slug = S._save_new_recipe(dict(imported("french toast with berries")), dup="skip")
         self.assertEqual(S.recipe_detail(slug)["name"], "French Toast with Berries")
         S.recipe_update(slug, {"name": "grandma's slow-cooker chili"})
         with S.db() as c:
@@ -203,7 +203,7 @@ class Categories(unittest.TestCase):
         S.save_settings({"polish_imports": True})
         reply = dict(GOOD, categories=["Breakfast", "Brunch", "Dessert", "Snack"])
         with mock.patch.object(S, "openai_chat", return_value=reply) as oc:
-            slug = S._save_new_recipe(imported("Cat Pancakes"))
+            slug = S._save_new_recipe(imported("Cat Pancakes"), dup="skip")
         self.assertIn("Main dish; Side dish", oc.call_args.args[0][0]["content"])
         self.assertEqual(self.cats(slug), ["Breakfast", "Dessert"])
 
@@ -213,7 +213,7 @@ class DiaryAndAdjust(unittest.TestCase):
         S.save_settings({"polish_imports": False})
         with S.db() as c:
             c.execute("DELETE FROM diary")
-        self.slug = S._save_new_recipe(dict(imported(f"Diary Pancakes {id(self)}"), recipeServings=2))
+        self.slug = S._save_new_recipe(dict(imported(f"Diary Pancakes {id(self)}"), recipeServings=2), dup="skip")
         S._recipe_cache["at"] = 0
 
     def test_cooked_creates_entry_rating_average_and_undo(self):
