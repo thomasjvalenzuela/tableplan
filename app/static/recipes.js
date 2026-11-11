@@ -370,7 +370,7 @@ async function renderRecipe(slug) {
     <div class="rd-band"><button class="round-btn back" id="rd-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="rd-menu" aria-label="More" aria-haspopup="menu">${ic("more")}</button></div>
     <div class="rd-plate-row">
       <button class="round-btn side" id="rd-share2" aria-label="Share">${ic("share")}</button>
-      <button class="rd-plate ${img ? "" : "ph"}" id="rd-img" ${img ? bgStyle(img) : ""} aria-label="Change photo">${img ? "" : `<span>${esc(rec.ingredients?.[0]?.emoji || "🍽️")}</span>`}</button>
+      <button class="rd-plate ${img ? "" : "ph"}" id="rd-img" ${img ? bgStyle(img) : ""} aria-label="Change photo">${img ? "" : `<span>${esc(rec.ingredients?.[0]?.emoji || "🍽️")}</span>`}${img && rec.photo?.ai ? `<span class="ai-tag">AI image</span>` : ""}</button>
       <button class="round-btn side fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite" aria-pressed="${!!rec.favorite}">${rec.favorite ? "♥" : "♡"}</button>
     </div>
     <div class="rd-head">
@@ -415,7 +415,7 @@ async function renderRecipe(slug) {
     const on = !R.rec.favorite, btn = e.currentTarget;
     try { await api("POST", `/api/recipe/${encodeURIComponent(slug)}/favorite`, { favorite: on }); R.rec.favorite = on; btn.classList.toggle("on", on); btn.textContent = on ? "♥" : "♡"; } catch (x) { fail(x); }
   };
-  $("#rd-img").onclick = () => openImagePicker({ kind: "recipe", slug, name: rec.name, after: () => renderRecipe(slug) });
+  $("#rd-img").onclick = () => (c_native() ? openRecipePhoto(slug, () => renderRecipe(slug)) : openImagePicker({ kind: "recipe", slug, name: rec.name, after: () => renderRecipe(slug) }));
   $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); clearTimeout(R.costT); R.costT = setTimeout(drawRecipeCost, 350); }));
   drawRecipeCost();
   $$("#rd-style button").forEach((b) => (b.onclick = () => { R.style = b.dataset.v; drawContent(); }));
@@ -1995,4 +1995,128 @@ async function drawPrices() {
     try { await api("POST", "/api/prices", { food: $("#pf-food").value.trim(), price: $("#pf-price").value.trim(), size: $("#pf-size").value.trim() }); toast("Price saved"); L.costs = null; drawPrices(); } catch (x) { fail(x); }
   };
   $$("[data-pf]", box).forEach((x) => (x.onclick = () => { const f = p.foods[+x.dataset.pf]; $("#pf-food").value = f.food; $("#pf-size").value = f.best.qty ? `${fmtQty(f.best.qty)} ${f.best.unit || ""}`.trim() : ""; $("#pf-price").value = ""; $("#pf-price").focus(); }));
+}
+
+// ------------------------------------------------------------------ recipe photos: pick, crop, AI (native backend)
+const CROP_RATIOS = [["4:3", 4 / 3], ["1:1", 1], ["16:9", 16 / 9]];
+function openRecipePhoto(slug, after) {
+  const rec = R.rec && R.rec.slug === slug ? R.rec : null, ph = rec?.photo || {};
+  const ai = !!state.cfg?.ai_key, img = rec?.has_image ? recipeImg(rec, "full") : null;
+  openSheet("Recipe photo", `
+    <div class="ph-cur ${img ? "" : "ph"}">${img ? `<img src="${esc(img)}" alt="Current photo">` : "🍽️"}${ph.ai ? `<span class="ai-tag">AI image</span>` : ""}</div>
+    ${ph.credit ? `<p class="hint ph-credit">Photo: ${esc(ph.credit)}</p>` : ""}
+    <div class="ph-acts">
+      <button class="btn sec" id="ph-find">${ic("search")} Choose a photo</button>
+      <label class="btn sec">${ic("camera")} Upload<input type="file" accept="image/*" id="ph-file" hidden></label>
+      ${ai ? `<button class="btn sec" id="ph-ai">${ic("sparkle")} Create with AI</button>${img && !ph.ai ? `<button class="btn sec" id="ph-enh">${ic("sparkle")} Enhance my photo</button>` : ""}` : ""}
+      ${ph.ai && ph.kept ? `<button class="btn sec" id="ph-back">${ic("refresh")} Use my original photo</button>` : ""}
+    </div>
+    <div id="ph-more"></div>
+    <p class="hint">Photos you choose are cropped and saved in three sizes; location and camera details are removed.${ai ? " AI photos are a suggestion: your own photo is kept." : ""}</p>`, {
+    onMount() {
+      const done = () => { closeSheet(); toast("Photo updated"); after && after(); };
+      $("#ph-file").onchange = (e) => { const f = e.target.files[0]; if (f) openCropper({ src: URL.createObjectURL(f), credit: "Your photo", slug }, done); };
+      dropZone($(".ph-cur"), (files) => files[0] && openCropper({ src: URL.createObjectURL(files[0]), credit: "Your photo", slug }, done));
+      const find = async (more) => {
+        const box = $("#ph-more"); box.innerHTML = loading();
+        let r;
+        try { r = await api("GET", `/api/recipe/${encodeURIComponent(slug)}/image/candidates${more ? "?more=1" : ""}`); } catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+        if (!r.candidates.length) { box.innerHTML = `<p class="muted small">No photos found. Upload your own${ai ? " or create one with AI" : ""}.</p>`; return; }
+        box.innerHTML = `<div class="ph-grid">${r.candidates.map((x) => `<button class="ph-cand" data-i="${esc(x.i)}"><img src="${esc(x.src)}" alt="" loading="lazy"><span>${esc(x.source)}</span></button>`).join("")}</div>
+          <div class="ph-grid-foot"><span class="muted small">Tap one to crop it.</span><button class="link-btn" id="ph-again">Show others</button></div>`;
+        $$(".ph-cand", box).forEach((b) => (b.onclick = () => { const x = r.candidates[+b.dataset.i]; openCropper({ src: x.src, credit: x.credit, slug }, done); }));
+        $$(".ph-cand img", box).forEach((im) => (im.onerror = () => im.closest(".ph-cand").remove()));
+        $("#ph-again").onclick = () => find(true);
+      };
+      $("#ph-find").onclick = () => find(false);
+      const gen = async (mode) => {
+        const box = $("#ph-more"); box.innerHTML = `<div class="muted small">${loading()} ${mode === "enhance" ? "Enhancing your photo" : "Creating a photo"}… about 30 seconds.</div>`;
+        let r;
+        try { r = await api("POST", `/api/recipe/${encodeURIComponent(slug)}/image/ai`, { mode }); } catch (e) { box.innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+        box.innerHTML = `<div class="ph-compare"><figure><div class="ph-side ${img ? "" : "ph"}">${img ? `<img src="${esc(img)}" alt="Your photo">` : "🍽️"}</div><figcaption>${img ? "Yours" : "No photo yet"}</figcaption></figure>
+            <figure><div class="ph-side"><img src="${esc(r.src)}" alt="AI photo"><span class="ai-tag">AI image</span></div><figcaption>AI ${mode === "enhance" ? "enhanced" : "created"}</figcaption></figure></div>
+          <div class="btn-row"><button class="btn sec" id="ph-keep">Keep mine</button><button class="btn" id="ph-use">Use AI image</button></div>`;
+        box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        $("#ph-keep").onclick = () => { box.innerHTML = ""; };
+        $("#ph-use").onclick = () => openCropper({ src: r.src, credit: "AI image", ai: true, keep: !!img, slug }, done);
+      };
+      $("#ph-ai") && ($("#ph-ai").onclick = () => gen("new"));
+      $("#ph-enh") && ($("#ph-enh").onclick = () => gen("enhance"));
+      $("#ph-back") && ($("#ph-back").onclick = async () => { try { await api("POST", `/api/recipe/${encodeURIComponent(slug)}/image/restore`, {}); done(); } catch (e) { fail(e); } });
+    },
+  });
+}
+// The cropper: pick 4:3, 1:1 or 16:9, drag to frame, zoom; saves a 2048 px master, an 800 px card and a 320 px thumb.
+function openCropper({ src, credit, ai, keep, slug }, onSaved) {
+  const C = { ratio: 4 / 3, zoom: 1, x: 0, y: 0, img: null };
+  openSheet("Crop photo", `<div class="seg" id="cr-ratio">${CROP_RATIOS.map(([l, v], i) => `<button data-r="${i}" class="${v === C.ratio ? "on" : ""}">${esc(l)}</button>`).join("")}</div>
+    <div class="cr-frame r0" id="cr-frame"><img id="cr-img" alt="" draggable="false"><div class="cr-grid" aria-hidden="true"></div></div>
+    <label class="cr-zoom">${ic("search")}<input type="range" id="cr-z" min="1" max="4" step="0.01" value="1" aria-label="Zoom"></label>
+    <p class="hint">Drag to move${credit ? ` · ${esc(credit)}` : ""}</p>
+    <button class="btn" id="cr-save" disabled>${ic("check")} Save photo</button>`, {
+    onMount() {
+      const frame = $("#cr-frame"), im = $("#cr-img");
+      const fit = () => {
+        if (!C.img) return;
+        const fw = frame.clientWidth, fh = frame.clientHeight, s0 = Math.max(fw / C.img.width, fh / C.img.height), s = s0 * C.zoom;
+        const w = C.img.width * s, h = C.img.height * s;
+        C.x = Math.min(0, Math.max(fw - w, C.x)); C.y = Math.min(0, Math.max(fh - h, C.y));
+        C.s = s;
+        im.style.width = `${C.img.width}px`; im.style.transform = `translate(${C.x}px, ${C.y}px) scale(${s})`;
+      };
+      const center = () => { const fw = frame.clientWidth, fh = frame.clientHeight, s = Math.max(fw / C.img.width, fh / C.img.height) * C.zoom; C.x = (fw - C.img.width * s) / 2; C.y = (fh - C.img.height * s) / 2; fit(); };
+      const pic = new Image();
+      pic.onload = () => { C.img = pic; im.src = src; center(); $("#cr-save").disabled = false; };
+      pic.onerror = () => { fail(new Error("That photo couldn't be opened")); };
+      pic.src = src;
+      $$("#cr-ratio [data-r]").forEach((b) => (b.onclick = () => {
+        C.ratio = CROP_RATIOS[+b.dataset.r][1];
+        $$("#cr-ratio [data-r]").forEach((x) => x.classList.toggle("on", x === b));
+        frame.className = `cr-frame r${b.dataset.r}`; requestAnimationFrame(center);
+      }));
+      $("#cr-z").oninput = (e) => {
+        const fw = frame.clientWidth / 2, fh = frame.clientHeight / 2, old = C.s || 1;
+        C.zoom = +e.target.value;
+        const s = Math.max(frame.clientWidth / C.img.width, frame.clientHeight / C.img.height) * C.zoom;
+        C.x = fw - ((fw - C.x) * s) / old; C.y = fh - ((fh - C.y) * s) / old; fit();
+      };
+      let drag = null;
+      frame.onpointerdown = (e) => { drag = { x: e.clientX - C.x, y: e.clientY - C.y }; frame.setPointerCapture(e.pointerId); };
+      frame.onpointermove = (e) => { if (!drag) return; C.x = e.clientX - drag.x; C.y = e.clientY - drag.y; fit(); };
+      frame.onpointerup = frame.onpointercancel = () => { drag = null; };
+      frame.onwheel = (e) => { e.preventDefault(); const z = $("#cr-z"); z.value = Math.min(4, Math.max(1, +z.value - e.deltaY / 500)); z.oninput({ target: z }); };
+      $("#cr-save").onclick = async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.textContent = "Saving…";
+        const sx = -C.x / C.s, sy = -C.y / C.s, sw = frame.clientWidth / C.s, sh = frame.clientHeight / C.s;
+        const out = (cap) => {   // longest side `cap` (the master never upscales past the cropped area)
+          const long = cap === 2048 ? Math.max(1, Math.round(Math.min(cap, Math.max(sw, sh)))) : cap;
+          const W = C.ratio >= 1 ? long : Math.round(long * C.ratio), H = C.ratio >= 1 ? Math.round(long / C.ratio) : long;
+          const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+          const g = cv.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(C.img, sx, sy, sw, sh, 0, 0, W, H);
+          return cv.toDataURL("image/jpeg", 0.86);   // re-encoding drops EXIF (location, camera)
+        };
+        try {
+          await api("POST", `/api/recipe/${encodeURIComponent(slug)}/image/upload`, { data: out(2048), card: out(800), thumb: out(320), credit, ...(ai ? { ai: true, keep: !!keep } : {}) });
+          if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+          onSaved && onSaved();
+        } catch (x) { fail(x); b.disabled = false; b.innerHTML = `${ic("check")} Save photo`; }
+      };
+    },
+  });
+}
+function openPhotoSettings() {
+  openSheet("Recipe photos", `<p class="hint" style="margin-top:0">“Choose a photo” always looks at the recipe's own page and openly licensed photos (Openverse, Wikimedia Commons). Free API keys add Unsplash and Pexels.</p>
+    <form class="group" id="pk-form" autocomplete="off"><div class="field"><label for="pk-un">Unsplash access key</label><input id="pk-un" class="full" type="password" placeholder="Leave blank to keep"></div>
+      <div class="field"><label for="pk-px">Pexels API key</label><input id="pk-px" class="full" type="password" placeholder="Leave blank to keep"></div>
+      <div style="padding:10px 14px" class="btn-row"><button class="btn" type="submit">Save keys</button><button class="btn sec" type="button" id="pk-clear">Remove keys</button></div></form>
+    <p class="hint">Get them at unsplash.com/developers and pexels.com/api. Photos chosen from them are credited on the recipe.</p>`, {
+    onMount() {
+      $("#pk-form").onsubmit = async (e) => {
+        e.preventDefault();
+        const b = {}; if ($("#pk-un").value.trim()) b.unsplash_key = $("#pk-un").value.trim(); if ($("#pk-px").value.trim()) b.pexels_key = $("#pk-px").value.trim();
+        try { const r = await api("PUT", "/api/photos/config", b); toast(`Saved · ${[r.unsplash && "Unsplash", r.pexels && "Pexels"].filter(Boolean).join(" and ") || "no keys"}`); closeSheet(); } catch (x) { fail(x); }
+      };
+      $("#pk-clear").onclick = async () => { try { await api("PUT", "/api/photos/config", { unsplash_key: "", pexels_key: "" }); toast("Keys removed"); closeSheet(); } catch (x) { fail(x); } };
+    },
+  });
 }

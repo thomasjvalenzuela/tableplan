@@ -1,5 +1,13 @@
 [
  {
+  "id": "recipe-photos",
+  "date": "2026-11-21",
+  "icon": "camera",
+  "color": "orange",
+  "title": "Better recipe photos",
+  "text": "Tap a recipe's photo to choose from up to six: the recipe's own page first, then openly licensed photos (and Unsplash or Pexels if you add a key). Crop to 4:3, square or 16:9; location and camera details are removed. With AI you can create a photo or enhance yours, compare them side by side, and go back to your original any time. AI photos are labelled."
+ },
+ {
   "id": "kitchen-checkin",
   "date": "2026-11-20",
   "icon": "check",

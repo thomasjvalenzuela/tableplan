@@ -889,7 +889,7 @@ CFG_DEFAULTS = {
     "setup_complete": False,
 }
 SECRET_KEYS = {"mealie_token", "smtp_password", "app_password_hash", "session_secret", "telegram_token", "ntfy_token",
-               "openai_key", "openai_admin_key", "kroger_client_secret", "bls_key",
+               "openai_key", "openai_admin_key", "kroger_client_secret", "bls_key", "unsplash_key", "pexels_key",
                "telegram_link_code"}
 _cfg = {}
 _cfg_lock = threading.Lock()
@@ -1884,7 +1884,8 @@ from native import dupes as n_dupes  # noqa: E402
 from native import barcodes as n_barcodes
 from native import whatcan as n_whatcan
 from native import prices as n_prices
-from native import checkin as n_checkin  # noqa: E402
+from native import checkin as n_checkin
+from native import imgmeta as n_imgmeta  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -4911,6 +4912,7 @@ def recipe_detail(slug):
     return {
         "id": r["id"], "slug": r.get("slug"), "name": r.get("name"), "description": r.get("description") or "",
         "has_image": bool(r.get("image")), "image_v": r.get("image") or "",
+        "photo": recipe_photo_info(r) if NATIVE and r.get("id") else None,
         "servings": _num(r.get("recipeServings")) or _num(r.get("recipeYieldQuantity")) or 0,
         "yield": r.get("recipeYield") or "", "minutes": minutes,
         "prep_minutes": round(int(r.get("prepTimeSeconds") or 0) / 60) or None,
@@ -5108,6 +5110,7 @@ GUIDE_SCHEMA = {
 
 AI_PRICES = {   # USD per 1M tokens (input, output). Published OpenAI list prices, Nov 2026; edit if they change.
     "gpt-5": (1.25, 10.00), "gpt-5-mini": (0.25, 2.00), "gpt-5-nano": (0.05, 0.40),
+    "gpt-image-1": (10.00, 40.00),   # image input / image output tokens
     "gpt-4.1": (2.00, 8.00), "gpt-4.1-mini": (0.40, 1.60), "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00),
 }
 
@@ -6620,7 +6623,8 @@ def openverse_candidates(q, n=20):
     for x in res.get("results") or []:
         url = x.get("url") or x.get("thumbnail")
         if url:
-            credit = f"“{x.get('title') or 'Photo'}” by {x.get('creator') or 'unknown'} ({(x.get('license') or '').upper()} {x.get('license_version') or ''})".strip()
+            lic = " ".join(x for x in ((x.get('license') or '').upper(), str(x.get('license_version') or '')) if x)
+            credit = f"“{x.get('title') or 'Photo'}” by {x.get('creator') or 'unknown'}" + (f" ({'CC ' if lic and not lic.startswith(('CC', 'PDM')) else ''}{lic})" if lic else "")
             out.append((url, credit))
     return out
 
@@ -6745,6 +6749,335 @@ def decode_upload(data_url):
     if not kind:
         raise ApiError(400, "Upload a JPG, PNG, WebP or GIF image.")
     return blob, "image/" + ("jpeg" if kind == "jpg" else kind)
+
+
+# ============================================================ recipe photos: crop sizes, sources, AI images
+
+PHOTO_MAX = 2048          # master: longest side
+PHOTO_CARD, PHOTO_THUMB = 800, 320
+IMAGE_MODEL = "gpt-image-1"
+_cand_cache = {}          # recipe id -> (time, [candidate dicts])
+_cand_blob = {}           # (recipe id, i) -> (time, blob, ctype)
+
+
+def _recipe_dir(rid):
+    return os.path.dirname(n_recipes.image_path(IMG_DIR, rid) or os.path.join(n_recipes._image_dir(IMG_DIR, rid), "x"))
+
+
+def _recipe_extras(c, rec, **kv):
+    """Set extras on a recipe without touching anything else."""
+    ex = rec.get("extras") if isinstance(rec.get("extras"), dict) else {}
+    ex = {**ex, **kv}
+    for k in [k for k, v in ex.items() if v is None]:
+        ex.pop(k)
+    n_recipes.update(c, rec["slug"], {**rec, "extras": ex})
+
+
+def _photo_blob(data_url, label):
+    blob, ctype = decode_upload(data_url)
+    dims = n_imgmeta.size(blob)
+    if not dims:
+        raise ApiError(400, f"The {label} image couldn't be read.")
+    return n_imgmeta.strip_metadata(blob), ctype, dims
+
+
+def save_recipe_photo(slug, b):
+    """POST /api/recipe/{slug}/image/upload {data, card?, thumb?, credit?, ai?, keep?}: the cropped photo in its sizes
+    (master ≤2048 px, card 800, thumb 320, made in the browser). Metadata is stripped from every file. keep=true saves
+    the current photo first (when trying an AI image) so it can come back."""
+    require_native()
+    master, ctype, dims = _photo_blob(b.get("data"), "photo")
+    if max(dims) > PHOTO_MAX * 2:
+        raise ApiError(400, f"That photo is too big ({dims[0]}×{dims[1]}). Crop it first.")
+    sizes = {}
+    for key, cap_px in (("card", PHOTO_CARD), ("thumb", PHOTO_THUMB)):
+        if b.get(key):
+            blob, ct, d = _photo_blob(b[key], key)
+            if max(d) > cap_px * 1.5:
+                raise ApiError(400, f"The {key} image is larger than expected.")
+            sizes[key] = (blob, ct)
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        d = n_recipes._image_dir(IMG_DIR, rec["id"])
+        os.makedirs(d, exist_ok=True)
+        cur = n_recipes.image_path(IMG_DIR, rec["id"])
+        ex = rec.get("extras") if isinstance(rec.get("extras"), dict) else {}
+        if b.get("keep") and cur and not ex.get("photo_ai"):
+            for old in os.listdir(d):
+                if old.startswith("keep."):
+                    os.remove(os.path.join(d, old))
+            shutil.copyfile(cur, os.path.join(d, "keep." + cur.rsplit(".", 1)[1]))
+            kept_credit = ex.get("photo_credit") or ""
+        else:
+            kept_credit = ex.get("photo_kept_credit")
+        try:
+            token = n_recipes.save_image(IMG_DIR, rec["id"], master, _ext(ctype), c=c)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        for key in ("card", "thumb"):
+            for old in os.listdir(d):
+                if old.startswith(key + "."):
+                    os.remove(os.path.join(d, old))
+            if key in sizes:
+                with open(os.path.join(d, f"{key}.{_ext(sizes[key][1])}"), "wb") as f:
+                    f.write(sizes[key][0])
+        for old in os.listdir(d):   # an AI suggestion is used (or passed over) once a photo is saved
+            if old.startswith("ai-pending."):
+                os.remove(os.path.join(d, old))
+        if b.get("ai") is not True and not b.get("keep"):
+            for old in os.listdir(d):
+                if old.startswith("keep."):
+                    os.remove(os.path.join(d, old))
+            kept_credit = None
+        rec = n_recipes.get(c, slug)
+        _recipe_extras(c, rec, photo_credit=_s(b.get("credit"), 300).strip() or ("AI image" if b.get("ai") is True else "Your photo"),
+                       photo_ai=True if b.get("ai") is True else None, photo_kept_credit=kept_credit)
+    _recipe_cache["at"] = 0
+    return {"ok": True, "image": token}
+
+
+def recipe_photo_restore(slug):
+    """POST /api/recipe/{slug}/image/restore: back to the photo kept before an AI image."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        d = n_recipes._image_dir(IMG_DIR, rec["id"])
+        kept = next((os.path.join(d, f) for f in (os.listdir(d) if os.path.isdir(d) else []) if f.startswith("keep.")), None)
+        if not kept:
+            raise ApiError(404, "There's no earlier photo to go back to.")
+        with open(kept, "rb") as f:
+            blob = f.read()
+        n_recipes.save_image(IMG_DIR, rec["id"], blob, kept.rsplit(".", 1)[1], c=c)
+        os.remove(kept)
+        for old in os.listdir(d):
+            if old.startswith(("card.", "thumb.", "ai-pending.")):
+                os.remove(os.path.join(d, old))
+        ex = rec.get("extras") or {}
+        rec = n_recipes.get(c, slug)
+        _recipe_extras(c, rec, photo_ai=None, photo_credit=ex.get("photo_kept_credit") or "Your photo", photo_kept_credit=None)
+    _recipe_cache["at"] = 0
+    return {"ok": True}
+
+
+def recipe_photo_info(rec):
+    ex = rec.get("extras") if isinstance(rec.get("extras"), dict) else {}
+    d = n_recipes._image_dir(IMG_DIR, rec["id"]) if NATIVE else ""
+    kept = NATIVE and os.path.isdir(d) and any(f.startswith("keep.") for f in os.listdir(d))
+    return {"credit": ex.get("photo_credit") or "", "ai": bool(ex.get("photo_ai")), "kept": bool(kept)}
+
+
+def _strip_html(s):
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", str(s or ""))).split())
+
+
+def wikimedia_candidates(q, n=8):
+    res = _https_json("https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(
+        {"action": "query", "generator": "search", "gsrsearch": f"filetype:bitmap {q}", "gsrnamespace": 6, "gsrlimit": n,
+         "prop": "imageinfo", "iiprop": "url|extmetadata", "iiurlwidth": 1600, "format": "json", "origin": "*"}), timeout=15)
+    out = []
+    for p in sorted(((res.get("query") or {}).get("pages") or {}).values(), key=lambda x: x.get("index", 0)):
+        ii = (p.get("imageinfo") or [{}])[0]
+        url = ii.get("thumburl") or ii.get("url")
+        meta = ii.get("extmetadata") or {}
+        if url:
+            title = re.sub(r"^File:|\.\w+$", "", p.get("title") or "Photo")
+            artist = _strip_html((meta.get("Artist") or {}).get("value")) or "unknown"
+            lic = _strip_html((meta.get("LicenseShortName") or {}).get("value"))
+            out.append({"url": url, "credit": f"“{title}” by {artist}{f' ({lic})' if lic else ''}, Wikimedia Commons", "source": "Wikimedia Commons"})
+    return out
+
+
+def unsplash_candidates(q, n=6):
+    key = cfg("unsplash_key")
+    if not key:
+        return []
+    res = _https_json("https://api.unsplash.com/search/photos?" + urllib.parse.urlencode({"query": q, "per_page": n}),
+                      headers={"Authorization": f"Client-ID {key}", "Accept-Version": "v1"}, timeout=15)
+    return [{"url": (x.get("urls") or {}).get("regular"), "credit": f"Photo by {(x.get('user') or {}).get('name') or 'unknown'} on Unsplash",
+             "source": "Unsplash"} for x in res.get("results") or [] if (x.get("urls") or {}).get("regular")]
+
+
+def pexels_candidates(q, n=6):
+    key = cfg("pexels_key")
+    if not key:
+        return []
+    res = _https_json("https://api.pexels.com/v1/search?" + urllib.parse.urlencode({"query": q, "per_page": n}),
+                      headers={"Authorization": key}, timeout=15)
+    return [{"url": (x.get("src") or {}).get("large"), "credit": f"Photo by {x.get('photographer') or 'unknown'} on Pexels",
+             "source": "Pexels"} for x in res.get("photos") or [] if (x.get("src") or {}).get("large")]
+
+
+def recipe_photo_candidates(slug, more=False):
+    """GET /api/recipe/{slug}/image/candidates: up to 6 photos to choose from. The recipe's own page photo comes first,
+    then openly licensed photos (Openverse, Wikimedia Commons), then Unsplash and Pexels when keys are set.
+    Nothing is assigned here: the cook picks and crops."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    if not rec:
+        raise ApiError(404, "Recipe not found")
+    hit = _cand_cache.get(rec["id"])
+    if hit and time.time() - hit[0] < 1800 and not more:
+        cands = hit[1]
+    else:
+        cands = []
+        if rec.get("orgURL"):
+            try:
+                final, page = _fetch_page(rec["orgURL"])
+                img = n_scraper.page_image(page, final)
+                try:
+                    img = n_scraper.parse_html(page, final).get("image_url") or img
+                except n_scraper.NoRecipe:
+                    pass
+                if img:
+                    cands.append({"url": img, "credit": urllib.parse.urlparse(rec["orgURL"]).hostname or "Recipe page", "source": "Recipe page"})
+            except Exception as e:
+                log("recipe page photo unavailable:", e)
+        q = f"{rec.get('name')} food"
+        for fn in (unsplash_candidates, pexels_candidates, lambda x: openverse_candidates(x.replace(" food", " dish"), 10), wikimedia_candidates):
+            try:
+                got = fn(q)
+            except Exception as e:
+                log("photo source failed:", e)
+                continue
+            for g in got:
+                if isinstance(g, tuple):
+                    g = {"url": g[0], "credit": g[1], "source": "Openverse"}
+                cands.append(g)
+        seen, uniq = set(), []
+        for x in cands:
+            if x["url"] and x["url"] not in seen:
+                seen.add(x["url"])
+                uniq.append(x)
+        # round-robin by source so six picks aren't all from one place (the recipe's own page stays first)
+        first = [x for x in uniq if x["source"] == "Recipe page"]
+        by = {}
+        for x in uniq:
+            if x["source"] != "Recipe page":
+                by.setdefault(x["source"], []).append(x)
+        mixed = []
+        while any(by.values()):
+            for k in list(by):
+                if by[k]:
+                    mixed.append(by[k].pop(0))
+        start = (hit[2] if hit and more and len(hit) > 2 else 0)
+        cands = first + mixed
+        if more:
+            cands = cands[start + 6:] + cands[:start + 6]
+        _cand_cache[rec["id"]] = (time.time(), cands, start + 6 if more else 0)
+    return {"candidates": [{"i": i, "credit": x["credit"], "source": x["source"], "src": f"/api/recipe/{_q(slug)}/image/candidate/{i}"}
+                           for i, x in enumerate(cands[:6])]}
+
+
+def recipe_photo_candidate(slug, i):
+    """The candidate photo itself, fetched through TablePlan (so the browser can crop it)."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    hit = _cand_cache.get(rec["id"]) if rec else None
+    if not hit or not 0 <= i < min(6, len(hit[1])):
+        raise ApiError(404, "That photo isn't available any more.")
+    key = (rec["id"], i)
+    got = _cand_blob.get(key)
+    if got and time.time() - got[0] < 1800 and got[3] == hit[1][i]["url"]:
+        return got[1], got[2]
+    try:
+        blob, ctype = _fetch_image(hit[1][i]["url"])
+    except Exception:
+        raise ApiError(404, "That photo couldn't be loaded.")
+    if len(_cand_blob) > 60:
+        _cand_blob.clear()
+    _cand_blob[key] = (time.time(), blob, ctype, hit[1][i]["url"])
+    return blob, ctype
+
+
+def _multipart(fields, files):
+    boundary = "tp" + secrets.token_hex(12)
+    body = bytearray()
+    for k, v in fields.items():
+        body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+    for name, fname, ctype, blob in files:
+        body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{fname}\"\r\nContent-Type: {ctype}\r\n\r\n".encode()
+        body += blob + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def recipe_photo_ai(slug, b):
+    """POST /api/recipe/{slug}/image/ai {mode: new|enhance}: an AI photo to compare side by side. It's only a
+    suggestion until the cook chooses it (the current photo is kept). Respects the monthly AI budget."""
+    require_native()
+    key = cfg("openai_key")
+    if not key:
+        raise ApiError(400, "AI photos need your OpenAI key (Settings → AI recipe import).")
+    if _ai_over_budget():
+        raise ApiError(402, "This month's AI budget is used up. Raise it in Settings → AI spending.")
+    mode = "enhance" if b.get("mode") == "enhance" else "new"
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    if not rec:
+        raise ApiError(404, "Recipe not found")
+    cur = n_recipes.image_path(IMG_DIR, rec["id"])
+    model = cfg("openai_image_model") or IMAGE_MODEL
+    if mode == "enhance":
+        if not cur:
+            raise ApiError(400, "Add a photo first, then enhance it.")
+        with open(cur, "rb") as f:
+            blob = f.read()
+        prompt = ("Improve this home-cooked food photo: better light and exposure, natural colour, crisp focus, a tidier "
+                  "background. Keep exactly the same dish, plate, portion and composition. Add nothing, no text.")
+        data, ctype = _multipart({"model": model, "prompt": prompt, "size": "1536x1024", "quality": "medium", "n": "1"},
+                                 [("image", "photo." + cur.rsplit(".", 1)[1], mimetypes.guess_type(cur)[0] or "image/jpeg", blob)])
+        res = _https_json("https://api.openai.com/v1/images/edits", data=data, ctype=ctype,
+                          headers={"Authorization": f"Bearer {key}"}, timeout=240, method="POST")
+    else:
+        ings = ", ".join(x for x in (ing_food(i) for i in (rec.get("recipeIngredient") or [])[:8]) if x)
+        prompt = (f"A realistic, appetizing photo of home-cooked {rec.get('name')} ({ings}), served and ready to eat, "
+                  "natural window light, on a simple table, shot from a 45-degree angle. No text, no people, no hands.")
+        res = _https_json("https://api.openai.com/v1/images/generations", payload={"model": model, "prompt": prompt,
+                          "size": "1536x1024", "quality": "medium", "n": 1}, headers={"Authorization": f"Bearer {key}"}, timeout=240)
+    u = res.get("usage") or {}
+    log_ai("recipe photo", model, u.get("input_tokens"), u.get("output_tokens"), f"{mode}: {rec.get('name')}"[:80])
+    b64 = ((res.get("data") or [{}])[0]).get("b64_json")
+    if not b64:
+        raise ApiError(502, "The AI didn't return a photo. Try again.")
+    out = base64.b64decode(b64)
+    if not n_recipes.sniff_image(out[:64]):
+        raise ApiError(502, "The AI's photo couldn't be read.")
+    d = n_recipes._image_dir(IMG_DIR, rec["id"])
+    os.makedirs(d, exist_ok=True)
+    for old in os.listdir(d):
+        if old.startswith("ai-pending."):
+            os.remove(os.path.join(d, old))
+    kind = n_recipes.sniff_image(out[:64])
+    with open(os.path.join(d, f"ai-pending.{kind}"), "wb") as f:
+        f.write(n_imgmeta.strip_metadata(out))
+    return {"ok": True, "src": f"/api/recipe/{_q(slug)}/image/ai-pending?t={int(time.time())}", "mode": mode}
+
+
+def recipe_photo_pending(slug):
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+    d = n_recipes._image_dir(IMG_DIR, rec["id"]) if rec else None
+    f = next((os.path.join(d, x) for x in (os.listdir(d) if d and os.path.isdir(d) else []) if x.startswith("ai-pending.")), None)
+    if not f:
+        raise ApiError(404, "No AI photo waiting.")
+    with open(f, "rb") as fh:
+        return fh.read(), mimetypes.guess_type(f)[0] or "image/png"
+
+
+def photos_config(b):
+    """PUT /api/photos/config {unsplash_key?, pexels_key?}"""
+    require_native()
+    up = {k: _s(b.get(k), 200).strip() for k in ("unsplash_key", "pexels_key") if k in b}
+    if up:
+        set_cfg(**up)
+    _cand_cache.clear()
+    return {"unsplash": bool(cfg("unsplash_key")), "pexels": bool(cfg("pexels_key")), "ai": bool(cfg("openai_key"))}
 
 
 # ============================================================ meal plan → shopping list
@@ -9888,7 +10221,8 @@ def scheduler():
 BODY_LIMITS = [
     (re.compile(r"/api/import/images|/api/import/queue|/api/receipt|/api/trip/apply"), 36_000_000),
     (re.compile(r"/api/import/queue/\d+/page/\d+"), 16_000_000),   # ~25 MB of files once base64-encoded
-    (re.compile(r"/api/recipe/[^/]+/image/upload|/api/ingredient-image/upload|/api/scan/photo|/api/diary/\d+/photo|/api/pantry/\d+/details"), 12_000_000),
+    (re.compile(r"/api/recipe/[^/]+/image/upload"), 20_000_000),   # master + card + thumb
+    (re.compile(r"/api/recipe/[^/]+/image/upload-legacy|/api/ingredient-image/upload|/api/scan/photo|/api/diary/\d+/photo|/api/pantry/\d+/details"), 12_000_000),
     (re.compile(r"/api/scan/identify"), 24_000_000),   # 8 MB image
 ]
 BODY_LIMIT_DEFAULT = 1_000_000
@@ -9900,7 +10234,8 @@ EXPENSIVE = [
     (re.compile(r"/api/recipe/[^/]+/(guided|image/next|polish|adjust)"), "ai"),
     (re.compile(r"/api/plan/arrange"), "ai"),
     (re.compile(r"/api/(setup/ai|setup/openai-admin|ingredient-image/next)"), "ai"),
-    (re.compile(r"/api/scan/photo|/api/scan/identify|/api/receipt|/api/make/web|/api/prices/refresh"), "ai"),
+    (re.compile(r"/api/scan/photo|/api/scan/identify|/api/receipt|/api/make/web|/api/prices/refresh|/api/recipe/[^/]+/image/ai$"), "ai"),
+    (re.compile(r"/api/recipe/[^/]+/image/candidates"), "fetch"),
     (re.compile(r"/api/(upc/\d+|scan|send|email|rules/sync-usda|setup/email|setup/ntfy|setup/telegram.*)"), "fetch"),
     (re.compile(r"/api/backups|/export/backup\.zip"), "fetch"),
 ]
@@ -10489,6 +10824,23 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, recipe_update(urllib.parse.unquote(mm.group(1)), self.body()))
         if m == "DELETE" and mm:
             return self.send(200, recipe_delete(urllib.parse.unquote(mm.group(1))))
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/image/(candidates|candidate/\d|ai|ai-pending|restore)", path)
+        if mm:
+            slug, act = urllib.parse.unquote(mm.group(1)), mm.group(2)
+            if act == "candidates" and m == "GET":
+                return self.send(200, recipe_photo_candidates(slug, q.get("more") == "1"))
+            if act.startswith("candidate/") and m == "GET":
+                blob, ctype = recipe_photo_candidate(slug, int(act.split("/")[1]))
+                return self.send(200, blob, ctype, {"Cache-Control": "private, max-age=600"})
+            if act == "ai" and m == "POST":
+                return self.send(200, recipe_photo_ai(slug, self.body()))
+            if act == "ai-pending" and m == "GET":
+                blob, ctype = recipe_photo_pending(slug)
+                return self.send(200, blob, ctype, {"Cache-Control": "no-store"})
+            if act == "restore" and m == "POST":
+                return self.send(200, recipe_photo_restore(slug))
+        if m == "PUT" and path == "/api/photos/config":
+            return self.send(200, photos_config(self.body()))
         mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all|cooked|polish|restore-original|adjust|adjust/save|versions|versions/\d{1,3}/restore)", path)
         if mm:
             slug, act = urllib.parse.unquote(mm.group(1)), mm.group(2)
@@ -10516,7 +10868,10 @@ class Handler(BaseHTTPRequestHandler):
             if act == "image/next" and m == "POST":
                 return self.send(200, recipe_image_next(slug))
             if act == "image/upload" and m == "POST":
-                blob, ctype = decode_upload(self.body().get("data"))
+                b = self.body()
+                if NATIVE:
+                    return self.send(200, save_recipe_photo(slug, b))
+                blob, ctype = decode_upload(b.get("data"))
                 _upload_recipe_image(slug, blob, ctype)
                 return self.send(200, {"ok": True})
             if act == "to-list" and m == "POST":
@@ -11106,6 +11461,14 @@ class Handler(BaseHTTPRequestHandler):
             fp = n_recipes.image_path(IMG_DIR, recipe_id)
             if not fp:
                 return self.send(404, b"", "image/webp", {"Cache-Control": "public, max-age=600"})
+            # card (800) and thumb (320) made when the photo was cropped; ignored if the photo changed since
+            want = {"min": ("card",), "tiny": ("thumb", "card")}.get(size, ())
+            d, t0 = os.path.dirname(fp), os.path.getmtime(fp)
+            for w in want:
+                alt = next((os.path.join(d, x) for x in os.listdir(d) if x.startswith(w + ".")), None)
+                if alt and os.path.getmtime(alt) >= t0 - 1:
+                    fp = alt
+                    break
             with open(fp, "rb") as f:
                 return self.send(200, f.read(), mimetypes.guess_type(fp)[0] or "image/jpeg", {"Cache-Control": "public, max-age=86400"})
         fname = {"min": "min-original.webp", "tiny": "tiny-original.webp", "full": "original.webp"}.get(size, "min-original.webp")

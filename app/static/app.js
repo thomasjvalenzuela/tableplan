@@ -379,7 +379,7 @@ function homeStats(s, list) {
     <button class="stat" data-go="meals"><b>${esc(mins ? hrs : week.length)}</b><span>${mins ? "cooking this week" : "meals this week"}</span><i>${esc(plural(week.length, "meal"))}</i></button></div>`;
 }
 const storeName = (list, id) => (id == null ? "" : ((list.stores || []).find((x) => String(x.id) === String(id)) || {}).name || "");
-// At most one nudge on Home, most useful first: missing ingredients > plan running out > check-in > stock your kitchen
+// At most one nudge on Home, most useful first: missing ingredients > kitchen check-in (time-bound) > plan running out > stock your kitchen
 function homeContextCard(s, tonight) {
   const tomorrow = isoDate(addDays(today(), 1));
   const soon = [tonight, s.week.find((e) => e.date === tomorrow && e.entry_type === "dinner")].find((e) => e && !e.cooked && +e.missing);
@@ -387,12 +387,12 @@ function homeContextCard(s, tonight) {
     const when = soon.date === isoDate(today()) ? "Tonight's" : "Tomorrow's";
     return `<button class="nudge" id="ctx-missing" data-slug="${esc(soon.recipe?.slug || "")}"><span class="ic bg-orange">${ic("cart")}</span><span><b>Missing ${esc(plural(+soon.missing, "item"))} for ${esc(when === "Tonight's" ? (soon.entry_type === "dinner" ? "tonight" : `today's ${soon.entry_type}`) : (soon.entry_type === "dinner" ? "tomorrow" : `tomorrow's ${soon.entry_type}`))}</b><small>${esc(entryName(soon))}</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
   }
+  if (s.pantry_checkin?.due) {
+    return `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Kitchen check-in</b><small>A few items might be gone or running low. Swipe through them, about a minute.</small></span><span class="chev">${ic("chevR")}</span></button>`;
+  }
   const st = s.plan_status;
   if (st && st.reminder_days && st.days_left <= st.reminder_days) {
     return `<button class="nudge" id="ctx-plan"><span class="ic bg-orange">${ic("cal")}</span><span><b>${st.days_left ? `Your plan runs out in ${esc(plural(st.days_left, "day"))}` : "Nothing planned yet"}</b><small>Pick the next meals, one day at a time.</small></span><span class="chev">${ic("chevR")}</span></button>`;
-  }
-  if (s.pantry_checkin?.due) {
-    return `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Kitchen check-in</b><small>A few items might be gone or running low. Swipe through them, about a minute.</small></span><span class="chev">${ic("chevR")}</span></button>`;
   }
   let hidden = 0;
   try { hidden = +localStorage.getItem("tp.stockCardHidden") || 0; } catch (_) {}
@@ -1892,6 +1892,7 @@ async function openSettings() {
         <div class="field"><label>Polish imported recipes<small class="lh">Rewrites steps so they're clear and complete. Never changes amounts. About 1¢ per recipe.</small></label><label class="toggle"><input type="checkbox" id="st-polish" ${s.polish_imports !== false ? "checked" : ""}><span></span></label></div>
       </div>
       ${c.backend === "native" ? `<div class="group"><button class="row" id="st-prices"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("cart")}</span><div class="main"><div class="a">Prices & budget</div><div class="b">${s.budget && s.budget.amount ? `$${esc(s.budget.amount)} a ${esc(s.budget.period)} · spending, price sources` : "Grocery budget, spending and where prices come from"}</div></div><span class="chev">${ic("chevR")}</span></button></div>` : ""}
+      ${c.backend === "native" ? `<div class="group"><button class="row" id="st-photos"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("camera")}</span><div class="main"><div class="a">Recipe photos</div><div class="b">Optional Unsplash and Pexels keys for more photo choices</div></div><span class="chev">${ic("chevR")}</span></button></div>` : ""}
       <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${esc(s.ai_budget)}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Import</div>
       <div class="group"><button class="row" id="st-share"><span class="ic bg-pink" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;background:#E1306C">${ic("share")}</span><div class="main"><div class="a">Share to TablePlan from your phone</div><div class="b">Send Instagram, TikTok and recipe links straight in</div></div><span class="chev">${ic("chevR")}</span></button></div>
@@ -1965,6 +1966,7 @@ async function openSettings() {
     $("#st-rules").onclick = () => rulesBrowser(draw);
     $("#st-bctest").onclick = () => openBarcodeTest();
     $("#st-prices") && ($("#st-prices").onclick = () => openPricesSettings());
+    $("#st-photos") && ($("#st-photos").onclick = () => openPhotoSettings());
   };
   openSheet("Settings", loading(), { onMount: draw });
 }
