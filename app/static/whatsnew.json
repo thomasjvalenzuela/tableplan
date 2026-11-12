@@ -1,5 +1,13 @@
 [
  {
+  "id": "at-home-hints",
+  "date": "2026-12-05",
+  "icon": "cart",
+  "color": "green",
+  "title": "See what's already at home",
+  "text": "Shopping list lines now tell you when the food is already in your kitchen: “1 at home · ½ left”, or “2 at home (reserved for Tue)” when it's set aside for a planned meal. Tap the hint to see where it is, and “I have enough” takes it off the list. Lines a planned meal added because you're running short say how much more you need instead."
+ },
+ {
   "id": "item-page",
   "date": "2026-12-04",
   "icon": "box",

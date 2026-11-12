@@ -9403,6 +9403,62 @@ def _recipe_names(c):
 CHECKED_VISIBLE_HOURS = 4   # a ticked item stays on the list, struck through, this long
 
 
+def _fill_word(v):
+    if v is None or v >= 0.995:
+        return ""
+    return {0.25: "¼ left", 0.5: "½ left", 0.75: "¾ left"}.get(round(v * 4) / 4 if abs(v * 4 - round(v * 4)) < 0.02 else None) or f"{round(v * 100)}% left"
+
+
+def at_home_hints(c, raw_items, entries, t=None):
+    """{list item id: hint} for unchecked lines whose food is at home (usable, unexpired inventory).
+    A line a planned meal added because stock runs short gets {kind: short, text: "need 2 more"}; any other line gets
+    {kind: have, text: "1 at home · ½ left"} or, when everything at home is set aside for meals,
+    {kind: reserved, text: "2 at home (reserved for Tue)"}. Each hint lists where the food is."""
+    t = t or today()
+    stock = _make_stock(c, t)
+    rsv = {}
+    for a in c.execute("SELECT a.pantry_item_id, a.qty, m.date FROM allocations a JOIN meal_plans m ON m.id=a.plan_entry_id"):
+        rsv.setdefault(a["pantry_item_id"], []).append({"qty": a["qty"], "date": a["date"]})
+    out = {}
+    for i in raw_items:
+        if i.get("checked"):
+            continue
+        fid, name = i.get("foodId"), ((i.get("food") or {}).get("name") or i.get("note") or i.get("display") or "")
+        keys = ([f"f:{fid}"] if fid else []) + [food_key(clean_food(name)), food_key(name)]
+        ents = next((stock[k] for k in keys if k and stock.get(k)), None)
+        if not ents:
+            continue
+        rows, seen = [], set()
+        for e in ents:
+            r = e["row"]
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            res = rsv.get(r["id"]) or []
+            free = e["free"]
+            reserved_all = bool(res) and (free is None or free <= 1e-9)
+            rows.append({"id": r["id"], "name": pantry_display_name(r["name"]), "place": (places().get(r["place"]) or {}).get("label") if r["place"] else (r["location"] or "").capitalize(),
+                         # what isn't set aside for a meal: "4 left" of 6 when 2 are reserved
+                         "left": (n_units.fmt(free, r["unit"]) + " left" if free is not None and free < r["qty"] - 1e-9 else pantry_left_text(r))
+                                 if r["qty"] is not None else (_fill_word(r["amount_left"]) or "full"),
+                         "use_by": r["expires_on"], "reserved_for": sorted({x["date"] for x in res}), "free": not reserved_all,
+                         "amount_left": r["amount_left"]})
+        planned = bool(_uses(i, entries)) if entries else False
+        if planned:
+            q = _qty_text(i)
+            out[i["id"]] = {"kind": "short", "text": f"need {q} more" if q else "need more", "items": rows}
+            continue
+        avail = [r for r in rows if r["free"]]
+        if avail:
+            fill = (avail[0]["left"] if avail[0]["left"] != "full" else "") if len(avail) == 1 else ""
+            out[i["id"]] = {"kind": "have", "text": f"{len(avail)} at home" + (f" · {fill}" if fill else ""), "items": rows}
+        else:
+            first = min(d for r in rows for d in r["reserved_for"]) if any(r["reserved_for"] for r in rows) else None
+            when = parse_date(first).strftime("%a") if first else ""
+            out[i["id"]] = {"kind": "reserved", "text": f"{len(rows)} at home" + (f" (reserved for {when})" if when else " (reserved)"), "items": rows}
+    return out
+
+
 def ongoing_list(now=None):
     """The list: unchecked items plus items checked in the last few hours (shown in place, struck through).
     Older checked items only appear in recently_checked. `count` is the number still to buy."""
@@ -9416,8 +9472,9 @@ def ongoing_list(now=None):
         stores = n_lists.list_stores(c)
         names = _recipe_names(c)
         plans = _plan_names(c)
+        home = at_home_hints(c, sl["listItems"], plans)
     order = {s["id"]: i for i, s in enumerate(stores)}
-    unchecked = [list_item_json(i, names, plans) for i in sl["listItems"] if not i["checked"]]
+    unchecked = [{**list_item_json(i, names, plans), "home": home.get(i["id"])} for i in sl["listItems"] if not i["checked"]]
     items = unchecked + [list_item_json(i, names, plans) for i in fresh]
     items.sort(key=lambda x: (order.get(x["store_id"], len(order)), x["aisle"] == "Other", x["aisle"].lower()))
     return {"id": lid, "name": sl["name"], "items": items, "count": len(unchecked),

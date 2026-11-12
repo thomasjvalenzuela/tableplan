@@ -1868,3 +1868,16 @@ kbd{display:inline-block;min-width:22px;padding:2px 7px;border-radius:6px;border
 .pop button.danger{color:var(--bad-fg)}
 @media (min-width:1024px){body[data-page="item"]{--page-max:var(--read-max)}}
 @media (max-width:520px){.ip-hero .ip-pic:not(.has-img){aspect-ratio:auto;height:160px;font-size:80px}}
+
+/* shopping list: what's already at home */
+.home-hint{display:inline-flex;align-items:center;gap:4px;margin-top:4px;padding:2px 8px 2px 6px;border-radius:999px;background:var(--fill);color:var(--sub);font-size:12px;font-weight:600;max-width:100%}
+.home-hint svg{width:13px;height:13px;flex:none}
+.home-hint span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.home-hint.have{background:var(--ok-bg);color:var(--ok-fg)}
+.home-hint.short{background:var(--soon-bg);color:var(--soon-fg)}
+@media (pointer:coarse){.home-hint{position:relative}.home-hint::after{content:"";position:absolute;inset:-12px -4px}}
+.hh-list{display:flex;flex-direction:column;padding:2px 12px 6px}
+.hh-row{display:flex;flex-direction:column;padding:6px 0;border-top:.5px solid var(--sep);font-size:14px}
+.hh-row:first-child{border-top:0}
+.hh-row span{color:var(--sub);font-size:13px}
+.hh-note{margin:0;padding:4px 12px 8px;font-size:13px;color:var(--sub)}

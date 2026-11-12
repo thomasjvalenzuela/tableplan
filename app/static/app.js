@@ -1284,13 +1284,26 @@ function listRow(it) {
     <div class="li-under" aria-hidden="true">${ic("check")} I have it</div>
     <div class="li-in">
       <span class="emo">${esc(it.emoji || "🛒")}</span>
-      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${usesHtml(it, recs)}${it.manual && !(it.uses || []).length ? `<div class="uses-tags"><span class="use-tag mine">Added by you</span></div>` : ""}${it.last ? `<div class="b last-hint">${esc(it.last)}</div>` : ""}</div>
+      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${homeHint(it)}${usesHtml(it, recs)}${it.manual && !(it.uses || []).length ? `<div class="uses-tags"><span class="use-tag mine">Added by you</span></div>` : ""}${it.last ? `<div class="b last-hint">${esc(it.last)}</div>` : ""}</div>
       <button class="have-btn" data-have title="I already have this">Have</button>
       <button class="store-chip ${it.store_id == null ? "none" : ""}" data-store aria-haspopup="menu" aria-label="Store: ${esc(storeLabel(it.store_id))}">${esc(storeLabel(it.store_id))}</button>
       <button class="check sq" data-check aria-label="Got ${esc(itemTitle(it))}">${ic("check")}</button>
     </div></div>`;
 }
 const findItem = (id) => L.data.items.find((x) => String(x.id) === String(id));
+// "1 at home · ½ left", "2 at home (reserved for Tue)" or, on a line a meal added because stock is short, "need 2 more"
+function homeHint(it) {
+  const h = it.home; if (!h) return "";
+  return `<button class="home-hint ${esc(h.kind)}" data-home aria-haspopup="dialog" aria-label="${esc(h.text)}. Show where">${ic(h.kind === "short" ? "cart" : "box")}<span>${esc(h.text)}</span></button>`;
+}
+function homeMenu(btn, it, row) {
+  const h = it.home, items = h.items || [];
+  const line = (x) => `<div class="hh-row"><b>${esc(x.place || "")}</b><span>${esc([x.name !== itemTitle(it) ? x.name : "", x.left && x.left !== "full" ? x.left : "full", x.use_by ? `use by ${fmt(parseISO(x.use_by), { month: "short", day: "numeric" })}` : "", x.reserved_for.length ? `reserved for ${x.reserved_for.map(wkShort).join(", ")}` : ""].filter(Boolean).join(" · "))}</span></div>`;
+  popover(btn, `<div class="pop-h">${h.kind === "short" ? "At home, but not enough" : "At home"}</div><div class="hh-list">${items.map(line).join("")}</div>
+    ${h.kind === "short" ? `<p class="hh-note">The planned meals need ${esc(h.text.replace(/^need /, ""))} on top of this.</p>` : `<button data-enough>${ic("check")} I have enough, remove from list</button>`}`, (el) => {
+    $("[data-enough]", el) && ($("[data-enough]", el).onclick = () => { closePop(); haveItem(it, row); });
+  });
+}
 function bindListRows(box) {
   box.onclick = (e) => {
     if (Date.now() < L.quietUntil) return;
@@ -1299,6 +1312,7 @@ function bindListRows(box) {
     const more = e.target.closest("[data-uses-more]");
     if (more) { e.stopPropagation(); more.nextElementSibling.hidden = false; more.remove(); return; }
     if (it.checked) return uncheckItem(it, row);
+    if (e.target.closest("[data-home]")) { e.stopPropagation(); return homeMenu(e.target.closest("[data-home]"), it, row); }
     if (e.target.closest("[data-store]")) return storeMenu(e.target.closest("[data-store]"), it);
     if (e.target.closest("[data-have]")) return haveItem(it, row);
     if (e.target.closest("[data-check]")) return checkItem(it, row);
