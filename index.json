@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "updated_at": "2026-11-12T02:20:11Z",
+  "app_count": 1,
+  "base_url": "https://thomasjvalenzuela.github.io/tableplan",
+  "apps": [
+    {
+      "id": "io.github.thomasjvalenzuela.tableplan",
+      "title": "TablePlan",
+      "tagline": "Recipes, auto meal plans, a smart pantry and grocery lists",
+      "category": "Home",
+      "categories": [
+        "home"
+      ],
+      "author": "thomasjvalenzuela",
+      "developer": "thomasjvalenzuela",
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "icon": "/apps/io.github.thomasjvalenzuela.tableplan/assets/icon.svg",
+      "thumbnail": "",
+      "compose_url": "/apps/io.github.thomasjvalenzuela.tableplan/docker-compose.yml",
+      "meta_url": "/apps/io.github.thomasjvalenzuela.tableplan/meta.json",
+      "content_hash": "d9839020",
+      "version": "0.5.64"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# TablePlan for any Docker host (Docker Compose, Portainer stacks, Dockge, Unraid compose, …)
+#
+#   mkdir tableplan && cd tableplan
+#   curl -fsSLO https://thomasjvalenzuela.github.io/tableplan/docker-compose.yml
+#   docker compose up -d
+#
+# Then open http://<your-server-ip>:9930. The setup wizard does the rest.
+# TablePlan is a single container: recipes, meal plans, lists and pantry all live in ./data.
+name: tableplan
+
+services:
+  tableplan:
+    container_name: tableplan
+    image: ghcr.io/thomasjvalenzuela/tableplan:latest
+    restart: unless-stopped
+    ports:
+      - "9930:8080"                 # change the left number to use another port
+    environment:
+      TZ: America/Chicago           # your time zone; used for use-by dates
+      TABLEPLAN_INSTALL: manual
+    volumes:
+      - ./data:/data
+    security_opt: ["no-new-privileges:true"]

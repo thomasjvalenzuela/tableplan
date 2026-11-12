@@ -1,0 +1,31 @@
+name: tableplan
+
+services:
+  tableplan:
+    container_name: tableplan
+    image: ghcr.io/thomasjvalenzuela/tableplan:0.5.64
+    restart: unless-stopped
+    ports:
+      - "9930:8080"
+    environment:
+      TZ: $TZ
+      TABLEPLAN_INSTALL: zimaos
+    volumes:
+      - /DATA/AppData/tableplan/data:/data
+    networks:
+      - tableplan
+
+networks:
+  tableplan:
+    driver: bridge
+
+x-casaos:
+  id: io.github.thomasjvalenzuela.tableplan
+  main: tableplan
+  index: /
+  port_map: "9930"
+  scheme: http
+  icon: https://thomasjvalenzuela.github.io/tableplan/apps/io.github.thomasjvalenzuela.tableplan/assets/icon.svg
+  title:
+    en_US: TablePlan
+  version: "0.5.64"

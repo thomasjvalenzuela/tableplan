@@ -1,0 +1,31 @@
+{
+  "tagline": "Recipes, auto meal plans, a smart pantry and grocery lists",
+  "description": "TablePlan is a household kitchen app for your home server.\n\n• Save recipes from any link, screenshot or cookbook photo (AI import with your own OpenAI key)\n• Auto-generate a week or month of meals from your recipes, with no repeats and favorites first\n• Every recipe scales to the number of people you cook for\n• Smart pantry: check items off the shopping list and they get real use-by dates (USDA FoodKeeper). Use half the cream and the date resets to after-opening.\n• Email, print or export shopping lists, meal plans (.ics calendar) and pantry reports\n\nOne app, one container: recipes, plans, lists and pantry are stored in TablePlan itself. Open TablePlan after installing and the setup wizard does the rest.\n",
+  "tips": {
+    "before_install": "After installing, open TablePlan. A short setup wizard creates your login and, if you want, sets up AI import and email.\n"
+  },
+  "author": "thomasjvalenzuela",
+  "developer": "thomasjvalenzuela",
+  "category": "Home",
+  "architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "update_at": "2026-11-12",
+  "website": "https://github.com/thomasjvalenzuela/tableplan",
+  "repo": "https://github.com/thomasjvalenzuela/tableplan",
+  "support": "https://github.com/thomasjvalenzuela/tableplan/issues",
+  "title": "TablePlan",
+  "release_note": "At-home hints on the shopping list",
+  "base_url": "https://thomasjvalenzuela.github.io/tableplan",
+  "id": "io.github.thomasjvalenzuela.tableplan",
+  "version": "0.5.64",
+  "categories": [
+    "home"
+  ],
+  "min_memory": 0,
+  "min_image_size": {
+    "amd64": 27435886,
+    "arm64": 27918656
+  }
+}

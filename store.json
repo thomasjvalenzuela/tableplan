@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "store_id": "tableplan",
+  "name": "TablePlan",
+  "description": "TablePlan: household recipes, meal plans, smart pantry and grocery lists.",
+  "maintainer": "thomasjvalenzuela",
+  "url": "https://github.com/thomasjvalenzuela/tableplan"
+}

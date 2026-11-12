@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TablePlan — Install Guide</title>
+<style>
+:root{
+  --fg:#1f2328;--muted:#59636e;--bg:#fff;--canvas:#f6f8fa;--border:#d1d9e0;--border-soft:#d1d9e0b3;
+  --link:#0969da;--code-bg:#f6f8fa;--inline-code:#818b981f;--accent:#e8772e;
+  --note:#0969da;--tip:#1a7f37;--warn:#9a6700;--caution:#d1242f;--important:#8250df;
+}
+@media (prefers-color-scheme:dark){
+  :root{--fg:#f0f6fc;--muted:#9198a1;--bg:#0d1117;--canvas:#151b23;--border:#3d444d;--border-soft:#3d444db3;--link:#4493f8;--code-bg:#151b23;--inline-code:#656c7633;
+  --note:#4493f8;--tip:#3fb950;--warn:#d29922;--caution:#f85149;--important:#ab7df8}
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--canvas);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:900px;margin:0 auto;padding:24px 16px 64px}
+.repo{display:flex;align-items:center;gap:10px;font-size:15px;color:var(--muted);margin-bottom:14px;flex-wrap:wrap}
+.repo svg{width:18px;height:18px;fill:var(--muted)}
+.repo b{color:var(--link);font-weight:600}
+.badge{display:inline-flex;font-size:12px;font-weight:500;border:1px solid var(--border);border-radius:2em;padding:0 8px;line-height:20px;color:var(--muted)}
+.box{background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.box-h{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--border);background:var(--canvas);font-size:14px;font-weight:600}
+.box-h svg{width:16px;height:16px;fill:var(--muted)}
+.md{padding:24px 32px 32px}
+@media (max-width:600px){.md{padding:18px 16px 24px}body{font-size:15.5px}}
+h1,h2,h3{font-weight:600;line-height:1.25;margin:24px 0 16px}
+h1{font-size:2em;padding-bottom:.3em;border-bottom:1px solid var(--border-soft);margin-top:0}
+h2{font-size:1.5em;padding-bottom:.3em;border-bottom:1px solid var(--border-soft);margin-top:36px;scroll-margin-top:12px}
+h3{font-size:1.15em;scroll-margin-top:12px}
+p,ul,ol,table,blockquote,pre,.alert{margin:0 0 16px}
+ul,ol{padding-left:2em}li+li{margin-top:.25em}
+code{font:85% ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;background:var(--inline-code);padding:.2em .4em;border-radius:6px;word-break:break-word}
+.code{position:relative;margin:0 0 16px}
+.code pre{margin:0;background:var(--code-bg);border:1px solid var(--border-soft);border-radius:6px;padding:16px;overflow:auto;font:13.5px/1.5 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+.code pre code{background:none;padding:0;font-size:100%;word-break:normal;white-space:pre}
+.code .lbl{position:absolute;top:-1px;left:12px;transform:translateY(-50%);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:2em;padding:0 8px;color:var(--muted)}
+.copy{position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--muted);display:grid;place-items:center;cursor:pointer;opacity:.85}
+.copy:hover{opacity:1;color:var(--fg)}
+.copy svg{width:16px;height:16px;fill:currentColor}
+.copy.ok{color:var(--tip);border-color:var(--tip)}
+.c{color:#6e7781}@media (prefers-color-scheme:dark){.c{color:#8b949e}}
+table{border-collapse:collapse;display:block;overflow:auto;width:100%}
+th,td{border:1px solid var(--border);padding:6px 13px;text-align:left;vertical-align:top}
+th{font-weight:600;background:var(--canvas)}
+tr:nth-child(2n) td{background:var(--canvas)}
+.alert{border-left:.25em solid var(--note);padding:8px 16px;border-radius:0 6px 6px 0}
+.alert p:last-child,.alert ul:last-child{margin-bottom:0}
+.alert .t{display:flex;align-items:center;gap:8px;font-weight:600;color:var(--note);margin-bottom:4px}
+.alert .t svg{width:16px;height:16px;fill:currentColor}
+.alert.tip{border-color:var(--tip)}.alert.tip .t{color:var(--tip)}
+.alert.warn{border-color:var(--warn)}.alert.warn .t{color:var(--warn)}
+.alert.caution{border-color:var(--caution)}.alert.caution .t{color:var(--caution)}
+.alert.important{border-color:var(--important)}.alert.important .t{color:var(--important)}
+.toc{background:var(--canvas);border:1px solid var(--border-soft);border-radius:6px;padding:12px 16px 12px 16px;margin-bottom:20px}
+.toc b{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.toc ol{margin:6px 0 0;padding-left:1.4em;columns:2;column-gap:28px}
+@media (max-width:600px){.toc ol{columns:1}}
+.step{display:flex;align-items:center;gap:10px}
+.step input{width:20px;height:20px;accent-color:var(--tip);flex:none;cursor:pointer;margin:0}
+.step .n{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;font-size:14px;font-weight:700;flex:none}
+h2.done .n{background:var(--tip)}
+.progress{height:8px;border-radius:4px;background:var(--border-soft);overflow:hidden;margin:6px 0 4px}
+.progress i{display:block;height:100%;width:0;background:var(--tip);transition:width .3s}
+.ptxt{font-size:13px;color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px}
+.card{border:1px solid var(--border);border-radius:6px;padding:12px 14px;background:var(--bg)}
+.card b{display:block;margin-bottom:2px}
+.card span{font-size:14px;color:var(--muted)}
+.kbd{display:inline-block;font:12px ui-monospace,Menlo,monospace;border:1px solid var(--border);border-bottom-width:2px;border-radius:6px;padding:1px 6px;background:var(--canvas)}
+.footer{text-align:center;color:var(--muted);font-size:13px;margin-top:24px}
+.diagram{font:13px/1.45 ui-monospace,Menlo,monospace;background:var(--code-bg);border:1px solid var(--border-soft);border-radius:6px;padding:14px 16px;overflow:auto;white-space:pre;margin-bottom:16px}
+@media print{
+  body{background:#fff;font-size:11pt}.wrap{max-width:none;padding:0}.box{border:0}.box-h,.copy,.progress,.ptxt,.step input,.repo{display:none}
+  .md{padding:0}h2{break-after:avoid}.code,.alert,table,.card{break-inside:avoid}
+  a{color:#0969da}.toc ol{columns:2}
+  .code pre,.code pre code{white-space:pre-wrap;word-break:break-word;overflow:visible}.code{margin-top:8px}.code .lbl{position:static;transform:none;display:inline-block;margin-bottom:4px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="repo"><span>thomasjvalenzuela / <b>tableplan</b></span><span class="badge">AGPL-3.0</span><span class="badge">Docker</span><span class="badge">ZimaOS</span><span class="badge">amd64 · arm64</span></div>
+<div class="box">
+<div class="box-h">INSTALL.md</div>
+<article class="md">
+
+<h1>🍳 Install TablePlan</h1>
+<p>TablePlan is a self-hosted household kitchen app. It handles recipes from links and screenshots, auto-generated meal plans, a pantry that tracks real use-by dates, and grocery lists you can email or print. It runs on your own server as a single app: one container, one data folder.</p>
+
+<div class="alert important"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>TablePlan is a single app</div><p>Recipes, photos, meal plans, shopping lists and your pantry are all stored by TablePlan itself. There's no separate recipe server, database or extra account to set up.</p></div>
+
+<div class="progress" aria-hidden="true"><i id="bar"></i></div>
+<div class="ptxt" id="ptxt">Tick each step as you finish it. Your progress is saved in this browser.</div>
+
+<div class="toc"><b>Contents</b>
+<ol>
+<li><a href="#new">What's new</a></li>
+<li><a href="#need">What you need</a></li>
+<li><a href="#s1">Install</a></li>
+<li><a href="#s2">Run the setup wizard</a></li>
+<li><a href="#s3">Add it to your phone</a></li>
+<li><a href="#mealie">Coming from Mealie?</a></li>
+<li><a href="#updates">Updating</a></li>
+<li><a href="#backup">Backup &amp; uninstall</a></li>
+<li><a href="#remote">HTTPS &amp; away from home</a></li>
+<li><a href="#trouble">Troubleshooting</a></li>
+<li><a href="#faq">FAQ</a></li>
+</ol></div>
+
+<h2 id="new">What's new</h2>
+<h3>v0.4</h3>
+<ul>
+<li><b>No more Mealie:</b> one app, one container; link import uses TablePlan's own recipe reader with AI fallback; screenshot import is a single AI call.</li>
+</ul>
+<h3>v0.3</h3>
+<ul>
+<li><b>Recipes tab</b> with search and favorites.</li>
+<li><b>Edit recipes in TablePlan</b>, or create one from scratch with <b>Type it</b>. Plain-text ingredients scale automatically too.</li>
+<li><b>Two recipe styles:</b> <i>Classic</i> or <i>Step-by-step</i>, tuned to your stove (gas, electric or induction) and oven (conventional or convection).</li>
+<li><b>Cook mode</b> with built-in timers.</li>
+<li><b>Import progress</b> with a time estimate.</li>
+<li><b>Pantry barcode scanning</b> (via Open Food Facts) and a weekly pantry check-in reminder.</li>
+<li><b>Confirm what you have</b> before a shopping list is built.</li>
+<li><b>AI spending tracker</b> with budget alerts. Add an optional OpenAI <i>admin</i> key to see exact costs.</li>
+<li><b>Ingredient and recipe photos.</b> Tap <b>Try another</b> or upload your own.</li>
+<li><b>What's new</b> popup after updates, <b>light/dark mode</b>, and a desktop sidebar showing your version and a GitHub link.</li>
+</ul>
+
+<h2 id="need">What you need</h2>
+<div class="cards">
+  <div class="card"><b>🖥️ A server with Docker</b><span>ZimaOS, CasaOS, Ubuntu/Debian, a NAS, or a Raspberry Pi 4/5. Both Intel/AMD (amd64) and ARM (arm64) work.</span></div>
+  <div class="card"><b>💾 A few hundred MB of RAM</b><span>Plus some disk space. Your recipes and photos take more space over time.</span></div>
+  <div class="card"><b>🔌 Port 9930</b><span>TablePlan's web address. You can change it.</span></div>
+</div>
+<p><b>Optional:</b></p>
+<ul>
+<li>An <b>OpenAI API key</b> to import recipes from screenshots, photos and video links. It costs a few cents per recipe.</li>
+<li>An <b>email account</b> that allows SMTP, such as Gmail with an App Password, to email yourself lists and plans.</li>
+</ul>
+
+<h2 id="s1" class="stephead"><span class="step"><input type="checkbox" data-step="1" aria-label="Done"><span class="n">1</span> Install</span></h2>
+<p>Choose the method that matches your server.</p>
+
+<h3>ZimaOS (App Store, recommended)</h3>
+<ol>
+<li>Open <b>App Store</b> → <b>Community store</b> → <b>Add</b>, and paste:</li>
+</ol>
+<div class="code"><span class="lbl">community store URL</span><pre><code>https://thomasjvalenzuela.github.io/tableplan/store.json</code></pre></div>
+<ol start="2">
+<li>Switch to the <b>TablePlan</b> store and click <b>TablePlan → Install</b>.</li>
+<li>Optional: before installing, change the volume path if you keep app data on a different disk. The default is <code>/DATA/AppData/tableplan/data</code>.</li>
+</ol>
+<p>ZimaOS shows an <b>Update</b> button whenever a new version is released.</p>
+
+<h3>Any Linux server with Docker (one command)</h3>
+<p>This covers CasaOS, Ubuntu/Debian and similar. SSH into the server and run:</p>
+<div class="code"><span class="lbl">on the server</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo bash</code></pre></div>
+<p>The installer:</p>
+<ul>
+<li>checks Docker and that port 9930 is free</li>
+<li>picks an install folder: <code>/media/DATA/AppData/tableplan</code>, <code>/DATA/AppData/tableplan</code> or <code>/opt/tableplan</code>, whichever exists</li>
+<li>starts the TablePlan container</li>
+<li>prints the address to open</li>
+</ul>
+<p>You can choose a different port or folder:</p>
+<div class="code"><span class="lbl">custom ports / folder</span><pre><code>curl -fsSL https://thomasjvalenzuela.github.io/tableplan/install.sh | sudo TABLEPLAN_PORT=8930 TABLEPLAN_DIR=/srv/tableplan bash</code></pre></div>
+<div class="alert tip"><div class="t"><svg viewBox="0 0 16 16"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>Want to read it first?</div><p>It's a good habit to read a script before piping it to <code>sudo</code>. Download it and read it first:<br><code>curl -fsSLO https://thomasjvalenzuela.github.io/tableplan/install.sh &amp;&amp; less install.sh &amp;&amp; sudo bash install.sh</code></p></div>
+
+<h3>Docker Compose / Portainer / Dockge / Unraid</h3>
+<div class="code"><span class="lbl">terminal</span><pre><code>mkdir tableplan &amp;&amp; cd tableplan
+curl -fsSLO https://thomasjvalenzuela.github.io/tableplan/docker-compose.yml
+nano docker-compose.yml        <span class="c"># optional: set TZ, change the port</span>
+docker compose up -d</code></pre></div>
+<p>In <b>Portainer</b>, go to <i>Stacks → Add stack</i> and paste the contents of <a href="https://thomasjvalenzuela.github.io/tableplan/docker-compose.yml">docker-compose.yml</a>.</p>
+<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>First start</div><p>The first download takes a minute or two. Wait for the container to show <b>Running</b> or <b>healthy</b>.</p></div>
+
+<h2 id="s2" class="stephead"><span class="step"><input type="checkbox" data-step="2" aria-label="Done"><span class="n">2</span> Run the setup wizard</span></h2>
+<p>Open <code>http://YOUR-SERVER-IP:9930</code> in a browser. The wizard starts on its own, and you can <b>skip</b> any step and finish it later in <b>Settings</b>.</p>
+<table>
+<tr><th>Screen</th><th>What it does</th><th>What you need</th></tr>
+<tr><td><b>Household</b></td><td>Sets how many people you cook for. Planned meals and shopping lists scale to that number.</td><td>A name and a number</td></tr>
+<tr><td><b>Import from screenshots</b></td><td>Connects AI so photos, screenshots and TikTok/YouTube links become recipes. The key is tested before it's saved.</td><td>An OpenAI key from <a href="https://platform.openai.com/api-keys">platform.openai.com/api-keys</a>, with a little prepaid credit</td></tr>
+<tr><td><b>Notifications</b></td><td>Sends a test message, then delivers shopping lists, meal plans and use-soon alerts by Telegram, ntfy or email.</td><td>For email with Gmail/Google Workspace: an <a href="https://myaccount.google.com/apppasswords">App Password</a>. Outlook, iCloud, Yahoo and any SMTP server also work.</td></tr>
+<tr><td><b>Lock it</b></td><td>Adds an optional household password.</td><td>Recommended if anyone outside your home can reach the server</td></tr>
+</table>
+
+<h2 id="s3" class="stephead"><span class="step"><input type="checkbox" data-step="3" aria-label="Done"><span class="n">3</span> Add it to your phone</span></h2>
+<table>
+<tr><th>iPhone / iPad (Safari)</th><th>Android (Chrome)</th></tr>
+<tr><td>Open <code>http://YOUR-SERVER-IP:9930</code> → <b>Share</b> → <b>Add to Home Screen</b></td><td>Open it → <b>⋮</b> → <b>Add to Home screen</b></td></tr>
+</table>
+<p>It opens full-screen with its own icon, like a native app.</p>
+
+<h2 id="mealie">Coming from Mealie?</h2>
+<p>You can bring everything over in one go:</p>
+<ol>
+<li>In TablePlan, open <b>Settings → Advanced → Import from Mealie</b>.</li>
+<li>Enter your Mealie address (for example <code>http://192.168.1.50:9925</code>, using the server's network IP, not <code>localhost</code>) and an API token. Create one in Mealie under <b>Profile → API Tokens</b>.</li>
+<li>Tap <b>Import</b>. TablePlan copies your recipes, photos, favorites, meal plans and shopping lists.</li>
+</ol>
+<p>It's safe to run more than once, and you can uninstall Mealie afterwards.</p>
+<p><b>Used TablePlan v0.3 or earlier?</b> Those versions ran a bundled Mealie. The one-command installer leaves it running after the upgrade so you can import from it (it prints the address), and <code>sudo tableplan update</code> removes it once you're done. If your update already removed it (for example on ZimaOS), its files are still in the <code>mealie</code> folder of your install. Start it again temporarily, import, then remove it:</p>
+<div class="code"><span class="lbl">temporary Mealie for importing</span><pre><code>sudo docker run -d --name old-mealie -p 9925:9000 -v /DATA/AppData/tableplan/mealie:/app/data ghcr.io/mealie-recipes/mealie:v3.30.0
+<span class="c"># import from http://YOUR-SERVER-IP:9925, then:</span>
+sudo docker rm -f old-mealie</code></pre></div>
+
+<h2 id="updates">Updating</h2>
+<p>TablePlan checks for new versions and shows a blue <b>Update available</b> banner on Home and in Settings.</p>
+<table>
+<tr><th>Installed with</th><th>How to update</th></tr>
+<tr><td>ZimaOS App Store</td><td>App Store → <b>My Apps</b> → TablePlan → <b>Update</b></td></tr>
+<tr><td>One-command installer</td><td><code>sudo tableplan update</code></td></tr>
+<tr><td>Docker Compose</td><td><code>docker compose pull &amp;&amp; docker compose up -d</code> in your TablePlan folder</td></tr>
+<tr><td>Portainer</td><td>Stacks → tableplan → <b>Update the stack</b> with <i>Re-pull image</i> checked</td></tr>
+</table>
+<p>Your data is kept across updates.</p>
+
+<h2 id="backup">Backup &amp; uninstall</h2>
+<p>Everything (recipes, photos, plans, lists, pantry, settings and shelf-life rules) lives in one folder, <code>data/</code>. Back it up.</p>
+<div class="code"><span class="lbl">installer users</span><pre><code>sudo tableplan backup      <span class="c"># writes tableplan-backup-DATE.tgz next to the install folder</span>
+sudo tableplan uninstall   <span class="c"># removes containers, keeps your data</span></code></pre></div>
+<div class="code"><span class="lbl">compose users</span><pre><code>docker compose stop &amp;&amp; tar czf tableplan-backup.tgz data &amp;&amp; docker compose start
+docker compose down        <span class="c"># uninstall; delete the folder to remove data too</span></code></pre></div>
+
+<h2 id="remote">HTTPS &amp; using it away from home</h2>
+<p>Chrome labels every <code>http://</code> address as <b>Not secure</b>, including apps on your own Wi-Fi. TablePlan works fine at home without HTTPS. Adding it gives you a padlock and encrypted traffic.</p>
+<h3>Option 1: Tailscale (easiest, works away from home too)</h3>
+<ol>
+<li>Install <b>Tailscale</b> on the server (it's in the ZimaOS App Store) and on your phones, and sign in to the same account.</li>
+<li>In the Tailscale admin console → <b>DNS</b>, turn on <b>MagicDNS</b> and <b>HTTPS Certificates</b>.</li>
+<li>On the server, run:</li>
+</ol>
+<div class="code"><span class="lbl">on the server (ZimaOS / CasaOS)</span><pre><code>sudo docker exec tailscale tailscale serve --bg 9930</code></pre></div>
+<ol start="4">
+<li>Open <code>https://&lt;server-name&gt;.&lt;your-tailnet&gt;.ts.net</code>, which now shows a padlock.</li>
+</ol>
+<h3>Option 2: your own domain + reverse proxy</h3>
+<p>Use Nginx Proxy Manager, Caddy or Traefik:</p>
+<ol>
+<li>Point <code>tableplan.example.com</code> at the server's <b>local</b> IP. On Cloudflare, use <i>DNS only</i>.</li>
+<li>Proxy it to port 9930.</li>
+<li>Get Let's Encrypt certificates with the <b>DNS challenge</b>, so no ports need to be opened on your router.</li>
+</ol>
+<div class="alert note"><div class="t"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Live barcode scanning needs HTTPS</div><p>Browsers only allow camera access on secure addresses. On plain <code>http://</code>, the pantry scanner falls back to taking a photo of the barcode or typing the number.</p></div>
+<p>Never port-forward 9930 straight to the internet. If TablePlan is reachable from outside your home, set <code>TABLEPLAN_PUBLIC=1</code> on the TablePlan container. Sign-in is then always required, and until you set a household password, you need the one-time setup code printed in the TablePlan log (ZimaOS → TablePlan → Logs, or <code>docker logs tableplan</code>).</p>
+
+<h2 id="trouble">Troubleshooting</h2>
+<table>
+<tr><th>Symptom</th><th>Fix</th></tr>
+<tr><td>ZimaOS: "Failed to add community store"</td><td>Use the full address ending in <code>/store.json</code>, with no spaces or extra characters.</td></tr>
+<tr><td>OpenAI test failed</td><td>The key is wrong, or the account has no credit. Check billing at platform.openai.com.</td></tr>
+<tr><td>Screenshot import doesn't work</td><td>Check your OpenAI key and credit in <b>Settings → AI recipe import</b>.</td></tr>
+<tr><td>Import from Mealie fails</td><td>Use your server's network IP in the Mealie address, not <code>localhost</code> (TablePlan runs in its own container), and a fresh API token from Mealie → Profile → API Tokens.</td></tr>
+<tr><td>Live barcode scanning won't open the camera</td><td>The camera needs HTTPS (see <a href="#remote">HTTPS</a>). Take a photo of the barcode or type the number instead.</td></tr>
+<tr><td>Email test failed</td><td>Gmail and Yahoo need an <b>App Password</b> (2-Step Verification must be on), not your normal password.</td></tr>
+<tr><td>Use-by dates are off by a day</td><td>Set <code>TZ</code> to your time zone, for example <code>America/New_York</code>, and recreate the container.</td></tr>
+<tr><td>Forgot the TablePlan password</td><td><code>docker exec tableplan python -c "import sqlite3;c=sqlite3.connect('/data/tableplan.db');c.execute(&quot;DELETE FROM settings WHERE key='cfg.app_password_hash'&quot;);c.commit()"</code>, then <code>docker restart tableplan</code></td></tr>
+<tr><td>Something else</td><td>Check <code>docker logs tableplan</code>, then <a href="https://github.com/thomasjvalenzuela/tableplan/issues">open an issue</a> with the error.</td></tr>
+</table>
+
+<h2 id="faq">FAQ</h2>
+<p><b>Does my data leave my server?</b><br>
+No, with two exceptions you turn on yourself: screenshot imports go to OpenAI, and emails go through your mail provider. The only other outside requests are one download of the public USDA FoodKeeper shelf-life database and a version check against GitHub Pages.</p>
+<p><b>Where do the use-by dates come from?</b><br>
+From the USDA FoodKeeper database, always using the low end of its ranges to stay safe. When you open or freeze something, it switches to the matching "after opening" or "freezer" time. A date you type from the package always wins. You can edit any rule in Settings.</p>
+<p><b>Do I need Mealie?</b><br>
+No. TablePlan stores everything itself. If you used Mealie before, see <a href="#mealie">Coming from Mealie?</a> to copy your recipes over.</p>
+<p><b>What does it cost?</b><br>
+TablePlan is free and open source. AI imports use your own OpenAI account, at a few cents per recipe.</p>
+<p><b>License</b><br>
+TablePlan is <a href="https://github.com/thomasjvalenzuela/tableplan/blob/main/LICENSE">AGPL-3.0</a>.</p>
+<p><b>Credits</b></p>
+<ul>
+<li><a href="https://github.com/mealie-recipes/mealie">Mealie</a> (AGPL-3.0): inspired TablePlan's recipe, meal-plan and shopping-list data format</li>
+<li><a href="https://catalog.data.gov/dataset/fsis-foodkeeper-data">USDA FoodKeeper</a> (public domain): shelf-life data</li>
+<li><a href="https://world.openfoodfacts.org">Open Food Facts</a> (ODbL): barcode product data</li>
+<li><a href="https://github.com/Sec-ant/zxing-wasm">zxing-wasm</a> (MIT): barcode decoding</li>
+<li><a href="https://www.themealdb.com">TheMealDB</a>: ingredient images</li>
+<li><a href="https://openverse.org">Openverse</a>: openly licensed photos</li>
+</ul>
+
+</article>
+</div>
+<div class="footer">TablePlan · <a href="https://github.com/thomasjvalenzuela/tableplan">GitHub</a> · <a href="https://github.com/thomasjvalenzuela/tableplan/issues">Report an issue</a></div>
+</div>
+<script>
+(function(){
+  // copy buttons
+  var ICON='<svg viewBox="0 0 16 16"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>';
+  var OK='<svg viewBox="0 0 16 16"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+  document.querySelectorAll('.code').forEach(function(box){
+    var pre=box.querySelector('pre'); if(!pre) return;
+    var b=document.createElement('button'); b.className='copy'; b.type='button'; b.setAttribute('aria-label','Copy'); b.innerHTML=ICON;
+    b.addEventListener('click',function(){
+      var clone=pre.cloneNode(true); clone.querySelectorAll('.c').forEach(function(c){c.remove()});
+      var text=clone.textContent.replace(/[ \t]+$/gm,'').trim();
+      var done=function(){b.innerHTML=OK;b.classList.add('ok');setTimeout(function(){b.innerHTML=ICON;b.classList.remove('ok')},1500)};
+      try{navigator.clipboard.writeText(text).then(done,function(){fallback(text);done()})}catch(e){fallback(text);done()}
+    });
+    box.appendChild(b);
+  });
+  function fallback(t){var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}a.remove()}
+
+  // step checklist with saved progress
+  var KEY='tableplan.install.steps', saved={};
+  try{saved=JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){}
+  var boxes=[].slice.call(document.querySelectorAll('input[data-step]'));
+  function render(){
+    var n=0; boxes.forEach(function(cb){var h=cb.closest('h2'); h.classList.toggle('done',cb.checked); if(cb.checked)n++;});
+    document.getElementById('bar').style.width=(n/boxes.length*100)+'%';
+    document.getElementById('ptxt').textContent = n===boxes.length ? 'All '+n+' steps done. Enjoy your kitchen! 🎉' : n+' of '+boxes.length+' steps done · progress saved in this browser';
+  }
+  boxes.forEach(function(cb){
+    cb.checked=!!saved[cb.dataset.step];
+    cb.addEventListener('change',function(){saved[cb.dataset.step]=cb.checked; try{localStorage.setItem(KEY,JSON.stringify(saved))}catch(e){} render();});
+  });
+  render();
+})();
+</script>
+</body>
+</html>
