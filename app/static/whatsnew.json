@@ -1,5 +1,13 @@
 [
  {
+  "id": "ui-polish",
+  "date": "2026-12-03",
+  "icon": "sparkle",
+  "color": "blue",
+  "title": "Fits every screen better",
+  "text": "On a computer, pages use the full width (Home gets two columns, Recipes up to six cards a row, Inventory two columns) and Settings has its sections on the left. Tablets get a compact side rail. What can I make? is in the sidebar, pages show a quick outline while they load, the update notice is readable in dark mode, and the red dot on Settings now means an update you haven't seen. On a computer, press / to search, N to add to the list, or G then H, R, P, S or I to switch tabs (Settings → Help lists them)."
+ },
+ {
   "id": "real-recipes",
   "date": "2026-12-02",
   "icon": "search",

@@ -43,7 +43,7 @@ async function renderRecipes() {
     `<h1 class="title">All recipes</h1><div id="rqueue"></div>
     ${c_native() ? `<div class="toolbar"><button class="pill-btn" id="btn-make">${ic("sparkle")} What can I make?</button></div>` : ""}
     <div class="search">${ic("search")}<input id="rq" placeholder="Search recipes" value="${esc(rstate.q)}" autocomplete="off"></div>
-    <div class="chips" id="rchips"></div><div id="rlist">${loading()}</div><div class="sel-bar" id="sel-bar" hidden></div>`;
+    <div class="chips" id="rchips"></div><div id="rlist">${skel(isPhone() ? "rows" : "grid")}</div><div class="sel-bar" id="sel-bar" hidden></div>`;
   bindTopbar();
   $("#btn-add").onclick = openAddRecipe;
   $("#btn-select").onclick = () => setSelect(!rstate.sel);
@@ -97,7 +97,13 @@ function drawRecipeList() {
   const sel = rstate.sel;
   const mark = (r) => (sel ? `<span class="selc ${sel.has(r.slug) ? "on" : ""}" aria-hidden="true">${sel.has(r.slug) ? ic("check") : ""}</span>` : "");
   const pressed = (r) => (sel ? `aria-pressed="${sel.has(r.slug)}"` : "");
-  const meta = (r) => `<div class="meta">${r.eta ? `${ic("clock")}<span>${esc(r.eta.label)}</span>` : r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : ""}${(r.eta || r.minutes) && r.rating ? '<i class="dotsep"></i>' : ""}${r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""}${r.favorite ? ' <span class="heart-s">♥</span>' : ""}</div>`;
+  // ≈ time · cost per serving · rating, on one line
+  const meta = (r) => {
+    const bits = [r.eta ? `${ic("clock")}<span>${esc(r.eta.label)}</span>` : r.minutes ? `${ic("clock")}<span>${esc(r.minutes)} mins</span>` : "",
+      r.cost && r.cost.per_serving ? `<span title="Cost per serving">${esc(money(r.cost.per_serving, r.cost.approx))}/serving</span>` : "",
+      r.rating ? `<span class="star">★</span><span>${(+r.rating).toFixed(1)}</span>` : ""].filter(Boolean);
+    return `<div class="meta">${bits.join('<i class="dotsep"></i>')}${r.favorite ? ' <span class="heart-s">♥</span>' : ""}</div>`;
+  };
   box.innerHTML = `<div class="group recipe-list ${sel ? "selecting" : ""}">${list.map((r, i) => {
     const img = recipeImg(r);
     return `<button class="row ${sel && sel.has(r.slug) ? "sel" : ""}" data-slug="${esc(r.slug)}" data-i="${i}" ${pressed(r)}>${mark(r)}<div class="thumb" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</div>
@@ -105,7 +111,7 @@ function drawRecipeList() {
   }).join("")}</div>
   <div class="recipe-grid ${sel ? "selecting" : ""}">${list.map((r, i) => {
     const img = recipeImg(r);
-    return `<button class="rcard ${sel && sel.has(r.slug) ? "sel" : ""}" data-slug="${esc(r.slug)}" data-i="${i}" ${pressed(r)}><div class="img" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}${mark(r)}${r.favorite ? '<span class="heart">♥</span>' : ""}</div>
+    return `<button class="rcard ${sel && sel.has(r.slug) ? "sel" : ""}" data-slug="${esc(r.slug)}" data-i="${i}" ${pressed(r)}><div class="img" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}${mark(r)}${r.favorite ? '<span class="heart">♥</span>' : ""}${r.ai_generated ? '<span class="ai-chip">AI-created</span>' : ""}</div>
       <div class="body"><div class="n">${esc(r.name)}</div>${meta(r)}</div></button>`;
   }).join("")}</div>`;
   box.onclick = (e) => {
@@ -241,7 +247,7 @@ async function renderDiary() {
   app.innerHTML = `${topbar(`<button class="round-btn left" id="dy-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span>`)}
     <h1 class="title">Cooking diary</h1>
     <div class="chips" id="dy-f">${[["all", "All"], ["top", "★ 4+"], ["notes", "Has notes"]].map(([k, l]) => `<button class="filter ${f === k ? "on" : ""}" data-f="${k}">${esc(l)}</button>`).join("")}</div>
-    <div id="dy-list">${loading()}</div>`;
+    <div id="dy-list">${skel()}</div>`;
   bindTopbar();
   $("#dy-back").onclick = () => (history.length > 1 ? history.back() : go("home"));
   $$("#dy-f [data-f]").forEach((b) => (b.onclick = () => { state.diaryFilter = b.dataset.f; renderDiary(); }));
@@ -360,7 +366,7 @@ function sourceLine(rec) {
 }
 async function renderRecipe(slug) {
   state.tab = "recipes"; renderTabs();
-  app.innerHTML = loading();
+  app.innerHTML = skel("detail");
   let rec;
   try { rec = await api("GET", `/api/recipe/${encodeURIComponent(slug)}`); }
   catch (e) { app.innerHTML = `${topbar(`<button class="round-btn left" id="rd-err-back">${ic("chevL")}</button>`)}<div class="banner">${esc(e.message)}</div>`; bindTopbar(); $("#rd-err-back").onclick = () => go("recipes"); return; }
@@ -1754,7 +1760,7 @@ async function renderMake(tab, focus) {
   app.innerHTML = `${topbar(`<button class="round-btn left" id="mk-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="mk-refresh" aria-label="Refresh">${ic("refresh")}</button>`)}
     <h1 class="title">What can I make?</h1><div class="subtitle" id="mk-sub">Checking your kitchen…</div>
     <div class="toolbar"><button class="pill-btn ink" id="mk-cook">${ic("sparkle")} Cook with what I have</button></div>
-    <div class="seg" id="mk-seg" role="tablist" aria-label="Show"></div><div id="mk-list">${loading()}</div>`;
+    <div class="seg" id="mk-seg" role="tablist" aria-label="Show"></div><div id="mk-list">${skel()}</div>`;
   bindTopbar();
   $("#mk-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
   $("#mk-refresh").onclick = () => { MK.data = null; MK.ideas = null; renderMake(); };
@@ -1925,7 +1931,7 @@ async function renderSpending() {
   app.innerHTML = `${topbar(`<button class="round-btn left" id="sp-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="text-btn" id="sp-set">Budget</button>`)}
     <h1 class="title">Spending</h1>
     <div class="seg" id="sp-by"><button data-by="week" class="${SP.by === "week" ? "on" : ""}">By week</button><button data-by="month" class="${SP.by === "month" ? "on" : ""}">By month</button></div>
-    <div id="sp-body">${loading()}</div>`;
+    <div id="sp-body">${skel()}</div>`;
   bindTopbar();
   $("#sp-back").onclick = () => (history.length > 1 ? history.back() : go("home"));
   $("#sp-set").onclick = () => openPricesSettings();
@@ -2685,7 +2691,7 @@ async function renderExpiring(keep) {
   if (!keep) EXPV.seg = null;   // a fresh visit opens on the first segment with something in it
   app.innerHTML = `${topbar(`<button class="round-btn left" id="ex-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span>`)}
     <h1 class="title">Expiring</h1><div class="subtitle" id="ex-sub">Checking dates…</div>
-    <div class="seg" id="ex-seg" role="tablist" aria-label="Show"></div><div id="ex-list">${loading()}</div>`;
+    <div class="seg" id="ex-seg" role="tablist" aria-label="Show"></div><div id="ex-list">${skel()}</div>`;
   bindTopbar();
   $("#ex-back").onclick = () => (history.length > 1 ? history.back() : go("pantry"));
   try { EXPV.data = await api("GET", "/api/pantry/expiring"); } catch (e) { if ($("#ex-list")) $("#ex-list").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }

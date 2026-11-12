@@ -190,14 +190,17 @@ const REPO = "https://github.com/thomasjvalenzuela/tableplan";
 function renderTabs() {
   const v = state.cfg?.version || "";
   $("#tabs").innerHTML = `<div class="nav-brand"><img src="/static/icon-180.png" alt="">TablePlan</div>` +
-    TABS.map(([id, label, icon]) => `<button class="tab ${state.tab === id ? "on" : ""}" data-tab="${esc(id)}">${ic(icon)}<span>${label}</span></button>`).join("") +
-    `<div style="flex:1" class="desktop-only"></div><button class="tab desktop-only ${upd() ? "dot" : ""}" id="nav-settings">${ic("gear")}<span>Settings</span></button>
+    TABS.map(([id, label, icon]) => `<button class="tab ${state.tab === id && !(id === "recipes" && document.body.dataset.page === "make") ? "on" : ""}" data-tab="${esc(id)}">${ic(icon)}<span>${label}</span></button>` +
+      (id === "recipes" && c_native() ? `<button class="tab sub wide-only ${document.body.dataset.page === "make" ? "on" : ""}" id="nav-make" ${document.body.dataset.page === "make" ? 'aria-current="page"' : ""}>${ic("sparkle")}<span>What can I make?</span></button>` : "")).join("") +
+    `<div style="flex:1" class="desktop-only"></div><button class="tab desktop-only ${updUnseen() ? "dot" : ""}" ${setBtn("nav-settings", "Settings")}>${ic("gear")}<span>Settings</span></button>
      <div class="nav-foot"><span>Version ${esc(v)}</span><a ${extLink(state.cfg?.repo_url) || extLink(REPO)} aria-label="TablePlan on GitHub" title="TablePlan on GitHub">${ic("github")}</a></div>`;
   $$("#tabs .tab[data-tab]").forEach((b) => (b.onclick = () => go(b.dataset.tab)));
   $("#nav-settings").onclick = () => openSettings();
+  $("#nav-make") && ($("#nav-make").onclick = () => { location.hash = "make"; });
 }
 function go(tab) {
   state.tab = tab;
+  document.body.dataset.page = tab;
   document.body.classList.remove("selecting");
   if (location.hash !== "#" + tab) history.pushState(null, "", "#" + tab);
   lastHash = location.hash;
@@ -208,12 +211,43 @@ function go(tab) {
   Promise.resolve(done).then(() => { if (location.hash.slice(1) === tab || (!location.hash && tab === "home")) window.scrollTo(0, 0); }, () => {});
 }
 let lastHash = null;
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-empty-go]"); if (b) go(b.dataset.emptyGo); });
+// Keyboard shortcuts on computers: / search · N new list item · G then H/R/P/S/I to switch tabs. Never while typing.
+const SHORTCUTS = [["/", "Search on this page"], ["N", "Add an item to the shopping list"], ["G then H", "Home"], ["G then R", "Recipes"],
+  ["G then P", "Plan"], ["G then S", "Shopping list"], ["G then I", "Inventory"], ["Esc", "Close a sheet or menu"]];
+let gPending = 0;
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+  const t = e.target, typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  if (typing || $("#layer")?.firstChild || $("#cook") || !matchMedia("(pointer:fine)").matches) return;
+  const k = e.key.toLowerCase();
+  if (gPending && Date.now() - gPending < 1200) {
+    gPending = 0;
+    const tab = { h: "home", r: "recipes", p: "meals", s: "list", i: "pantry" }[k];
+    if (tab) { e.preventDefault(); go(tab); }
+    return;
+  }
+  if (k === "g") { gPending = Date.now(); return; }
+  if (e.key === "/") {
+    const f = $$("#app .search input, #app input[type=search], #qa").find((x) => x.offsetParent);
+    if (f) { e.preventDefault(); f.focus(); f.select?.(); }
+  } else if (k === "n") {
+    e.preventDefault();
+    const add = () => { const q = $("#qa"); if (q) { q.focus(); return true; } return false; };
+    if (!add()) { go("list"); setTimeout(add, 450); }
+  }
+});
+function openShortcuts() {
+  openSheet("Keyboard shortcuts", `<div class="group">${SHORTCUTS.map(([k, d]) => `<div class="row"><div class="main"><div class="a">${esc(d)}</div></div><span class="kbd-set">${k.split(" then ").map((x) => `<kbd>${esc(x)}</kbd>`).join(" then ")}</span></div>`).join("")}</div>
+    <p class="hint">Shortcuts work on a computer when you're not typing in a box.</p>`);
+}
 function route() {
   setTimeout(updateCompactBar, 60);
   if (location.hash === lastHash && document.getElementById("app").childElementCount) return;
   lastHash = location.hash;
   document.body.classList.remove("selecting");
   const h = decodeURIComponent(location.hash.slice(1));
+  document.body.dataset.page = (h.split("/")[0] || "home").replace(/[^a-z]/g, "") || "home";
   if (h.startsWith("recipe/")) { window.scrollTo(0, 0); return renderRecipe(h.slice(7)); }
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
   if (h === "diary") { window.scrollTo(0, 0); return renderDiary(); }
@@ -225,7 +259,15 @@ function route() {
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
 const upd = () => !!state.update?.update_available;
-const topbar = (extra = "") => `${storageBar()}${updateBar()}<div class="topbar">${extra}<button class="round-btn ${upd() ? "dot" : ""}" id="btn-settings" aria-label="Settings">${ic("gear")}</button></div>`;
+// The red dot on Settings means one thing: an update you haven't looked at yet. Opening Settings or the update help clears it.
+const updUnseen = () => { if (!upd()) return false; try { return localStorage.getItem("tp.updSeen") !== state.update.latest; } catch (_) { return true; } };
+function markUpdSeen() {
+  if (!upd()) return;
+  try { localStorage.setItem("tp.updSeen", state.update.latest); } catch (_) {}
+  $$(".dot#btn-settings, .dot#nav-settings").forEach((b) => { b.classList.remove("dot"); b.removeAttribute("title"); b.setAttribute("aria-label", "Settings"); });
+}
+const setBtn = (id, label) => `id="${id}" aria-label="${updUnseen() ? `${label} · update available` : label}" ${updUnseen() ? `title="TablePlan ${esc(state.update.latest)} is available"` : ""}`;
+const topbar = (extra = "") => `${storageBar()}${updateBar()}<div class="topbar">${extra}<button class="round-btn ${updUnseen() ? "dot" : ""}" ${setBtn("btn-settings", "Settings")}>${ic("gear")}</button></div>`;
 // Shown on every screen when the data folder would be wiped by a container rebuild.
 const DOCS_BACKUPS = "https://github.com/thomasjvalenzuela/tableplan/blob/main/docs/install.md#backups";
 function storageBar() {
@@ -265,18 +307,36 @@ async function checkUpdate() {
     staleBuild(u.version);
     if (u.update_available && !was) {
       if (!$("#upd-bar") && $(".topbar")) { $(".topbar").insertAdjacentHTML("beforebegin", updateBar()); bindUpdateBar(); }
-      $("#btn-settings")?.classList.add("dot"); renderTabs();
+      if (updUnseen()) $("#btn-settings")?.classList.add("dot");
+      renderTabs();
     }
   } catch (_) {}
 }
 function bindTopbar() { $("#btn-settings") && ($("#btn-settings").onclick = openSettings); bindUpdateBar(); }
 const loading = () => `<div class="spinner"></div>`;
+// Page-level placeholders: grey shapes where the content will be, instead of a blank screen. They keep the
+// "spinner" class so code that swaps the loader out finds them.
+function skel(kind = "rows") {
+  const bar = (w, h = 14) => `<i style="width:${w};height:${h}px"></i>`;
+  const row = `<div class="sk-row"><i class="sk-ic"></i><span>${bar("60%")}${bar("35%", 11)}</span></div>`;
+  const body = kind === "grid" ? `<div class="sk-grid">${`<div class="sk-card"><i class="sk-img"></i>${bar("70%")}${bar("40%", 11)}</div>`.repeat(8)}</div>`
+    : kind === "home" ? `<div class="sk-tiles">${`<i class="sk-tile"></i>`.repeat(3)}</div><div class="sk-block">${row.repeat(4)}</div>`
+    : kind === "detail" ? `<i class="sk-hero"></i>${bar("55%", 26)}${bar("35%")}<div class="sk-block">${row.repeat(5)}</div>`
+    : kind === "board" ? `<div class="sk-board">${`<i class="sk-day"></i>`.repeat(7)}</div>`
+    : `<div class="sk-block">${row.repeat(6)}</div>`;
+  return `<div class="spinner skel" role="status" aria-label="Loading">${body}</div>`;
+}
 
 // ------------------------------------------------------------------ HOME
+const HOME_WIDE = matchMedia("(min-width: 1100px)");
+const homeWide = () => HOME_WIDE.matches;
+HOME_WIDE.addEventListener?.("change", () => { if (state.tab === "home" && !$("#layer")?.firstChild && document.body.dataset.page === "home") renderHome(); });
 async function renderHome() {
   app.innerHTML = topbar(`<button class="round-btn" id="btn-add" aria-label="Add recipe">${ic("plus")}</button>`) +
-    `<h1 class="title">Today</h1><div class="subtitle">${esc(fmt(new Date(), { weekday: "long", month: "long", day: "numeric" }))}</div>${loading()}`;
+    `<h1 class="title">Today</h1><div class="subtitle">${esc(fmt(new Date(), { weekday: "long", month: "long", day: "numeric" }))}</div>
+    ${c_native() ? `<div class="toolbar mobile-only"><button class="pill-btn" id="home-make">${ic("sparkle")} What can I make?</button></div>` : ""}${skel("home")}`;
   bindTopbar(); $("#btn-add").onclick = openAddRecipe;
+  $("#home-make") && ($("#home-make").onclick = () => { location.hash = "make"; });
   let s, list = null;
   try {
     [s, list] = await Promise.all([api("GET", "/api/summary"), api("GET", "/api/list").catch(() => null)]);
@@ -294,43 +354,47 @@ async function renderHome() {
   if (+s.review_items) html += `<button class="nudge" id="home-inv-review"><span class="ic bg-ink">${ic("scan")}</span><span><b>${esc(plural(+s.review_items, "item"))} to review</b><small>Scanned items the product databases didn't know</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
   html += homeContextCard(s, tonight);
   html += homeStats(s, list);
-  html += `<section class="home-card budget-w" id="home-budget" hidden aria-label="Grocery budget"></section>`;
-  html += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
+  let side = "", main2 = "";
+  side += `<section class="home-card budget-w" id="home-budget" hidden aria-label="Grocery budget"></section>`;
+  side += `<section class="home-card cl-w" id="home-cl" hidden aria-label="Getting started"></section>`;
 
   // 1. Shopping: the next few things to buy, soonest meal first
   const toBuy = ((list && list.items) || []).filter((i) => !i.checked);
   const soonest = (i) => (i.uses && i.uses.length ? i.uses[0].date : "9999");
   const top = toBuy.slice().sort((a, b) => soonest(a).localeCompare(soonest(b))).slice(0, 5);
   const showStores = ((list && list.stores) || []).length && toBuy.some((i) => i.store_id != null);
-  html += `<section class="home-card shop-w" aria-label="Shopping list"><div class="hc-h"><h2>Shopping list <span>· ${esc(plural(toBuy.length, "item"))} to buy</span></h2><button class="link-btn" data-go="list">View all ›</button></div>
+  side += `<section class="home-card shop-w" aria-label="Shopping list"><div class="hc-h"><h2>Shopping list <span>· ${esc(plural(toBuy.length, "item"))} to buy</span></h2><button class="link-btn" data-go="list">View all ›</button></div>
     ${top.length ? `<div class="shop-rows">${top.map((i) => `<div class="shop-row" data-sid="${esc(i.id)}"><button class="check sq" data-buy="${esc(i.id)}" aria-label="Got ${esc(itemTitle(i))}">${ic("check")}</button>
       <div class="main"><div class="a">${esc(itemTitle(i))}</div><div class="b">${esc([itemSub(i), showStores ? storeName(list, i.store_id) : ""].filter(Boolean).join(" · "))}</div></div>
       ${i.uses && i.uses.length ? `<span class="for-tag">for ${esc(wkShort(i.uses[0].date))}</span>` : ""}</div>`).join("")}</div>`
       : `<div class="all-set">You're all set for this week ✓</div>`}</section>`;
 
   // 2. This week: today + 6 days, dinner first
-  html += `<section class="home-week" aria-label="This week"><div class="hc-h"><h2>This week</h2><button class="link-btn" data-go="meals">Plan ›</button></div><div class="wk">`;
+  main2 += `<section class="home-week" aria-label="This week"><div class="hc-h"><h2>This week</h2><button class="link-btn" data-go="meals">Plan ›</button></div><div class="wk">`;
   for (let i = 0; i < 7; i++) {
     const iso = isoDate(addDays(today(), i)), all = byDate(iso), e = all[0];
     const img = e ? imgUrl(e.recipe) : null;
-    html += e ? `<button class="wk-day ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}"><span class="wk-d">${esc(i === 0 ? "Today" : wkShort(iso))}</span><span class="wk-n">${esc(parseISO(iso).getDate())}</span>
+    main2 += e ? `<button class="wk-day ${e.cooked ? "cooked" : ""}" data-entry="${esc(e.id)}"><span class="wk-d">${esc(i === 0 ? "Today" : wkShort(iso))}</span><span class="wk-n">${esc(parseISO(iso).getDate())}</span>
         <span class="wk-plate ${img ? "" : "ph"}" ${img ? bgStyle(img) : ""}>${img ? "" : ic("dish")}${e.cooked ? `<span class="wk-ok" aria-label="cooked">✓</span>` : +e.missing ? `<span class="wk-dot" aria-label="Missing ${esc(e.missing)}"></span>` : ""}</span>
         <span class="wk-name">${esc(entryName(e))}</span>${all.length > 1 ? `<span class="wk-more">+${esc(all.length - 1)} more</span>` : ""}</button>`
       : `<button class="wk-day empty" data-plan-day="${esc(iso)}"><span class="wk-d">${esc(i === 0 ? "Today" : wkShort(iso))}</span><span class="wk-n">${esc(parseISO(iso).getDate())}</span><span class="wk-plate ph">${ic("plus")}</span><span class="wk-name muted">Add</span></button>`;
   }
-  html += `</div></section>`;
+  main2 += `</div></section>`;
 
   // 3. Tonight: only when something is planned today
   if (tonight && tonight.recipe) {
     const img = imgUrl(tonight.recipe, "full"), miss = +tonight.missing || 0;
-    html += `<section class="tonight" aria-label="Tonight"><div class="tn-band"><h2>Tonight</h2><span>${esc(fmt(new Date(), { weekday: "long", month: "short", day: "numeric" }))}${tonightAll.length > 1 ? ` · +${esc(tonightAll.length - 1)} more` : ""}</span></div>
+    main2 += `<section class="tonight" aria-label="Tonight"><div class="tn-band"><h2>Tonight</h2><span>${esc(fmt(new Date(), { weekday: "long", month: "short", day: "numeric" }))}${tonightAll.length > 1 ? ` · +${esc(tonightAll.length - 1)} more` : ""}</span></div>
       <button class="tn-plate ${img ? "" : "ph"}" id="tn-open" ${img ? bgStyle(img) : ""} aria-label="Open ${esc(entryName(tonight))}">${img ? "" : "🍽️"}</button>
       <div class="tn-name">${esc(entryName(tonight))}</div>
       <div class="tn-acts">${tonight.cooked ? `<span class="pill ok">Cooked ✓</span>` : miss ? `<button class="btn sec small" id="tn-miss">${ic("cart")} Missing ${esc(miss)}</button>` : `<button class="btn small" id="tn-cook">${ic("play")} Start cooking</button>`}</div></section>`;
   }
 
-  html += `<section class="home-card diary-w" id="home-diary" hidden aria-label="Cooking diary"></section>`;
-  app.querySelector(".spinner").outerHTML = `<div class="home fade-in">${html}</div>`;
+  const diary = `<section class="home-card diary-w" id="home-diary" hidden aria-label="Cooking diary"></section>`;
+  // wide screens: today, alerts, tiles and the week on the left; the list, getting started, budget and diary on the right
+  app.querySelector(".spinner").outerHTML = homeWide()
+    ? `<div class="home home2 fade-in"><div class="home-main">${html}${main2}</div><div class="home-side">${side}${diary}</div></div>`
+    : `<div class="home fade-in">${html}${side}${main2}${diary}</div>`;
   homeChecklist($("#home-cl"));
   homeBudget($("#home-budget"));
   $("#home-review") && ($("#home-review").onclick = () => openReview());
@@ -345,6 +409,8 @@ async function renderHome() {
   }).catch(() => {});
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
   $("#stat-exp") && ($("#stat-exp").onclick = () => { location.hash = "inventory/expiring"; });
+  $("#stat-stock") && ($("#stat-stock").onclick = () => { go("pantry"); setTimeout(() => startStockUp(renderPantry), 300); });
+  $("#stat-add") && ($("#stat-add").onclick = () => { go("list"); setTimeout(() => $("#qa")?.focus(), 400); });
   $("#fix-mealie") && ($("#fix-mealie").onclick = () => openSetupSection("mealie", "Recipe library", reloadCfg));
   $$(".wk-day[data-entry]").forEach((b) => (b.onclick = () => { const e = s.week.find((x) => String(x.id) === b.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else openEntry(e); }));
   $$("[data-plan-day]").forEach((b) => (b.onclick = () => openPicker(b.dataset.planDay, "dinner", null, { seq: true })));
@@ -375,11 +441,18 @@ function homeStats(s, list) {
   const week = (s.week || []).filter((e) => e.recipe && !e.cooked && !e.skipped);
   const mins = week.reduce((n, e) => n + (+(e.recipe.eta?.shown || e.recipe.minutes) || 0), 0);
   const hrs = mins >= 60 ? `${Math.round(mins / 6) / 10} h` : `${mins} min`;
+  const days = new Set(toBuy.flatMap((i) => (i.uses || []).map((u) => u.date))).size;
+  const inv = +s.pantry_count || 0;
+  const pill = (txt, cls = "") => (txt ? `<i class="${cls}">${esc(txt)}</i>` : "");
+  const tile = (attrs, n, label, tag) => `<button class="stat ${tag && tag.includes('class="act"') ? "zero" : ""}" ${attrs}><b>${esc(n)}</b><span>${esc(label)}</span>${tag || ""}</button>`;
   return `<div class="stats" role="group" aria-label="At a glance">
-    ${soon.length ? `<button class="stat" id="stat-exp"><b>${esc(soon.length)}</b><span>expiring soon</span><i class="warn">See what to use</i></button>`
-      : `<button class="stat" data-go="pantry"><b>${esc(s.pantry_count || 0)}</b><span>in inventory</span>${gone ? `<i class="bad">${esc(gone)} expired</i>` : `<i>all fresh</i>`}</button>`}
-    <button class="stat" data-go="list"><b>${esc(toBuy.length)}</b><span>to buy</span><i>${esc(plural(new Set(toBuy.flatMap((i) => (i.uses || []).map((u) => u.date))).size, "day"))}</i></button>
-    <button class="stat" data-go="meals"><b>${esc(mins ? hrs : week.length)}</b><span>${mins ? "cooking this week" : "meals this week"}</span><i>${esc(plural(week.length, "meal"))}</i></button></div>`;
+    ${soon.length ? tile('id="stat-exp"', soon.length, "expiring soon", pill("See what to use", "warn"))
+      : inv ? tile('data-go="pantry"', inv, "in inventory", gone ? pill(`${gone} expired`, "bad") : pill("all fresh"))
+      : tile('id="stat-stock"', 0, "in inventory", pill("Stock up", "act"))}
+    ${toBuy.length ? tile('data-go="list"', toBuy.length, "to buy", days ? pill(`for ${plural(days, "day")}`) : "")
+      : tile('id="stat-add"', 0, "to buy", pill("Add to list", "act"))}
+    ${week.length ? tile('data-go="meals"', mins ? hrs : week.length, mins ? "cooking this week" : (week.length === 1 ? "meal" : "meals") + " this week", mins ? pill(plural(week.length, "meal")) : "")
+      : tile('data-go="meals"', 0, "meals this week", pill("Plan a meal", "act"))}</div>`;
 }
 const storeName = (list, id) => (id == null ? "" : ((list.stores || []).find((x) => String(x.id) === String(id)) || {}).name || "");
 // At most one nudge on Home, most useful first: missing ingredients > kitchen check-in (time-bound) > plan running out > stock your kitchen
@@ -448,7 +521,7 @@ async function renderMeals() {
     <div class="toolbar"><button class="pill-btn ink" id="fill">${ic("plus")} Plan my ${H === 14 ? "2 weeks" : `${H} days`}</button>
       <button class="pill-btn" id="to-list">${ic("cart")} Shopping list<span id="list-n"></span></button></div>
     <div id="plan-cta"></div><div id="past" class="past"></div>
-    <div id="board" class="board">${loading()}</div>
+    <div id="board" class="board">${skel("board")}</div>
     <p class="hint board-hint"><span class="mobile-only">Touch and hold a meal, then drag it to another day.</span><span class="desktop-only">Drag a meal onto another day to move it there. Drop it on a meal of the same type to swap the two.</span></p>`;
   bindTopbar();
   $("#btn-share").onclick = () => openShare("plan", { start, end, label: `Next ${H} days` });
@@ -1114,7 +1187,7 @@ const itemSub = (it) => (it.food ? it.qty || (it.text && it.text.toLowerCase() !
 const setStoreFilter = (f) => { L.filter = f; try { localStorage.setItem("tp.store", f); } catch (_) {} };
 
 async function renderList() {
-  app.innerHTML = topbar(`<button class="round-btn" id="btn-share" aria-label="Share">${ic("share")}</button>`) + `<h1 class="title">Shopping</h1><div id="lists">${loading()}</div>`;
+  app.innerHTML = topbar(`<button class="round-btn" id="btn-share" aria-label="Share">${ic("share")}</button>`) + `<h1 class="title">Shopping</h1><div id="lists">${skel()}</div>`;
   bindTopbar();
   if (!(await loadList())) return;
   $("#btn-share").onclick = () => openShare("list", { id: L.data.id, name: L.data.name || "Shopping list" });
@@ -1163,7 +1236,7 @@ function drawList(focusAdd) {
     arr.forEach((it) => { const a = it.aisle || "Other"; if (!aisles.has(a)) aisles.set(a, []); aisles.get(a).push(it); });
     for (const [a, its] of aisles) html += `<div class="group-label section">${esc(a)}</div><div class="group shop">${its.map(listRow).join("")}</div>`;
   }
-  if (!shown.length) html += `<div class="empty"><div class="em">🛒</div>${items.length ? "Nothing on the list for this store." : "Your list is empty.<br>Plan a meal and its ingredients land here, or type above."}</div>`;
+  if (!shown.length) html += `<div class="empty"><div class="em">🛒</div>${items.length ? "Nothing on the list for this store." : "Your list is empty.<br>Plan a meal and its ingredients land here, or type above."}</div>${items.length ? "" : `<button class="btn sec empty-act" data-empty-go="meals">${ic("cal")} Plan a meal</button>`}`;
   if (d.recently_checked.length) {
     html += `<details class="recent"><summary>Recently checked <span class="muted">${d.recently_checked.length}</span></summary><div class="group shop">${d.recently_checked.map((it) =>
       `<button class="row done" data-uncheck="${esc(it.id)}"><span class="emo">${esc(it.emoji || "🛒")}</span><div class="main"><div class="a">${esc(itemTitle(it))}</div><div class="b">${it.have ? "Had it · " : ""}Tap to put it back on the list</div></div><span class="check sq on">${ic("check")}</span></button>`).join("")}</div></details>`;
@@ -1509,7 +1582,7 @@ async function renderPantry() {
   app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="text-btn" id="p-select">${INV.sel ? "Cancel" : "Select"}</button><button class="round-btn" id="p-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
     `<h1 class="title">Inventory</h1>
     <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button><button class="pill-btn" id="p-exp">${ic("clock")} Expiring<span class="pb-n" id="p-exp-n" hidden></span></button></div>
-    <div id="inv-items">${loading()}</div><div class="sel-bar" id="inv-bar" hidden></div>`;
+    <div id="inv-items">${skel()}</div><div class="sel-bar" id="inv-bar" hidden></div>`;
   bindTopbar();
   $("#p-select").onclick = () => { INV.sel = INV.sel ? null : new Set(); state.invKeepSel = true; renderPantry(); };
   $("#p-scan").onclick = () => startStockUp(renderPantry);
@@ -1533,7 +1606,8 @@ async function renderPantry() {
     <div class="seg">${[["all", "All"], ["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([k, l]) =>
       `<button data-f="${k}" class="${f === k ? "on" : ""}">${l}${counts[k] ? ` ${counts[k]}` : ""}</button>`).join("")}</div>`;
   if (!shown.length) {
-    html += `<div class="empty"><div class="em">🥬</div>${items.length ? "Nothing here." : "Your inventory is empty.<br>Scan what you have, or check items off your shopping list and they'll show up here with use-by dates."}</div>`;
+    html += `<div class="empty"><div class="em">🥬</div>${items.length ? "Nothing here." : "Your inventory is empty.<br>Scan what you have, or check items off your shopping list and they'll show up here with use-by dates."}</div>
+      ${items.length ? "" : `<button class="btn" id="inv-first">${ic("scan")} Stock up</button>`}`;
   } else if (view === "grid") {
     const hot = shown.filter((i) => i.days_left != null).sort((a, b) => a.days_left - b.days_left).slice(0, 9);
     if (hot.length >= 3) html += `<div class="hotbar-h">Use soonest</div><div class="hotbar">${hot.map(slotHtml).join("")}</div>`;
@@ -1543,7 +1617,7 @@ async function renderPantry() {
       if (its.length) html += `<div class="slots-h">${esc(l)} <span>${its.length}</span></div><div class="slots">${its.map(slotHtml).join("")}</div>`;
     }
   } else {
-    html += `<div class="group" style="margin-top:12px">${shown.map((it) => {
+    html += `<div class="group inv-list" style="margin-top:12px">${shown.map((it) => {
       const left = Math.round(it.amount_left * 100);
       return `<button class="row ${INV.sel && INV.sel.has(it.id) ? "sel" : ""}" data-id="${esc(it.id)}" ${INV.sel ? `aria-pressed="${INV.sel.has(it.id)}"` : ""}>${invMark(it)}${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
         <div class="main"><div class="a">${esc(it.name)}${it.review ? ` <span class="rv-badge inline">Review later</span>` : ""}</div>${it.product ? `<div class="b">${esc(it.product)}</div>` : ""}<div class="b">${it.place_label ? `${esc(it.place_label)} · ` : ""}${it.opened_on ? "Opened" : "Sealed"}${it.qty != null ? ` · ${esc(it.left_text)}` : left < 100 ? ` · ${left}% left` : ""}${it.quantity_text && it.quantity_text !== it.name ? ` · ${esc(it.quantity_text)}` : ""}</div>
@@ -1553,6 +1627,7 @@ async function renderPantry() {
   $("#inv-items").innerHTML = html;
   $$("[data-f]").forEach((b) => (b.onclick = () => { state.pantryFilter = b.dataset.f; renderPantry(); }));
   $("#inv-review") && ($("#inv-review").onclick = () => openReviewItems(renderPantry));
+  $("#inv-first") && ($("#inv-first").onclick = () => startStockUp(renderPantry));
   $$("#inv-items [data-id]").forEach((b) => (b.onclick = () => {
     const it = items.find((i) => String(i.id) === b.dataset.id);
     if (!INV.sel) return openPantryItem(it, renderPantry);
@@ -1941,6 +2016,7 @@ function openShare(kind, o) {
 
 // ------------------------------------------------------------------ settings
 async function openSettings() {
+  markUpdSeen();
   const c = state.cfg, s = { ...c.settings };
   const save = async (patch) => { try { Object.assign(s, patch); c.settings = await api("PUT", "/api/settings", patch); } catch (e) { fail(e); } };
   const draw = async () => {
@@ -2036,6 +2112,7 @@ async function openSettings() {
       <div class="group">
         <button class="row" id="st-wn"><div class="main"><div class="a">What's new</div><div class="b">Everything added recently</div></div><span class="chev">${ic("chevR")}</span></button>
         <button class="row" id="st-tour"><div class="main"><div class="a">Replay tour</div><div class="b">A one-minute walk through the app</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row desktop-only" id="st-keys"><div class="main"><div class="a">Keyboard shortcuts</div><div class="b">/ search · N add to list · G then H, R, P, S or I</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
       <div class="group-label">Advanced</div>
       <div class="group">
@@ -2098,13 +2175,35 @@ async function openSettings() {
     };
     $("#st-rules").onclick = () => rulesBrowser(draw);
     $("#st-bctest").onclick = () => openBarcodeTest();
+    $("#st-keys") && ($("#st-keys").onclick = () => openShortcuts());
     $("#st-tour").onclick = () => { closeSheet(true); go("home"); setTimeout(() => startTour(0), 300); };
     $("#st-pans") && ($("#st-pans").onclick = () => openPansSettings());
     $("#st-prices") && ($("#st-prices").onclick = () => openPricesSettings());
     $("#st-photos") && ($("#st-photos").onclick = () => openPhotoSettings());
     $("#st-ideas") && ($("#st-ideas").onclick = () => openIdeasSettings());
+    settingsPanes();
   };
   openSheet("Settings", loading(), { onMount: draw });
+}
+
+// Settings on a wide screen: the section list on the left, the settings on the right (phones keep one column).
+const SET_WIDE = matchMedia("(min-width: 1024px)");
+function settingsPanes() {
+  const body = sheetBody(), sheet = body?.closest(".sheet");
+  if (!body || !sheet || !SET_WIDE.matches) return;
+  const labels = $$(":scope > .group-label", body);
+  if (labels.length < 4) return;
+  sheet.classList.add("st-two");
+  const main = document.createElement("div"); main.className = "st-main";
+  while (body.firstChild) main.appendChild(body.firstChild);
+  const nav = document.createElement("nav"); nav.className = "st-nav"; nav.setAttribute("aria-label", "Settings sections");
+  nav.innerHTML = labels.map((l, i) => { l.id = `st-sec-${i}`; return `<button data-sec-i="${i}">${esc(l.textContent.trim())}</button>`; }).join("");
+  body.append(nav, main);
+  const btns = $$("[data-sec-i]", nav);
+  const mark = (i) => btns.forEach((b, k) => { b.classList.toggle("on", k === i); if (k === i) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current"); });
+  btns.forEach((b) => (b.onclick = () => { const l = $(`#st-sec-${b.dataset.secI}`, main); sheet.scrollTo({ top: l.offsetTop - 70, behavior: "smooth" }); mark(+b.dataset.secI); }));
+  mark(0);
+  sheet.onscroll = () => { let cur = 0; labels.forEach((l, i) => { if (l.offsetTop - 90 <= sheet.scrollTop) cur = i; }); mark(cur); };
 }
 
 // ---------- Settings → Stores (rename, reorder with up/down, delete, add; every change saves right away)
@@ -2459,6 +2558,7 @@ function editRule(r, back) {
 // ------------------------------------------------------------------ boot
 async function reloadCfg() { try { state.cfg = await api("GET", "/api/config"); } catch (_) {} refresh(); }
 function openUpdateHelp() {
+  markUpdSeen();
   const u = state.update || {};
   const zima = (u.install || "zimaos") === "zimaos";
   const steps = zima ? [

@@ -541,6 +541,7 @@ def init_db():
         for col, typ in (("qty", "REAL"), ("unit", "TEXT"), ("original_qty", "REAL")):
             if col not in cols:   # known amounts: qty left in `unit`, original_qty = the full package
                 c.execute(f"ALTER TABLE pantry_items ADD COLUMN {col} {typ}")
+        _migrate_barcode_names(c)
         if not c.execute("SELECT 1 FROM settings WHERE key='stores_seeded'").fetchone():
             n_lists.seed_stores(c, DEFAULT_STORES)
             c.execute("INSERT INTO settings(key, value) VALUES ('stores_seeded', 'true')")
@@ -1700,12 +1701,31 @@ def keeps_hint(rule, row):
     return f"Usually keeps ~{_span(d)} {'in the freezer' if row['location'] == 'freezer' else 'after opening'}"
 
 
+BARE_CODE = re.compile(r"\d{8,14}")
+
+
+def _migrate_barcode_names(c):
+    """Older unknown scans were saved with the barcode as their name. They become review placeholders:
+    "Unknown item · <code>", with the code kept in upc, so Review later can name them."""
+    for r in c.execute("SELECT id, name, upc FROM pantry_items WHERE status='active' AND food_id IS NULL").fetchall():
+        name = (r["name"] or "").strip()
+        if BARE_CODE.fullmatch(name):
+            c.execute("UPDATE pantry_items SET name=?, upc=COALESCE(NULLIF(upc,''), ?), review=1 WHERE id=?",
+                      (f"Unknown item · {name}", name, r["id"]))
+
+
+def pantry_display_name(name):
+    """Never a bare barcode as a title."""
+    n = (name or "").strip()
+    return f"Unknown item · {n}" if BARE_CODE.fullmatch(n) else name
+
+
 def pantry_json(c, row):
     t = today()
     exp = parse_date(row["expires_on"])
     rule = rule_for(c, row)
     return {
-        "id": row["id"], "name": row["name"], "quantity_text": row["quantity_text"],
+        "id": row["id"], "name": pantry_display_name(row["name"]), "quantity_text": row["quantity_text"],
         "location": row["location"], "amount_left": row["amount_left"],
         "review": bool(row["review"]), "place": row["place"], "place_label": (places().get(row["place"]) or {}).get("label") if row["place"] else None,
         "purchased_on": row["purchased_on"], "opened_on": row["opened_on"], "frozen_on": row["frozen_on"],
@@ -12189,7 +12209,14 @@ class Handler(BaseHTTPRequestHandler):
         if m == "GET" and path == "/api/recipes":
             pool = recipe_pool(refresh=q.get("refresh") == "1")
             tags = sorted({t for r in pool for t in r["tags"] + r["categories"] if t}, key=str.lower)
-            return self.send(200, {"recipes": [{**r, "link": recipe_link(r["slug"])} for r in pool], "tags": tags})
+            costs = {}
+            if NATIVE:
+                try:
+                    costs = recipe_costs_all()
+                except Exception:
+                    costs = {}
+            return self.send(200, {"recipes": [{**r, "link": recipe_link(r["slug"]), **({"cost": costs[r["id"]]} if r["id"] in costs else {})}
+                                               for r in pool], "tags": tags})
 
         mm = re.fullmatch(r"/img/([A-Za-z0-9-]{1,64})", path)
         if m == "GET" and mm:
