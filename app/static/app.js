@@ -1608,6 +1608,9 @@ function openPantryItem(it, after) {
     const ruleLine = rule ? `${rule.name}` : "No match — set one so opened items get a countdown";
     const srcLabel = { package: "printed date", manual: "set by you", opened: "countdown since opening", frozen: "countdown since freezing", none: "" }[it.expiry_source] || "";
     sheetBody().innerHTML = `
+      ${c_native() ? `<div class="pi-photo"><span class="pi-pic">${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span>${esc(it.emoji || "🥫")}</span>`}</span>
+        <div class="pi-photo-acts">${it.image ? `<button class="chip-s" id="pi-cut">✂️ Cut out background</button>${it.image_cut ? `<button class="chip-s" id="pi-orig">Use original photo</button>` : ""}` : ""}
+          <label class="chip-s">${ic("camera")} ${it.image ? "New photo" : "Add a photo"}<input type="file" accept="image/*" id="pi-file" hidden></label></div></div>` : ""}
       ${it.review ? `<button class="nudge" id="pi-details"><span class="ic bg-ink">${ic("scan")}</span><span><b>Add details</b><small>The product databases didn't know barcode ${esc(it.upc || "")}</small></span><span class="chev">${ic("chevR")}</span></button>` : ""}
       <div style="display:flex;align-items:center;gap:10px;margin:-4px 2px 12px">${expiryPill(it)}<span class="muted">${esc(relExpiry(it))}${srcLabel ? ` · ${esc(srcLabel)}` : ""}</span></div>
       <div class="group"><div class="kv">
@@ -1657,6 +1660,13 @@ function openPantryItem(it, after) {
     $("#pi-rule").onclick = () => pickRule(it, async (rule) => { const r = await act({ action: "rule", rule_id: rule ? rule.id : null }, rule ? "Shelf life updated" : null); draw(r || it); after && after(); });
     $("#pi-toss").onclick = async () => { const r = await act({ action: "toss" }); if (r) { toast(`${it.name} tossed`, "Undo", async () => { await act({ action: "restore" }); after && after(); }); done(); } };
     $("#pi-details") && ($("#pi-details").onclick = () => { closeSheet(true); openItemDetails(it, after); });
+    const photoDone = (r) => { if (r && r.id) { it = r; draw(r); after && after(); } };
+    $("#pi-cut") && ($("#pi-cut").onclick = () => openCutout(it, (r) => { toast("Background removed"); after && after(); openPantryItem(r, after); }));
+    $("#pi-orig") && ($("#pi-orig").onclick = async () => { try { photoDone(await api("POST", `/api/pantry/${enc(it.id)}/photo/restore`, {})); toast("Original photo back"); } catch (e) { fail(e); } });
+    $("#pi-file") && ($("#pi-file").onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try { photoDone(await api("POST", `/api/pantry/${enc(it.id)}/photo`, { image: await squarePhoto(f, 1024) })); toast("Photo saved"); } catch (x) { fail(x); }
+    });
     $("#pi-open") && ($("#pi-open").onclick = async () => { const r = await act({ action: "open" }, "Marked opened"); if (r) { draw(r); after && after(); } });
   };
   openSheet(it.name, "", { onMount: () => draw(it) });

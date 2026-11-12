@@ -1568,3 +1568,21 @@ h1.title{font-size:34px;line-height:1.08;color:var(--title)}
 .bc-stepper{display:flex;align-items:center;gap:10px;padding:6px}
 .bc-stepper button[data-s]{width:36px;height:36px;border-radius:50%;border:0;background:var(--fill);font-size:20px;color:var(--text)}
 .bc-stepper b{min-width:24px;text-align:center;font-size:18px}
+
+/* product photos: a neutral square, and the cut-out editor */
+.slot img,.sb-img,.pi-pic img{background:var(--fill);border-radius:12px;object-fit:contain;padding:4%}
+.slot img{width:72%;height:72%}
+.row .sb-img{padding:3px}
+.pi-photo{display:flex;align-items:center;gap:12px;margin:-2px 2px 12px}
+.pi-pic{width:72px;height:72px;border-radius:16px;background:var(--fill);display:grid;place-items:center;font-size:34px;flex:none;overflow:hidden}
+.pi-pic img{width:100%;height:100%}
+.pi-photo-acts{display:flex;flex-wrap:wrap;gap:6px}
+.pi-photo-acts label.chip-s{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+.pi-photo-acts svg{width:14px;height:14px}
+.co-wrap{display:grid;place-items:center;border-radius:16px;padding:10px;background:repeating-conic-gradient(var(--fill) 0 25%,var(--card) 0 50%) 0 0/20px 20px}
+.co-cv{max-width:100%;max-height:52vh;touch-action:none;cursor:crosshair}
+.co-msg{min-height:18px;font-size:13.5px;color:var(--soon-fg);margin:8px 2px}
+.co-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:14px;color:var(--sub);margin-top:8px}
+.co-row input[type=range]{flex:1;accent-color:var(--ink)}
+.co-sz{display:flex;align-items:center;gap:8px;flex:1}
+input[type=range]{-webkit-appearance:auto;appearance:auto;background:none;padding:0;border:0;height:28px;accent-color:var(--ink);box-shadow:none}

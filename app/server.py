@@ -1713,6 +1713,7 @@ def pantry_json(c, row):
         "product": row["product"] or "", "upc": row["upc"] or "", "food_id": row["food_id"],
         **_reserved(c, row),
         "image": f"/img/pantry/{row['id']}?v={urllib.parse.quote(row['image'])}" if row["image"] else None,
+        "image_cut": bool(row["image"]) and _pantry_original(row["id"]) is not None,
         "rule": {"id": rule["id"], "name": rule["name"], "source": rule["source"],
                  **{f: rule[f] for f in RULE_FIELDS}, "tips": rule["tips"]} if rule else None,
     }
@@ -6042,14 +6043,7 @@ def _pantry_image(pid, url):
     except Exception as e:
         log("product photo skipped:", e)
         return None
-    d = os.path.join(IMG_DIR, "pantry")
-    os.makedirs(d, exist_ok=True)
-    fname = f"{int(pid)}.{_ext(ctype)}"
-    with open(os.path.join(d, fname), "wb") as f:
-        f.write(blob)
-    with db() as c:
-        c.execute("UPDATE pantry_items SET image=? WHERE id=?", (fname, pid))
-    return fname
+    return _pantry_image_blob(pid, blob, ctype)
 
 
 def scan_add(b):
@@ -6239,13 +6233,67 @@ def pantry_merge(pid, b):
 
 
 def _pantry_image_blob(pid, blob, ctype):
+    """Store an inventory item's photo (metadata stripped). The file name carries a content hash, so a new photo is
+    never served from a stale cache; older versions of this item's photo are removed (the kept original stays)."""
     d = os.path.join(IMG_DIR, "pantry")
     os.makedirs(d, exist_ok=True)
-    fname = f"{int(pid)}.{_ext(ctype)}"
+    blob = n_imgmeta.strip_metadata(blob)
+    fname = f"{int(pid)}-{hashlib.sha1(blob).hexdigest()[:6]}.{_ext(ctype)}"
+    for old in os.listdir(d):
+        if re.fullmatch(rf"{int(pid)}(-[0-9a-f]{{6}})?\.(jpg|png|webp|gif)", old) and old != fname:
+            os.remove(os.path.join(d, old))
     with open(os.path.join(d, fname), "wb") as f:
         f.write(blob)
     with db() as c:
         c.execute("UPDATE pantry_items SET image=? WHERE id=?", (fname, pid))
+    return fname
+
+
+def _pantry_original(pid):
+    d = os.path.join(IMG_DIR, "pantry")
+    return next((p for p in (os.path.join(d, f"{int(pid)}-orig.{e}") for e in ("jpg", "png", "webp", "gif")) if os.path.exists(p)), None)
+
+
+def pantry_photo(pid, b):
+    """POST /api/pantry/{id}/photo {image, cutout?}: a product photo for an inventory item. A background cut-out keeps
+    the photo it was made from, so "Use original photo" can bring it back."""
+    require_native()
+    blob, ctype = decode_upload(b.get("image"))
+    dims = n_imgmeta.size(blob)
+    if not dims or max(dims) > 2048:
+        raise ApiError(400, "Send a photo up to 2048 pixels.")
+    with db() as c:
+        r = pantry_row(c, pid)
+    if not r:
+        raise ApiError(404, "Item not found")
+    d = os.path.join(IMG_DIR, "pantry")
+    if b.get("cutout") is True:
+        if r["image"] and not _pantry_original(pid):
+            cur = os.path.join(d, r["image"])
+            if os.path.exists(cur):
+                shutil.copyfile(cur, os.path.join(d, f"{int(pid)}-orig.{r['image'].rsplit('.', 1)[1]}"))
+    else:
+        old = _pantry_original(pid)
+        if old:
+            os.remove(old)
+    _pantry_image_blob(pid, blob, ctype)
+    with db() as c:
+        return pantry_json(c, pantry_row(c, pid))
+
+
+def pantry_photo_restore(pid):
+    """POST /api/pantry/{id}/photo/restore: back to the photo before the cut-out."""
+    require_native()
+    old = _pantry_original(pid)
+    if not old:
+        raise ApiError(404, "There's no original photo to go back to.")
+    with open(old, "rb") as f:
+        blob = f.read()
+    kind = n_recipes.sniff_image(blob[:64]) or "jpg"
+    _pantry_image_blob(pid, blob, "image/" + ("jpeg" if kind == "jpg" else kind))
+    os.remove(old)
+    with db() as c:
+        return pantry_json(c, pantry_row(c, pid))
 
 
 def pantry_relookup(pid):
@@ -6333,9 +6381,10 @@ def scan_undo(b):
         if r["mealie_item_id"]:
             c.execute("UPDATE shopping_items SET checked=0, checked_at=NULL, checked_how=NULL WHERE id=?", (r["mealie_item_id"],))
         c.execute("DELETE FROM pantry_items WHERE id=?", (pid,))
-    if r["image"]:
+    for f in ([os.path.join(IMG_DIR, "pantry", os.path.basename(r["image"]))] if r["image"] else []) + [_pantry_original(pid)]:
         try:
-            os.remove(os.path.join(IMG_DIR, "pantry", os.path.basename(r["image"])))
+            if f:
+                os.remove(f)
         except OSError:
             pass
     return {"ok": True}
@@ -11184,6 +11233,7 @@ BODY_LIMITS = [
     (re.compile(r"/api/import/images|/api/import/queue|/api/receipt|/api/trip/apply"), 36_000_000),
     (re.compile(r"/api/import/queue/\d+/page/\d+"), 16_000_000),   # ~25 MB of files once base64-encoded
     (re.compile(r"/api/recipe/[^/]+/image/upload"), 20_000_000),   # master + card + thumb
+    (re.compile(r"/api/pantry/\d+/photo"), 12_000_000),
     (re.compile(r"/api/recipe/[^/]+/image/upload-legacy|/api/ingredient-image/upload|/api/scan/photo|/api/diary/\d+/photo|/api/pantry/\d+/details"), 12_000_000),
     (re.compile(r"/api/scan/identify"), 24_000_000),   # 8 MB image
 ]
@@ -11751,6 +11801,10 @@ class Handler(BaseHTTPRequestHandler):
         if m == "GET" and path == "/api/scan/test":
             require_native()
             return self.send(200, upc_diagnose(_s(q.get("code"), 20)))
+        mm = re.fullmatch(r"/api/pantry/(\d{1,12})/photo(/restore)?", path)
+        if m == "POST" and mm:
+            pid = int(mm.group(1))
+            return self.send(200, pantry_photo_restore(pid) if mm.group(2) else pantry_photo(pid, self.body()))
         mm = re.fullmatch(r"/api/pantry/(\d{1,12})/(details|relookup|merge)", path)
         if m == "POST" and mm:
             require_native()
@@ -11781,7 +11835,7 @@ class Handler(BaseHTTPRequestHandler):
             with db() as c:
                 r = c.execute("SELECT image FROM pantry_items WHERE id=?", (int(mm.group(1)),)).fetchone()
             fn = r["image"] if r else None
-            if not fn or not re.fullmatch(r"\d{1,12}\.(jpg|png|webp|gif)", fn):
+            if not fn or not re.fullmatch(r"\d{1,12}(-[0-9a-f]{6})?\.(jpg|png|webp|gif)", fn):
                 return self.send(404, b"", "image/jpeg", {"Cache-Control": "no-cache"})
             with open(os.path.join(IMG_DIR, "pantry", fn), "rb") as f:
                 return self.send(200, f.read(), mimetypes.guess_type(fn)[0] or "image/jpeg", {"Cache-Control": "private, max-age=86400"})

@@ -2497,3 +2497,98 @@ async function addSampleData() {
   try { const r = await api("POST", "/api/demo", {}); rstate.list = null; toast(r.already ? "Sample recipes are already here" : "Added 3 sample recipes and a few inventory items (marked Demo)"); if (state.tab === "recipes") renderRecipes(); else if (state.tab === "home") renderHome(); }
   catch (e) { fail(e); }
 }
+
+// ------------------------------------------------------------------ cut out a product photo's background (on this device)
+// Finds the background from the photo's border colour, flood-fills it away, softens the edge, then lets you fix it
+// with a brush. Saved as a PNG with transparency; the original is kept on the server.
+function openCutout(it, onSaved) {
+  const C = { tol: 40, mode: "erase", size: 18, mask: null, img: null, w: 0, h: 0 };
+  openSheet("Cut out background", `<div class="co-wrap"><canvas id="co-cv" class="co-cv" aria-label="Preview with the background removed"></canvas></div>
+    <div class="co-msg" id="co-msg" aria-live="polite"></div>
+    <label class="co-row">Background tolerance <input type="range" id="co-tol" min="8" max="110" value="40" aria-label="Background tolerance"></label>
+    <div class="co-row"><div class="seg mini-seg" id="co-mode"><button data-m="erase" class="on">Erase</button><button data-m="keep">Restore</button></div>
+      <label class="co-sz">Brush <input type="range" id="co-size" min="6" max="48" value="18" aria-label="Brush size"></label></div>
+    <div class="btn-row" style="margin-top:12px"><button class="btn sec" id="co-keep">Keep original</button><button class="btn" id="co-save" disabled>Save cut-out</button></div>
+    <p class="hint">Works best on a plain background. Drag on the photo to erase or restore.</p>`, {
+    onMount() {
+      const cv = $("#co-cv"), g = cv.getContext("2d", { willReadFrequently: true });
+      const src = document.createElement("canvas"), sg = src.getContext("2d", { willReadFrequently: true });
+      const img = new Image();
+      img.onload = () => {
+        const k = Math.min(1, 640 / Math.max(img.width, img.height));
+        C.w = Math.max(1, Math.round(img.width * k)); C.h = Math.max(1, Math.round(img.height * k));
+        src.width = cv.width = C.w; src.height = cv.height = C.h;
+        sg.drawImage(img, 0, 0, C.w, C.h);
+        C.px = sg.getImageData(0, 0, C.w, C.h).data;
+        segment(); $("#co-save").disabled = false;
+      };
+      img.onerror = () => { $("#co-msg").textContent = "That photo couldn't be opened."; };
+      img.src = it.image;
+      function segment() {
+        const { w, h, px } = C, n = w * h, tol2 = C.tol * C.tol;
+        const border = [];
+        for (let x = 0; x < w; x++) border.push(x, (h - 1) * w + x);
+        for (let y = 0; y < h; y++) border.push(y * w, y * w + w - 1);
+        const med = [0, 1, 2].map((ch) => { const v = border.map((i) => px[i * 4 + ch]).sort((a, b) => a - b); return v[v.length >> 1]; });
+        const near = (i) => { const dr = px[i * 4] - med[0], dg = px[i * 4 + 1] - med[1], db = px[i * 4 + 2] - med[2]; return dr * dr + dg * dg + db * db < tol2 && px[i * 4 + 3] > 10; };
+        const bg = new Uint8Array(n), stack = [];
+        for (const i of border) if (!bg[i] && near(i)) { bg[i] = 1; stack.push(i); }
+        while (stack.length) {   // flood fill the background from the edges
+          const i = stack.pop(), x = i % w;
+          for (const j of [i - w, i + w, x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1]) if (j >= 0 && j < n && !bg[j] && near(j)) { bg[j] = 1; stack.push(j); }
+        }
+        const a = new Uint8ClampedArray(n);
+        for (let i = 0; i < n; i++) a[i] = bg[i] ? 0 : 255;
+        C.mask = soften(a, w, h);
+        const fg = a.reduce((s, v) => s + (v ? 1 : 0), 0) / n;
+        $("#co-msg").textContent = fg > 0.97 ? "No clear background found. Try a higher tolerance, or keep the original." : fg < 0.04 ? "That removed almost everything. Try a lower tolerance, or keep the original." : "";
+        C.poor = fg > 0.97 || fg < 0.04;
+        paint();
+      }
+      function soften(a, w, h) {   // a 3×3 average on the edge only, so cut lines aren't jagged
+        const o = new Uint8ClampedArray(a);
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x; let s = 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += a[i + dy * w + dx];
+          if (s !== 0 && s !== 255 * 9) o[i] = s / 9;
+        }
+        return o;
+      }
+      function paint() {
+        const out = g.createImageData(C.w, C.h);
+        for (let i = 0; i < C.w * C.h; i++) { out.data[i * 4] = C.px[i * 4]; out.data[i * 4 + 1] = C.px[i * 4 + 1]; out.data[i * 4 + 2] = C.px[i * 4 + 2]; out.data[i * 4 + 3] = C.mask[i]; }
+        g.putImageData(out, 0, 0);
+      }
+      const brush = (e) => {
+        const r = cv.getBoundingClientRect(), x = ((e.clientX - r.left) / r.width) * C.w, y = ((e.clientY - r.top) / r.height) * C.h;
+        const rad = (C.size / r.width) * C.w, v = C.mode === "erase" ? 0 : 255;
+        for (let yy = Math.max(0, Math.floor(y - rad)); yy < Math.min(C.h, Math.ceil(y + rad)); yy++)
+          for (let xx = Math.max(0, Math.floor(x - rad)); xx < Math.min(C.w, Math.ceil(x + rad)); xx++)
+            if ((xx - x) ** 2 + (yy - y) ** 2 <= rad * rad) C.mask[yy * C.w + xx] = v;
+        paint();
+      };
+      let down = false;
+      cv.onpointerdown = (e) => { if (!C.mask) return; down = true; cv.setPointerCapture(e.pointerId); brush(e); };
+      cv.onpointermove = (e) => { if (down) brush(e); };
+      cv.onpointerup = cv.onpointercancel = () => { down = false; };
+      let tm = 0;
+      $("#co-tol").oninput = (e) => { C.tol = +e.target.value; clearTimeout(tm); tm = setTimeout(() => C.px && segment(), 120); };
+      $("#co-size").oninput = (e) => { C.size = +e.target.value; };
+      $$("#co-mode [data-m]").forEach((b) => (b.onclick = () => { C.mode = b.dataset.m; $$("#co-mode [data-m]").forEach((x) => x.classList.toggle("on", x === b)); }));
+      $("#co-keep").onclick = () => { closeSheet(); };
+      $("#co-save").onclick = async (e) => {
+        const b = e.currentTarget;
+        // trim to what's left (plus a margin) on a square transparent canvas
+        let x0 = C.w, y0 = C.h, x1 = -1, y1 = -1;
+        for (let y = 0; y < C.h; y++) for (let x = 0; x < C.w; x++) if (C.mask[y * C.w + x] > 24) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        if (x1 < 0) { $("#co-msg").textContent = "Nothing is left to save. Restore some of the photo, or keep the original."; return; }
+        const side = Math.round(Math.max(x1 - x0, y1 - y0) * 1.12) + 2, out = document.createElement("canvas");
+        out.width = out.height = side;
+        out.getContext("2d").drawImage(cv, x0, y0, x1 - x0 + 1, y1 - y0 + 1, Math.round((side - (x1 - x0)) / 2), Math.round((side - (y1 - y0)) / 2), x1 - x0 + 1, y1 - y0 + 1);
+        b.disabled = true; b.textContent = "Saving…";
+        try { const r = await api("POST", `/api/pantry/${enc(it.id)}/photo`, { image: out.toDataURL("image/png"), cutout: true }); closeSheet(true); onSaved && onSaved(r); }
+        catch (x) { fail(x); b.disabled = false; b.textContent = "Save cut-out"; }
+      };
+    },
+  });
+}

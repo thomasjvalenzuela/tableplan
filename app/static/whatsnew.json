@@ -1,5 +1,13 @@
 [
  {
+  "id": "product-photos",
+  "date": "2026-11-28",
+  "icon": "camera",
+  "color": "orange",
+  "title": "Product photos that look the part",
+  "text": "Inventory tiles show each product's photo on a neutral rounded square, so mixed photos look tidy. Open an item to add or change its photo, or tap Cut out background: it's done on your device, you can fix the edges with a brush, and Use original photo puts it back any time."
+ },
+ {
   "id": "browse-grid",
   "date": "2026-11-27",
   "icon": "cart",
