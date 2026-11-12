@@ -380,8 +380,10 @@ async function renderRecipe(slug) {
         ${rec.eta ? `<button class="mp eta-chip" id="rd-eta" aria-label="How long it takes: ${esc(rec.eta.label)}. Show the breakdown">${ic("clock")} ${esc(rec.eta.label)}</button>` : rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
         <span class="mp">${ic("chef")} ${esc(rec.difficulty)}</span>
         <button class="mp cost-chip" id="rd-cost" hidden aria-label="What it costs"></button>
+        ${rec.pan && (rec.pan.pan || rec.pan.needs) ? `<button class="mp pan-chip" id="rd-pan" aria-label="Pan size">${ic("box")} ${esc(rec.pan.pan ? rec.pan.pan.label : "Pan size?")}</button>` : ""}
         <span class="mp stepper">${ic("users")}<button data-s="-1" aria-label="Fewer servings">−</button><b id="rd-serv">${fmtQty(R.servings)}</b><button data-s="1" aria-label="More servings">+</button></span>
       </div>
+      <div id="rd-pan-card"></div>
       ${(rec.categories || []).length ? `<div class="cat-pills">${rec.categories.map((c) => `<span class="cat-pill">${esc(c)}</span>`).join("")}</div>` : ""}
       ${rec.cook_entry ? `<div class="cook-due"><span>On the plan ${esc(rec.cook_entry.today ? "today" : dayName(rec.cook_entry.date).toLowerCase())}</span><button class="cook-pill" id="rd-cooked">✓ Mark as cooked</button></div>`
         : rec.cooked_today ? `<div class="cook-due"><span>✓ Cooked today</span><button class="link-btn" id="rd-uncook">Undo</button></div>` : ""}
@@ -416,8 +418,10 @@ async function renderRecipe(slug) {
     try { await api("POST", `/api/recipe/${encodeURIComponent(slug)}/favorite`, { favorite: on }); R.rec.favorite = on; btn.classList.toggle("on", on); btn.textContent = on ? "♥" : "♡"; } catch (x) { fail(x); }
   };
   $("#rd-img").onclick = () => (c_native() ? openRecipePhoto(slug, () => renderRecipe(slug)) : openImagePicker({ kind: "recipe", slug, name: rec.name, after: () => renderRecipe(slug) }));
-  $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); clearTimeout(R.costT); R.costT = setTimeout(drawRecipeCost, 350); }));
+  $$(".stepper [data-s]").forEach((b) => (b.onclick = () => { R.servings = Math.max(0.5, R.servings + +b.dataset.s * (R.servings < 2 ? 0.5 : 1)); $("#rd-serv").textContent = fmtQty(R.servings); drawContent(); clearTimeout(R.costT); R.costT = setTimeout(drawRecipeCost, 350); clearTimeout(R.panT); R.panT = setTimeout(drawPanCard, 300); }));
   drawRecipeCost();
+  drawPanCard();
+  $("#rd-pan") && ($("#rd-pan").onclick = () => openPanSheet());
   $$("#rd-style button").forEach((b) => (b.onclick = () => { R.style = b.dataset.v; drawContent(); }));
   $("#rd-cook").onclick = () => ((R.rec.missing || []).length ? showMissing() : startCook());
   $("#rd-plan").onclick = () => planRecipe(rec);
@@ -2276,6 +2280,97 @@ function openExport(ids) {
         } catch (_) {
           try { await navigator.clipboard.writeText(tsv); toast(`Copied ${plural(d.rows.length, "item")} as columns`); } catch (x) { fail(new Error("Copying isn't allowed here. Use Download CSV instead.")); }
         }
+      };
+    },
+  });
+}
+
+// ------------------------------------------------------------------ pan sizes: a chip on the recipe, and a question when scaling
+const panFactor = () => (R.rec?.servings ? R.servings / R.rec.servings : 1);
+async function drawPanCard() {
+  const box = $("#rd-pan-card"), rec = R.rec; if (!box || !rec?.pan?.pan) { if (box) box.innerHTML = ""; return; }
+  const f = panFactor();
+  if (Math.abs(f - 1) < 0.05) { box.innerHTML = ""; return; }
+  let d; try { d = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/pan?factor=${enc(f.toFixed(3))}`); } catch (_) { return; }
+  if (!$("#rd-pan-card") || Math.abs(panFactor() - f) > 1e-6) return;
+  const pan = d.pan, a = d.advice || {}, pref = d.pref, x = `${(+f.toFixed(2))}×`;
+  if (pref?.choice === "any") { box.innerHTML = ""; return; }
+  const change = `<button class="link-btn" id="pc-change">Change</button>`;
+  if (pref?.choice === "keep") {
+    box.innerHTML = `<div class="pan-card slim">${ic("box")}<span><b>Same ${esc(pan.label)}</b> · ${esc(a.time || a.note || "")}</span>${change}</div>`;
+  } else if (pref?.choice === "different" && pref.pan) {
+    const alt = d.advice_alt;
+    box.innerHTML = `<div class="pan-card slim">${ic("box")}<span><b>Using your ${esc(pref.pan.label)}</b>${alt ? ` · ${alt.depth > 1.1 ? `about ${alt.depth}× as deep as the recipe's pan: bake a bit longer` : alt.depth < 0.9 ? `about ${alt.depth}× as deep: check early` : "about the same depth: same time"}` : ""}</span>${change}</div>`;
+  } else {
+    box.innerHTML = `<div class="pan-card"><div><b>Making ${esc(x)}?</b> The recipe uses a <b>${esc(pan.label)}</b>.</div>
+      <div class="rv-row"><button class="btn small sec" data-pc="keep">Keep my pan</button><button class="btn small sec" data-pc="different">Use a different pan</button><button class="btn small sec" data-pc="any">Doesn't matter</button></div>
+      <div id="pc-more"></div></div>`;
+  }
+  const save = async (body) => { try { const r = await api("POST", `/api/recipe/${encodeURIComponent(rec.slug)}/pan`, body); rec.pan = { ...rec.pan, pref: r.pref }; drawPanCard(); } catch (e) { fail(e); } };
+  $("#pc-change") && ($("#pc-change").onclick = () => save({ pref: null }));
+  $$("[data-pc]", box).forEach((b) => (b.onclick = () => {
+    if (b.dataset.pc !== "different") return save({ pref: b.dataset.pc });
+    const fits = a.fits || [], owned = d.owned || [];
+    const opts = [...fits, ...owned.filter((o) => !fits.some((x2) => x2.label === o.label))].slice(0, 6);
+    $("#pc-more").innerHTML = `<div class="muted small" style="margin-top:8px">${fits.length ? `About the right size for ${esc(x)}:` : "Which pan will you use?"}</div>
+      <div class="chips">${opts.map((o, i) => `<button class="chip-s" data-po="${i}">${esc(o.label)}</button>`).join("")}</div>
+      ${a.split ? `<div class="muted small">${esc(a.split)}</div>` : ""}
+      <form class="sb-form" id="pc-own" autocomplete="off"><input maxlength="40" placeholder="Or type it, e.g. 10x15" aria-label="Pan size"><button class="pill-btn" type="submit">Use</button></form>`;
+    $$("[data-po]", box).forEach((o) => (o.onclick = () => save({ pref: "different", pref_pan: opts[+o.dataset.po] })));
+    $("#pc-own").onsubmit = async (e) => {
+      e.preventDefault();
+      const t = $("#pc-own input").value.trim(); if (!t) return;
+      const m = t.match(/^\s*(\d+(?:\.\d+)?)\s*(?:x|×|by)\s*(\d+(?:\.\d+)?)/i), r = t.match(/^\s*(\d+(?:\.\d+)?)\s*(?:in|inch|")?\s*round/i);
+      const pp = m ? { kind: +m[1] === +m[2] ? "square" : "rect", w: Math.max(+m[1], +m[2]), h: Math.min(+m[1], +m[2]) } : r ? { kind: "round", d: +r[1] } : null;
+      if (!pp) return toast("Try a size like 9x13 or 9 inch round");
+      save({ pref: "different", pref_pan: pp });
+    };
+  }));
+}
+async function openPanSheet() {
+  const rec = R.rec; if (!rec) return;
+  let d; try { d = await api("GET", `/api/recipe/${encodeURIComponent(rec.slug)}/pan`); } catch (e) { return fail(e); }
+  const opts = [...(d.owned || []), ...d.common.filter((c) => !(d.owned || []).some((o) => o.label === c.label))];
+  openSheet("Pan size", `<p class="hint" style="margin-top:0">${d.pan ? `This recipe uses a <b>${esc(d.pan.label)}</b>${d.source === "recipe" ? " (from the recipe)" : " (set by you)"}.` : "The recipe doesn't say which pan."} Pick the pan it's made in; scaling then suggests a pan that fits.</p>
+    <div class="chips pan-opts">${opts.map((o, i) => `<button class="chip-s ${d.pan && d.pan.label === o.label ? "on" : ""}" data-pn="${i}">${esc(o.label)}</button>`).join("")}</div>
+    <form class="sb-form" id="pn-own" autocomplete="off" style="margin-top:10px"><input maxlength="40" placeholder="Or type it: 9x13, 9 inch round, 12 cup muffin" aria-label="Pan size"><button class="pill-btn ink" type="submit">Set</button></form>
+    ${d.source === "set" ? `<button class="link-btn" id="pn-reset" style="margin-top:10px">Use what the recipe says</button>` : ""}
+    ${d.pref ? `<button class="link-btn" id="pn-pref" style="margin-top:6px">Forget my scaling choice</button>` : ""}`, {
+    onMount() {
+      const done = async (body) => { try { const r = await api("POST", `/api/recipe/${encodeURIComponent(rec.slug)}/pan`, body); rec.pan = { pan: r.pan, source: r.source, pref: r.pref, needs: r.needs }; closeSheet(); renderRecipe(rec.slug); } catch (e) { fail(e); } };
+      $$("[data-pn]").forEach((b) => (b.onclick = () => done({ pan: opts[+b.dataset.pn] })));
+      $("#pn-own").onsubmit = (e) => { e.preventDefault(); const t = $("#pn-own input").value.trim(); if (t) done({ pan: t }); };
+      $("#pn-reset") && ($("#pn-reset").onclick = () => done({ pan: null }));
+      $("#pn-pref") && ($("#pn-pref").onclick = () => done({ pref: null }));
+    },
+  });
+}
+// Settings → Pans I have: scaling suggests these first
+function openPansSettings() {
+  const have = (state.cfg.settings?.pans || []).map((p) => p.label);
+  openSheet("Pans I have", `<p class="hint" style="margin-top:0">Optional. When you scale a recipe, TablePlan suggests one of your pans that fits.</p>
+    <div class="chips pan-opts" id="ph-list"></div>
+    <form class="sb-form" id="ph-own" autocomplete="off" style="margin-top:10px"><input maxlength="40" placeholder="Add another: 10x15, 10 inch skillet…" aria-label="Pan size"><button class="pill-btn" type="submit">Add</button></form>
+    <button class="btn" id="ph-save" style="margin-top:14px">Save</button>`, {
+    async onMount() {
+      let d = null; try { d = await api("GET", "/api/pans"); } catch (_) {}
+      const base = (d && d.common) || [];
+      const list = [...(state.cfg.settings?.pans || []), ...base.filter((c) => !have.includes(c.label))];
+      const on = new Set(have);
+      const draw = () => { $("#ph-list").innerHTML = list.map((p, i) => `<button class="chip-s ${on.has(p.label) ? "on" : ""}" data-pi="${i}" aria-pressed="${on.has(p.label)}">${esc(p.label)}</button>`).join(""); $$("#ph-list [data-pi]").forEach((b) => (b.onclick = () => { const l = list[+b.dataset.pi].label; on.has(l) ? on.delete(l) : on.add(l); draw(); })); };
+      draw();
+      $("#ph-own").onsubmit = (e) => {
+        e.preventDefault();
+        const t = $("#ph-own input").value.trim(), m = t.match(/^\s*(\d+(?:\.\d+)?)\s*(?:x|×|by)\s*(\d+(?:\.\d+)?)/i), r = t.match(/^\s*(\d+(?:\.\d+)?)\s*(?:in|inch|")?\s*(round|skillet|springform|pie)/i), mu = t.match(/^\s*(\d+)\s*-?\s*cup\s+muffin/i);
+        const p = m ? { kind: +m[1] === +m[2] ? "square" : "rect", w: Math.max(+m[1], +m[2]), h: Math.min(+m[1], +m[2]) } : r ? { kind: r[2].toLowerCase(), d: +r[1] } : mu ? { kind: "muffin", cups: +mu[1] } : null;
+        if (!p) return toast("Try 9x13, 10 inch skillet or 12 cup muffin");
+        p.label = p.kind === "muffin" ? `${p.cups}-cup muffin tin` : p.d ? `${p.d} in ${p.kind === "pie" ? "pie dish" : p.kind}` : p.kind === "square" ? `${p.w}×${p.w} in square` : `${p.h}×${p.w} in pan`;
+        if (!list.some((x) => x.label === p.label)) list.unshift(p);
+        on.add(p.label); $("#ph-own input").value = ""; draw();
+      };
+      $("#ph-save").onclick = async () => {
+        const pans = list.filter((p) => on.has(p.label)).map(({ label, match, ...p }) => p);
+        try { state.cfg.settings = await api("PUT", "/api/settings", { pans }); toast(`Saved ${plural(pans.length, "pan")}`); closeSheet(); } catch (e) { fail(e); }
       };
     },
   });

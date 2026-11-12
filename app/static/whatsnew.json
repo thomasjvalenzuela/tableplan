@@ -1,5 +1,13 @@
 [
  {
+  "id": "pan-sizes",
+  "date": "2026-11-24",
+  "icon": "box",
+  "color": "orange",
+  "title": "The right pan when you scale",
+  "text": "Recipes now know their pan (9×13, 9 inch round, 12-cup muffin tin…). Scale a bake and TablePlan asks: keep your pan (it'll be deeper, so bake longer), use a different pan (it suggests one that fits), or doesn't matter. It remembers your answer for that recipe. Add the pans you own in Settings → Pans I have, and scanned recipes that don't say a size ask \"What size pan?\" in the quick look."
+ },
+ {
   "id": "faster-lists",
   "date": "2026-11-23",
   "icon": "cart",

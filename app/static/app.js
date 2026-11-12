@@ -1968,6 +1968,7 @@ async function openSettings() {
         <div class="row"><div class="main"><div class="a">USDA FoodKeeper</div><div class="b">${counts.usda ? `${esc(counts.usda)} foods · synced ${esc((c.usda_synced_at || "").replace("T", " "))}` : "Not synced yet — using starter table"}</div></div></div>
         <button class="row" id="st-sync"><div class="main"><div class="a" style="color:var(--blue)">${counts.usda ? "Re-sync now" : "Sync now"}</div></div></button>
         <button class="row" id="st-rules"><div class="main"><div class="a">House rules & edits</div><div class="b">${esc(counts.custom || 0)} custom · ${esc(counts.starter || 0)} starter</div></div><span class="chev">${ic("chevR")}</span></button>
+        ${c.backend === "native" ? `<button class="row" id="st-pans"><div class="main"><div class="a">Pans I have</div><div class="b">${(s.pans || []).length ? esc((s.pans || []).map((p) => p.label).slice(0, 3).join(", ")) + ((s.pans || []).length > 3 ? "…" : "") : "Optional: suggests a pan that fits when you scale"}</div></div><span class="chev">${ic("chevR")}</span></button>` : ""}
         <button class="row" id="st-bctest"><div class="main"><div class="a">Test barcode lookup</div><div class="b">See what each product database says about a code</div></div><span class="chev">${ic("chevR")}</span></button>
       </div>
 
@@ -2032,6 +2033,7 @@ async function openSettings() {
     };
     $("#st-rules").onclick = () => rulesBrowser(draw);
     $("#st-bctest").onclick = () => openBarcodeTest();
+    $("#st-pans") && ($("#st-pans").onclick = () => openPansSettings());
     $("#st-prices") && ($("#st-prices").onclick = () => openPricesSettings());
     $("#st-photos") && ($("#st-photos").onclick = () => openPhotoSettings());
     $("#st-ideas") && ($("#st-ideas").onclick = () => openIdeasSettings());

@@ -137,7 +137,8 @@ DEFAULT_SETTINGS = {
     "staples": ["Table salt", "Kosher salt", "Black pepper", "Water", "Olive oil", "Vegetable oil", "Cooking spray",
                 "Granulated sugar", "All-purpose flour", "Baking soda", "Baking powder"],   # "always have": never on the list
     "budget": {"period": "week", "amount": 0, "week_start": "mon", "stores": {}, "timezone": "", "plan_aware": True},
-    "price_ai": False,                # look up missing prices with AI web search (monthly per food, within the AI budget)
+    "price_ai": False,
+    "pans": [],                       # "Pans I have": [{kind, w, h, d, cups, quarts}] (used to suggest a pan when scaling)                # look up missing prices with AI web search (monthly per food, within the AI budget)
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
                    "Drink"],          # recipe categories, in display order
 }
@@ -794,7 +795,21 @@ SETTINGS_VALIDATORS = {
     "staples": lambda v: _v_names(v, 100, 40),
     "budget": lambda v: _v_budget(v),
     "price_ai": _v_bool,
+    "pans": lambda v: _v_pans(v),
 }
+
+
+def _v_pans(v):
+    if not isinstance(v, list) or len(v) > 30:
+        raise ValueError("must be a list of up to 30 pans")
+    out = []
+    for p in v:
+        c = n_pans.clean(p)
+        if not c:
+            raise ValueError("has a pan that couldn't be read")
+        if all(x["label"] != c["label"] for x in out):   # the same pan twice is kept once
+            out.append(c)
+    return out
 
 
 def _v_budget(v):
@@ -1892,7 +1907,8 @@ from native import whatcan as n_whatcan
 from native import prices as n_prices
 from native import checkin as n_checkin
 from native import imgmeta as n_imgmeta
-from native import ideas as n_ideas  # noqa: E402
+from native import ideas as n_ideas
+from native import pans as n_pans  # noqa: E402
 from native import catalog as n_catalog  # noqa: E402
 
 AISLES = [
@@ -2313,6 +2329,7 @@ def _save_new_recipe(data, image_url=None, dup="check", replace=None):
         except Exception as e:   # the import still succeeds, just unpolished
             log("recipe polish skipped:", getattr(e, "message", None) or e)
     classify = _food_classifier()
+    data = _with_pan(data) if NATIVE else data
     with db() as c:
         data = _annotate_foods(c, dict(data), classify)
         slug = n_recipes.create(c, data.get("name") or "Untitled recipe", data)
@@ -2471,6 +2488,9 @@ def import_job_process(jid):
         _job_save(jid, status="failed", error="Something went wrong reading these pages. Try again.")
         return
     m = {"questions": meta["questions"], "answers": {}}
+    if NATIVE and n_pans.needs_pan(_pan_texts(data)):
+        m["questions"] = m["questions"] + [{"id": "pan", "kind": "pan", "text": "What size pan?", "ingredient": -1, "step": -1, "page": 0,
+                                           "choices": ["9×13 in", "8×8 in", "9 in round", "9×5 in loaf", "12-cup muffin tin"]}]
     if not meta["title_found"] or not (data.get("name") or "").strip():
         data["name"] = ""
         m["suggested_title"] = meta["suggested_title"] or "Untitled Recipe"
@@ -2501,6 +2521,10 @@ def _apply_answers(data, m):
                 steps[q["step"]]["text"] = steps[q["step"]]["text"].replace("[?]", a, 1)
         elif q["kind"] == "cutoff":
             steps.append({"id": str(uuid.uuid4()), "title": "", "text": a, "ingredientReferences": []})
+        elif q["kind"] == "pan":
+            pan = n_pans.parse(a)
+            if pan:
+                data["extras"] = {**(data.get("extras") or {}), "pan": pan}
     for g in ings:   # anything still unreadable stays visible to the cook, never guessed
         for k in ("note", "display", "originalText"):
             if isinstance(g.get(k), str):
@@ -4433,6 +4457,8 @@ def recipe_update(slug, b):
             st["text"] = text
             steps.append(st)
         r["recipeInstructions"] = steps
+    if NATIVE:
+        r = _with_pan(r)
     out = mealie("PUT", f"/api/recipes/{_q(slug)}", r)
     _recipe_cache["at"] = 0
     with db() as c:
@@ -4924,6 +4950,7 @@ def recipe_detail(slug):
         "has_image": bool(r.get("image")), "image_v": r.get("image") or "",
         "photo": recipe_photo_info(r) if NATIVE and r.get("id") else None,
         "ai_generated": bool((r.get("extras") or {}).get("ai_generated")) if isinstance(r.get("extras"), dict) else False,
+        "pan": recipe_pan(r) if NATIVE else None,
         "servings": _num(r.get("recipeServings")) or _num(r.get("recipeYieldQuantity")) or 0,
         "yield": r.get("recipeYield") or "", "minutes": minutes,
         "prep_minutes": round(int(r.get("prepTimeSeconds") or 0) / 60) or None,
@@ -6765,6 +6792,85 @@ def decode_upload(data_url):
     if not kind:
         raise ApiError(400, "Upload a JPG, PNG, WebP or GIF image.")
     return blob, "image/" + ("jpeg" if kind == "jpg" else kind)
+
+
+# ============================================================ pan sizes (found in the recipe, asked when scaling)
+
+def _pan_texts(rec):
+    return ([_ing_line(g) for g in rec.get("recipeIngredient") or [] if isinstance(g, dict)] +
+            [(x.get("text") or "") for x in rec.get("recipeInstructions") or [] if isinstance(x, dict)] +
+            [rec.get("description") or ""] + [str(n.get("text") or "") for n in rec.get("notes") or [] if isinstance(n, dict)])
+
+
+def _with_pan(rec):
+    """Store the pan found in the recipe's text (parsed) in extras.pan_detected; a pan the cook set stays in extras.pan."""
+    ex = dict(rec.get("extras") or {}) if isinstance(rec.get("extras"), dict) else {}
+    found = n_pans.detect(_pan_texts(rec))
+    if found:
+        ex["pan_detected"] = found
+    else:
+        ex.pop("pan_detected", None)
+    return {**rec, "extras": ex}
+
+
+def recipe_pan(rec):
+    """{pan, source: set|recipe|None, pref, needs}: the pan for this recipe and the cook's scaling choice."""
+    ex = rec.get("extras") if isinstance(rec.get("extras"), dict) else {}
+    pan = n_pans.clean(ex.get("pan")) if ex.get("pan") else None
+    src = "set" if pan else None
+    if not pan:
+        pan = n_pans.clean(ex.get("pan_detected")) if ex.get("pan_detected") else None
+        if pan is None:
+            pan = n_pans.detect(_pan_texts(rec))   # older recipes saved before pans were stored
+        src = "recipe" if pan else None
+    pref = ex.get("pan_pref") if isinstance(ex.get("pan_pref"), dict) else None
+    return {"pan": pan, "source": src, "pref": pref, "needs": pan is None and n_pans.needs_pan(_pan_texts(rec))}
+
+
+def owned_pans():
+    return [p for p in (n_pans.clean(x) for x in get_settings().get("pans") or []) if p]
+
+
+def recipe_pan_api(slug, m, q, b):
+    """GET /api/recipe/{slug}/pan?factor=1.5: the pan and what scaling does to it.
+    POST {pan?: {...}|null, pref?: keep|different|any, pref_pan?: {...}}: set the pan or remember the scaling choice."""
+    require_native()
+    with db() as c:
+        rec = n_recipes.get(c, slug)
+        if not rec:
+            raise ApiError(404, "Recipe not found")
+        if m == "POST":
+            ex = dict(rec.get("extras") or {}) if isinstance(rec.get("extras"), dict) else {}
+            if "pan" in b:
+                if b["pan"] is None:
+                    ex.pop("pan", None)
+                else:
+                    pan = n_pans.clean(b["pan"]) if isinstance(b["pan"], dict) else n_pans.parse(_s(b["pan"], 60))
+                    if not pan:
+                        raise ApiError(400, "That pan size couldn't be read. Try “9x13” or “9 inch round”.")
+                    ex["pan"] = pan
+            if "pref" in b:
+                if b["pref"] not in ("keep", "different", "any", None):
+                    raise ApiError(400, "Choose keep, different or any.")
+                if b["pref"] is None:
+                    ex.pop("pan_pref", None)
+                else:
+                    pp = n_pans.clean(b.get("pref_pan")) if b["pref"] == "different" else None
+                    if b["pref"] == "different" and not pp:
+                        raise ApiError(400, "Which pan will you use?")
+                    ex["pan_pref"] = {"choice": b["pref"], **({"pan": pp} if pp else {})}
+            n_recipes.update(c, rec["slug"], {**rec, "extras": ex})
+            rec = n_recipes.get(c, slug)
+    out = recipe_pan(rec)
+    factor = _num(q.get("factor")) if q else None
+    out["advice"] = n_pans.advice(out["pan"], factor, owned_pans()) if out["pan"] and factor else None
+    if out["pref"] and out["pref"].get("choice") == "different" and out["pan"] and factor:
+        alt = out["pref"]["pan"]
+        out["advice_alt"] = {"label": alt["label"], "depth": round(n_pans.area(out["pan"]) * factor / max(1e-6, n_pans.area(alt)), 2)} \
+            if n_pans.family(alt) == n_pans.family(out["pan"]) else None
+    out["owned"] = owned_pans()
+    out["common"] = n_pans.COMMON
+    return out
 
 
 # ============================================================ recipe photos: crop sizes, sources, AI images
@@ -11435,6 +11541,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, blob, ctype, {"Cache-Control": "no-store"})
             if act == "restore" and m == "POST":
                 return self.send(200, recipe_photo_restore(slug))
+        if m == "GET" and path == "/api/pans":
+            return self.send(200, {"common": n_pans.COMMON, "owned": owned_pans()})
+        mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/pan", path)
+        if mm and m in ("GET", "POST"):
+            return self.send(200, recipe_pan_api(urllib.parse.unquote(mm.group(1)), m, q, self.body() if m == "POST" else {}))
         if m == "PUT" and path == "/api/photos/config":
             return self.send(200, photos_config(self.body()))
         mm = re.fullmatch(r"/api/recipe/([A-Za-z0-9_.~%-]{1,200})/(favorite|guided|image/next|image/upload|to-list|have-all|cooked|polish|restore-original|adjust|adjust/save|versions|versions/\d{1,3}/restore)", path)
