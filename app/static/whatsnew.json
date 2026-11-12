@@ -1,5 +1,13 @@
 [
  {
+  "id": "real-recipes",
+  "date": "2026-12-02",
+  "icon": "search",
+  "color": "green",
+  "title": "Find recipes for what I have",
+  "text": "Ideas now only shows real, published recipes. With an OpenAI key, AI searches recipe sites using everything in your inventory (what's expiring first); TablePlan then opens each page, reads the site's own recipe and checks it against your kitchen. Results from TheMealDB, Spoonacular and the open-source Wikibooks Cookbook are mixed into one list, fewest missing first, each showing where it's from. Recipes saved earlier from AI ideas are kept; Settings → Recipe ideas lets you review them."
+ },
+ {
   "id": "expiring-view",
   "date": "2026-12-01",
   "icon": "clock",
@@ -77,7 +85,7 @@
   "icon": "sparkle",
   "color": "green",
   "title": "Recipe ideas from your kitchen",
-  "text": "What can I make? has a new Ideas tab (or tap Cook with what I have): real recipes from TheMealDB, and Spoonacular if you add a key, ranked by what you already have. With AI, Chef's ideas suggests 3 recipes built only from your inventory and basics, checked so they never use more than you have; they're labelled AI-created · not tested. Preview, save (duplicates are caught), plan, add what's missing to the list, or dismiss. Plus: Inventory ⋯ → Export gives a CSV or a copy-paste list, for everything or just what you've selected."
+  "text": "What can I make? has an Ideas tab (or tap Cook with what I have): published recipes from TheMealDB, the Wikibooks Cookbook and Spoonacular (if you add a key), ranked by what you already have. Preview one, import it, plan it, or add what's missing to your list. Plus: Inventory ⋯ → Export gives a CSV or a copy-paste list, for everything or just what you've selected."
  },
  {
   "id": "recipe-photos",

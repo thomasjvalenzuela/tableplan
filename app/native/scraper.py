@@ -559,6 +559,19 @@ def parse_html(page_html, page_url=""):
     raise err
 
 
+def parse_structured(page_html, page_url=""):
+    """Only a recipe the page itself publishes as schema.org Recipe data (JSON-LD or microdata) with a name,
+    ingredients and instructions; no fallback to the page title or text. Raises NoRecipe otherwise."""
+    root = _build_tree(page_html or "")
+    jsonld, index = _jsonld_recipes(root)
+    for source, idx in ((jsonld, index), (_microdata_recipes(root), {})):
+        for candidate in source:
+            recipe = _to_mealie(candidate, idx, page_url)
+            if recipe["name"] and recipe["recipeIngredient"] and recipe["recipeInstructions"]:
+                return recipe
+    raise NoRecipe("")
+
+
 def scrape(url, fetch):
     """Fetch ``url`` via ``fetch(url) -> (final_url, html_text)`` and parse the recipe."""
     final_url, page_html = fetch(url)

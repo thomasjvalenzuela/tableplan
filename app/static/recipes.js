@@ -69,7 +69,8 @@ async function renderRecipes() {
 function drawRecipeChips() {
   const cats = (state.cfg?.settings?.categories || []).filter((c) => rstate.list.some((r) => (r.categories || []).includes(c)));
   const uncat = rstate.list.some((r) => !(r.categories || []).length) && cats.length;
-  const chips = [["all", "All"], ["fav", "♥ Favorites"], ["quick", "Under 30 min"], ...cats.map((c) => ["cat:" + c, c]), ...(uncat ? [["none", "Uncategorized"]] : [])];
+  const aiN = rstate.list.filter((r) => r.ai_generated).length;
+  const chips = [["all", "All"], ["fav", "♥ Favorites"], ["quick", "Under 30 min"], ...cats.map((c) => ["cat:" + c, c]), ...(uncat ? [["none", "Uncategorized"]] : []), ...(aiN ? [["ai", `AI-created ${aiN}`]] : [])];
   if (!chips.some(([k]) => k === rstate.filter)) rstate.filter = "all";
   $("#rchips").innerHTML = chips.map(([k, l]) => `<button class="filter ${rstate.filter === k ? "on" : ""}" data-f="${esc(k)}">${esc(l)}</button>`).join("");
   $$("#rchips [data-f]").forEach((b) => (b.onclick = () => { rstate.filter = b.dataset.f; $$("#rchips .filter").forEach((x) => x.classList.toggle("on", x === b)); drawRecipeList(); }));
@@ -85,7 +86,7 @@ function drawRecipeList() {
   if (!box || !rstate.list) return;
   const q = rstate.q.trim().toLowerCase(), f = rstate.filter;
   const list = rstate.shown = rstate.list.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.tags.some((x) => x.toLowerCase().includes(q))) &&
-    (f === "all" || (f === "fav" ? r.favorite : f === "quick" ? +(r.eta_min || r.minutes || 999) <= 30 : f === "none" ? !(r.categories || []).length : f.startsWith("cat:") ? (r.categories || []).includes(f.slice(4)) : true)));
+    (f === "all" || (f === "fav" ? r.favorite : f === "quick" ? +(r.eta_min || r.minutes || 999) <= 30 : f === "none" ? !(r.categories || []).length : f === "ai" ? r.ai_generated : f.startsWith("cat:") ? (r.categories || []).includes(f.slice(4)) : true)));
   drawSelBar();
   if (!rstate.list.length) {
     box.innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>
@@ -376,7 +377,7 @@ async function renderRecipe(slug) {
     </div>
     <div class="rd-head">
       <h1>${esc(rec.name)}</h1>${rec.ai_generated ? `<span class="ai-badge" title="Created by AI from your inventory; not a tested recipe">AI-created</span>` : ""}
-      ${src ? `<div class="rd-src">${src}</div>` : ""}${rec.name_suggested ? `<div class="rd-src muted small">Name suggested by TablePlan (the page had no title)</div>` : ""}
+      ${src ? `<div class="rd-src">${src}</div>` : ""}${rec.source_credit ? `<div class="rd-src small">${esc(rec.source_credit.site)}${rec.source_credit.license ? ` · ${safeUrl(rec.source_credit.license_url) ? `<a ${extLink(rec.source_credit.license_url)}>${esc(rec.source_credit.license)}</a>` : esc(rec.source_credit.license)}` : ""}${rec.source_credit.authors ? ` · ${esc(rec.source_credit.authors)}` : ""}</div>` : ""}${rec.name_suggested ? `<div class="rd-src muted small">Name suggested by TablePlan (the page had no title)</div>` : ""}
       <div class="rd-meta">
         ${rec.eta ? `<button class="mp eta-chip" id="rd-eta" aria-label="How long it takes: ${esc(rec.eta.label)}. Show the breakdown">${ic("clock")} ${esc(rec.eta.label)}</button>` : rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
         <span class="mp">${ic("chef")} ${esc(rec.difficulty)}</span>
@@ -2151,19 +2152,24 @@ function openPhotoSettings() {
   });
 }
 
-// ------------------------------------------------------------------ Ideas: recipes from what you have (TheMealDB, Spoonacular, AI, the web)
+// ------------------------------------------------------------------ Ideas: find real recipes for what you have
+// Every idea is a published recipe (TheMealDB, Spoonacular, the Wikibooks Cookbook, or a recipe page AI web search
+// found and TablePlan opened and read). Nothing here is written by AI.
+function ideaSource(i) {
+  const u = i.url && safeUrl(i.url);
+  const name = i.source === "wikibooks" ? "Wikibooks Cookbook · CC BY-SA" : i.source === "mealdb" ? "TheMealDB" : i.source === "spoonacular" ? (i.site && i.site !== "spoonacular.com" ? `${i.site} via Spoonacular` : "Spoonacular") : (i.site || hostOf(i.url));
+  return u ? `<a class="idea-src" ${extLink(u)}>${esc(name)} ${ic("ext")}</a>` : `<span class="idea-src">${esc(name)}</span>`;
+}
 function ideaCard(i) {
   const miss = i.missing || [];
-  return `<div class="mk-card idea" data-idea="${esc(i.id)}"><div class="mk-main as-div">${i.image ? `<span class="mk-img"><img src="${esc(i.image)}" alt="" loading="lazy"></span>` : `<span class="mk-img ph">${ic(i.ai ? "sparkle" : "dish")}</span>`}
-    <span class="mk-txt"><span class="idea-label ${i.ai ? "ai" : ""}">${esc(i.label)}</span><span class="a">${esc(i.title)}</span>
-      <span class="b">${esc([i.minutes ? fmtDur(i.minutes * 60).trim() : "", i.servings ? `serves ${i.servings}` : "", `${i.have_n || 0} of ${i.need_n || 0} at home`].filter(Boolean).join(" · "))}</span>
-      ${i.why ? `<span class="idea-why">${esc(i.why)}</span>` : ""}
+  return `<div class="mk-card idea" data-idea="${esc(i.id)}"><div class="mk-main as-div">${i.image ? `<span class="mk-img"><img src="${esc(i.image)}" alt="" loading="lazy"></span>` : `<span class="mk-img ph">${ic("dish")}</span>`}
+    <span class="mk-txt">${ideaSource(i)}<span class="a">${esc(i.title)}</span>
+      <span class="b">${esc([i.minutes ? fmtDur(i.minutes * 60).trim() : "", i.servings ? `serves ${i.servings}` : "", `${i.have_n || 0} of ${i.need_n || 0} at home`, i.rating ? `★ ${(+i.rating).toFixed(1)}` : ""].filter(Boolean).join(" · "))}</span>
       ${(i.expiring || []).length ? `<span class="mk-uses">Uses ${i.expiring.map(expTag).join("")}</span>` : ""}
-      ${miss.length ? `<span class="mk-miss">Missing ${esc(miss.join(", "))}${i.to_buy && i.to_buy.total ? ` · +${esc(money(i.to_buy.total, i.to_buy.approx))}` : ""}</span>` : `<span class="mk-ok">${ic("check")} Everything's here</span>`}
-      ${i.url && safeUrl(i.url) ? `<a class="idea-src" ${extLink(i.url)}>${esc(hostOf(i.url))} ${ic("ext")}</a>` : ""}</span>
+      ${miss.length ? `<span class="mk-miss">Missing ${esc(miss.join(", "))}${i.to_buy && i.to_buy.total ? ` · +${esc(money(i.to_buy.total, i.to_buy.approx))}` : ""}</span>` : `<span class="mk-ok">${ic("check")} Everything's here</span>`}</span>
     <button class="idea-x" data-dismiss aria-label="Not interested in ${esc(i.title)}">${ic("x")}</button></div>
     <div class="idea-prev" hidden></div>
-    <div class="mk-acts"><button class="pill-btn" data-prev aria-expanded="false">${ic("book")} Preview</button><button class="pill-btn" data-save>${ic("plus")} Save to my recipes</button>
+    <div class="mk-acts"><button class="pill-btn" data-prev aria-expanded="false">${ic("book")} Preview</button><button class="pill-btn" data-save>${ic("plus")} Import</button>
       <button class="pill-btn" data-plan>${ic("cal")} Plan it</button>${miss.length ? `<button class="pill-btn" data-miss>${ic("cart")} Add missing to list</button>` : ""}</div><div class="mk-res"></div></div>`;
 }
 function bindIdeas(box, list) {
@@ -2172,10 +2178,12 @@ function bindIdeas(box, list) {
     const res = $(".mk-res", el);
     const save = async (dup) => {
       if (i.slug) return i;
-      const r = await api("POST", "/api/ideas/save", { id: i.id, ...(dup ? { dup } : {}) });
+      // a web page goes through the normal link import (its own duplicate check); the recipe APIs through ideas/save
+      const r = i.source === "web" ? await api("POST", "/api/import/url", { url: i.url })
+        : await api("POST", "/api/ideas/save", { id: i.id, ...(dup ? { dup } : {}) });
       i.slug = r.slug; rstate.list = null; return i;
     };
-    const saved = () => { $("[data-save]", el).innerHTML = `${ic("check")} Saved · Open`; $("[data-save]", el).onclick = () => openRecipe(i.slug); };
+    const saved = () => { $("[data-save]", el).innerHTML = `${ic("check")} Imported · Open`; $("[data-save]", el).onclick = () => openRecipe(i.slug); };
     const trySave = async (then) => {
       try { await save(); saved(); then && then(); }
       catch (x) {
@@ -2186,10 +2194,11 @@ function bindIdeas(box, list) {
     $("[data-prev]", el).onclick = (e) => {
       const p = $(".idea-prev", el), open = p.hidden;
       p.hidden = !open; e.currentTarget.setAttribute("aria-expanded", String(open));
-      if (open && !p.innerHTML) p.innerHTML = `<div class="group-label">Ingredients</div><ul>${i.ingredients.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
-        <div class="group-label">Steps</div><ol>${i.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>${i.ai ? `<p class="hint">Created by AI from your inventory and not tested. Check amounts and doneness as you cook.</p>` : ""}`;
+      if (open && !p.innerHTML) p.innerHTML = `<div class="group-label">Ingredients</div><ul>${(i.ingredients || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        <div class="group-label">Steps</div><ol>${(i.steps || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
+        ${i.credit ? `<p class="hint">From the ${esc(i.credit.site)} by ${esc(i.credit.authors)}, ${esc(i.credit.license)}${safeUrl(i.credit.license_url) ? ` (<a ${extLink(i.credit.license_url)}>licence</a>)` : ""}.</p>` : ""}`;
     };
-    $("[data-save]", el).onclick = () => trySave(() => toast(`Saved “${i.title}”`, "Open", () => openRecipe(i.slug)));
+    $("[data-save]", el).onclick = () => trySave(() => toast(`Imported “${i.title}”`, "Open", () => openRecipe(i.slug)));
     $("[data-plan]", el).onclick = () => trySave(async () => { try { const r = await api("GET", `/api/recipe/${encodeURIComponent(i.slug)}`); planRecipe(r); } catch (x) { fail(x); } });
     $("[data-miss]", el) && ($("[data-miss]", el).onclick = async (e) => {
       const b = e.currentTarget; b.disabled = true;
@@ -2202,55 +2211,51 @@ function bindIdeas(box, list) {
   });
 }
 async function drawIdeas() {
-  const box = $("#mk-list"), ai = !!state.cfg?.ai_key;
-  box.innerHTML = `<section aria-label="Chef's ideas">${ai ? `<div class="hc-h"><h2>Chef's ideas</h2></div>
+  const box = $("#mk-list"), ai = !!state.cfg?.ai_key, f = MK.ideaForm || (MK.ideaForm = { meal: "", max: "", mood: "" });
+  box.innerHTML = `<section aria-label="Find recipes for what I have"><div class="hc-h"><h2>Find recipes for what I have</h2></div>
+      <p class="muted small">Real, published recipes only, matched to everything in your inventory (what's expiring first).${ai ? " AI searches recipe sites; TablePlan opens every page and reads its own recipe before showing it." : ""}</p>
       <form class="group idea-form" id="ia-form" autocomplete="off">
-        <div class="field"><label for="ia-meal">Meal</label><select id="ia-meal">${["dinner", "lunch", "breakfast", "snack", "dessert"].map((m) => `<option value="${m}">${esc(cap(m))}</option>`).join("")}</select></div>
-        <div class="field"><label for="ia-serv">Servings</label><input id="ia-serv" inputmode="numeric" maxlength="2" value="${esc(state.cfg.household?.people || 2)}"></div>
-        <div class="field"><label for="ia-max">Max minutes</label><input id="ia-max" inputmode="numeric" maxlength="3" placeholder="Any"></div>
-        <div class="field"><label for="ia-mood">In the mood for</label><input id="ia-mood" maxlength="200" placeholder="Optional: cosy, spicy, quick…"></div>
-        <div style="padding:10px 14px"><button class="btn" type="submit" id="ia-go">${ic("sparkle")} Get 3 ideas</button></div></form>
-      <div id="ia-out"></div>` : `<p class="hint">Add an OpenAI key (Settings → AI recipe import) for chef's ideas made from exactly what you have.</p>`}</section>
-    <section aria-label="Recipes that fit"><div class="hc-h"><h2>Recipes that fit</h2></div><div id="ix-out">${loading()}</div></section>
-    <section class="home-card mk-web" aria-label="From the web"><div class="hc-h"><h2>From the web</h2></div>
-      <p class="muted small">AI web search for recipes using what's expiring. Every link is opened and checked before it's shown.</p>
-      <div id="mk-web">${ai ? (MK.web ? "" : `<button class="btn sec" id="mk-web-go">${ic("search")} Search the web</button>`) : `<p class="hint">Needs an OpenAI key.</p>`}</div></section>`;
-  if (MK.web) drawWeb(); else $("#mk-web-go") && ($("#mk-web-go").onclick = searchWeb);
-  const showAi = () => { const o = $("#ia-out"); if (!o || !MK.aiIdeas) return; o.innerHTML = MK.aiIdeas.length ? `<div class="mk-cards">${MK.aiIdeas.map(ideaCard).join("")}</div>` : `<p class="muted small">No idea passed the checks this time (each must fit what you have). Try again or change the mood.</p>`; bindIdeas(o, MK.aiIdeas); };
-  showAi();
-  $("#ia-form") && ($("#ia-form").onsubmit = async (e) => {
-    e.preventDefault();
-    const btn = $("#ia-go"); btn.disabled = true; btn.textContent = "Thinking…";
-    try {
-      const r = await api("POST", "/api/ideas/ai", { meal: $("#ia-meal").value, servings: +$("#ia-serv").value || undefined, max_minutes: +$("#ia-max").value || undefined, mood: $("#ia-mood").value.trim() });
-      MK.aiIdeas = r.ideas; showAi();
-    } catch (x) { fail(x); }
-    btn.disabled = false; btn.innerHTML = `${ic("sparkle")} Get 3 ideas`;
-  });
-  const out = $("#ix-out");
-  if (!MK.ideas) {
-    try { MK.ideas = await api("GET", "/api/ideas"); } catch (x) { if ($("#ix-out")) $("#ix-out").innerHTML = `<div class="banner">${esc(x.message)}</div>`; return; }
-  }
-  if (!$("#ix-out")) return;
-  const d = MK.ideas;
-  $("#ix-out").innerHTML = d.ideas.length ? `<p class="muted small">Searched for ${esc(d.foods.join(", "))} on TheMealDB${d.sources.spoonacular ? " and Spoonacular" : ""}. Fewest missing first.</p><div class="mk-cards">${d.ideas.map(ideaCard).join("")}</div>`
-    : `<p class="muted small">${d.foods.length ? `Nothing found for ${esc(d.foods.join(", "))}.` : "Add some food to your inventory first."}</p>`;
-  bindIdeas($("#ix-out"), d.ideas);
-  void out;
+        <div class="field"><label for="ia-meal">Meal</label><select id="ia-meal"><option value="">Any</option>${["breakfast", "lunch", "dinner", "snack", "dessert"].map((m) => `<option value="${m}" ${f.meal === m ? "selected" : ""}>${esc(cap(m))}</option>`).join("")}</select></div>
+        <div class="field"><label for="ia-max">Time</label><input id="ia-max" inputmode="numeric" maxlength="3" placeholder="Max minutes (any)" value="${esc(f.max)}"></div>
+        <div class="field"><label for="ia-mood">Mood</label><input id="ia-mood" maxlength="60" placeholder="Optional: cosy, spicy…" value="${esc(f.mood)}" aria-describedby="ia-mood-h"></div>
+        <p class="hint" id="ia-mood-h" style="margin:0;padding:0 14px 4px">The mood only shapes the search; it never changes a recipe.</p>
+        <div style="padding:10px 14px"><button class="btn" type="submit" id="ia-go">${ic("search")} ${ai ? "Find recipes" : "Find recipes (free sources)"}</button></div></form>
+      ${ai ? "" : `<p class="hint">Add an OpenAI key (Settings → AI recipe import) to also search recipe sites on the web.</p>`}
+      <div id="ix-out">${MK.ideas ? "" : loading()}</div></section>`;
+  const show = () => {
+    const out = $("#ix-out"); if (!out || !MK.ideas) return;
+    const d = MK.ideas, src = ["TheMealDB", ...(d.sources.spoonacular ? ["Spoonacular"] : []), "the Wikibooks Cookbook", ...(d.sources.web ? [`the web${d.checked ? ` (${plural(d.checked, "page")} checked)` : ""}`] : [])];
+    out.innerHTML = (d.errors || []).length ? `<p class="muted small">${esc(d.errors.join(" · "))}</p>` : "";
+    out.innerHTML += d.ideas.length ? `<p class="muted small">Searched ${esc(src.join(", ").replace(/, ([^,]*)$/, " and $1"))} for ${esc(d.foods.slice(0, 6).join(", "))}${d.foods.length > 6 ? "…" : ""}. Fewest missing first.</p><div class="mk-cards">${d.ideas.map(ideaCard).join("")}</div>`
+      : `<p class="muted small">${d.foods.length ? `No published recipes found for ${esc(d.foods.slice(0, 6).join(", "))} this time.` : "Add some food to your inventory first."}</p>`;
+    bindIdeas(out, d.ideas);
+  };
+  const run = async (web) => {
+    f.meal = $("#ia-meal").value; f.max = $("#ia-max").value.trim(); f.mood = $("#ia-mood").value.trim();
+    const btn = $("#ia-go"); btn.disabled = true; btn.textContent = web ? "Searching and checking pages…" : "Searching…";
+    try { MK.ideas = await api("POST", "/api/ideas/find", { meal: f.meal || undefined, max_minutes: +f.max || undefined, mood: f.mood || undefined, web }); show(); }
+    catch (x) { if ($("#ix-out")) $("#ix-out").innerHTML = `<div class="banner">${esc(x.message)}</div>`; }
+    if ($("#ia-go")) { $("#ia-go").disabled = false; $("#ia-go").innerHTML = `${ic("search")} ${ai ? "Find recipes" : "Find recipes (free sources)"}`; }
+  };
+  $("#ia-form").onsubmit = (e) => { e.preventDefault(); run(ai); };
+  if (MK.ideas) show(); else run(false);   // the free sources right away; the web search when asked
 }
 // Settings → Recipe ideas: optional keys (TheMealDB supporter, Spoonacular). Keys stay on the server.
 async function openIdeasSettings() {
   let st = {}; try { st = await api("GET", "/api/ideas/config"); } catch (_) {}
-  openSheet("Recipe ideas", `<p class="hint" style="margin-top:0">TheMealDB works without a key. A TheMealDB supporter key and a free Spoonacular key add more recipes.</p>
+  openSheet("Recipe ideas", `<p class="hint" style="margin-top:0">Ideas are always real, published recipes. TheMealDB and the Wikibooks Cookbook work without a key; a TheMealDB supporter key and a free Spoonacular key add more. With an OpenAI key, AI also searches recipe sites, and TablePlan opens each page and reads its own recipe.</p>
+    ${st.ai_created ? `<div class="group"><button class="row" id="ik-ai"><div class="main"><div class="a">${esc(plural(st.ai_created, "AI-created recipe"))} saved earlier</div><div class="b">Kept as your data. Review them to keep or delete.</div></div><span class="text-btn strong">Review</span></button></div>` : ""}
     <form class="group" id="ik-form" autocomplete="off"><div class="field"><label for="ik-md">TheMealDB key</label><input id="ik-md" class="full" type="password" placeholder="${st.mealdb_supporter ? "Saved · leave blank to keep" : "Optional (free test key is used)"}"></div>
       <div class="field"><label for="ik-sp">Spoonacular key</label><input id="ik-sp" class="full" type="password" placeholder="${st.spoonacular ? "Saved · leave blank to keep" : "Optional"}"></div>
+      <div class="field col"><label for="ik-deny">Never show recipes from<small class="lh">One site per line. Add any AI-content or spam site you come across.</small></label><textarea id="ik-deny" rows="5" spellcheck="false">${esc((st.denylist || []).join("\n"))}</textarea></div>
       <div style="padding:10px 14px" class="btn-row"><button class="btn" type="submit">Save</button><button class="btn sec" type="button" id="ik-clear">Remove keys</button></div></form>
     ${st.spoon_paused ? `<p class="hint">Spoonacular's daily quota is used up; it resumes tomorrow.</p>` : ""}
-    <p class="hint">Spoonacular's free plan has a small daily quota; TablePlan caches answers and stops for the day when it runs out.</p>`, {
+    <p class="hint">Spoonacular's free plan has a small daily quota; TablePlan caches answers and stops for the day when it runs out. Wikibooks Cookbook recipes are CC BY-SA and keep their credit when you import them.</p>`, {
     onMount() {
+      $("#ik-ai") && ($("#ik-ai").onclick = () => { closeSheet(true); location.hash = "recipes/ai"; });
       $("#ik-form").onsubmit = async (e) => {
         e.preventDefault();
-        const b = {}; if ($("#ik-md").value.trim()) b.mealdb_key = $("#ik-md").value.trim(); if ($("#ik-sp").value.trim()) b.spoonacular_key = $("#ik-sp").value.trim();
+        const b = { denylist: $("#ik-deny").value }; if ($("#ik-md").value.trim()) b.mealdb_key = $("#ik-md").value.trim(); if ($("#ik-sp").value.trim()) b.spoonacular_key = $("#ik-sp").value.trim();
         try { await api("PUT", "/api/ideas/config", b); MK.ideas = null; toast("Saved"); closeSheet(); } catch (x) { fail(x); }
       };
       $("#ik-clear").onclick = async () => { try { await api("PUT", "/api/ideas/config", { mealdb_key: "", spoonacular_key: "" }); MK.ideas = null; toast("Keys removed"); closeSheet(); } catch (x) { fail(x); } };

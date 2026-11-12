@@ -1,22 +1,24 @@
-"""Recipe ideas from what's in the kitchen: turning TheMealDB / Spoonacular recipes and AI ideas into one safe shape.
+"""Recipe ideas from what's in the kitchen: real recipes only (TheMealDB, Spoonacular, the Wikibooks Cookbook, and
+recipe pages found on the web), turned into one safe shape. Nothing here writes a recipe: every idea is a published one.
 
-Everything that comes from outside is untrusted: HTML is stripped, fields are capped, only http(s) links survive,
-and AI ideas are checked against the inventory before anyone sees them.
+Everything that comes from outside is untrusted: HTML and wiki markup are stripped, fields are capped, only http(s)
+links survive, and web pages count only when they publish schema.org Recipe data.
 
-An idea: {id, source, label, title, url, image, minutes, servings, ingredients: [str], steps: [str], why, ai}
+An idea: {id, source, label, site, title, url, image, minutes, servings, ingredients: [str], steps: [str], why, credit?}
 """
 
+import hashlib
 import html
 import re
+import urllib.parse
 
 MAX_TITLE, MAX_LINE, MAX_STEP, MAX_WHY = 120, 200, 1000, 240
 MAX_INGS, MAX_STEPS = 40, 30
-AI_MAX_MISSING = 2
 _TAG = re.compile(r"<[^>]*>")
 _URL = re.compile(r"(?:https?://|www\.)\S+", re.I)
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-LABELS = {"mealdb": "Recipe · TheMealDB", "spoonacular": "Recipe · Spoonacular", "ai": "AI-created · not tested"}
+LABELS = {"mealdb": "Recipe · TheMealDB", "spoonacular": "Recipe · Spoonacular"}
 
 
 def text(v, cap=MAX_LINE, multiline=False):
@@ -95,77 +97,137 @@ def spoon_idea(info):
             "ingredients": ings[:MAX_INGS], "steps": steps[:MAX_STEPS], "why": "", "ai": False}
 
 
-AI_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["ideas"],
-    "properties": {"ideas": {"type": "array", "items": {
-        "type": "object", "additionalProperties": False,
-        "required": ["title", "why", "servings", "minutes", "ingredients", "steps"],
-        "properties": {
-            "title": {"type": "string"}, "why": {"type": "string"},
-            "servings": {"type": "integer"}, "minutes": {"type": "integer"},
-            "ingredients": {"type": "array", "items": {
-                "type": "object", "additionalProperties": False, "required": ["food", "qty", "unit", "note", "from"],
-                "properties": {"food": {"type": "string"}, "qty": {"type": "number"}, "unit": {"type": "string"},
-                               "note": {"type": "string"}, "from": {"type": "string", "enum": ["inventory", "staple", "missing"]}}}},
-            "steps": {"type": "array", "items": {"type": "string"}}}}}}}
+# ---- found on the web: only pages that publish schema.org Recipe data, from sites not on the denylist
+# Social networks and pin boards host copies or links, not the recipe itself. The list is editable in
+# Settings → Recipe ideas (add any AI-content or spam domain you run into).
+DEFAULT_DENYLIST = ["pinterest.com", "facebook.com", "instagram.com", "tiktok.com", "youtube.com", "reddit.com",
+                    "x.com", "twitter.com", "quora.com"]
 
 
-def check_ai_idea(raw, have, is_staple, enough, fmt):
-    """Validate one AI idea against the kitchen. have(food) -> stock entries [(free, unit)] or None when not in the
-    kitchen; is_staple(food) -> bool; enough(qty, unit, entries) -> bool; fmt(qty, unit, food) -> "2 cups rice".
-    Returns (idea, None) or (None, reason). Quantities over what's on hand, more than 2 missing foods, or no steps reject
-    the idea; links are removed from every field."""
-    if not isinstance(raw, dict):
-        return None, "not an idea"
-    title = no_urls(text(raw.get("title"), MAX_TITLE))
-    if not title:
-        return None, "no title"
-    ings, missing = [], []
-    for x in (raw.get("ingredients") or [])[:MAX_INGS]:
-        if not isinstance(x, dict):
+def host_of(u):
+    m = re.match(r"^https?://([^/?#:]+)", str(u or "").strip(), re.I)
+    return m.group(1).lower().removeprefix("www.") if m else ""
+
+
+def denied(u, deny):
+    """Is the link's site (or a parent domain) on the denylist?"""
+    h = host_of(u)
+    return not h or any(h == d or h.endswith("." + d) for d in (x.strip().lower().removeprefix("www.") for x in deny or []) if d)
+
+
+def clean_denylist(v):
+    out = []
+    for x in (v if isinstance(v, list) else str(v or "").replace(",", "\n").splitlines())[:200]:
+        x = str(x).strip()
+        d = host_of(x if "://" in x else "https://" + x)
+        if d and re.fullmatch(r"[a-z0-9.-]{1,120}\.[a-z]{2,}", d) and d not in out:
+            out.append(d)
+    return out
+
+
+def search_angles(foods, meal=None, max_minutes=None, mood=""):
+    """2-4 web search angles for the whole usable inventory. foods = [{"name", "expiring"}], expiring first.
+    Angles: what's expiring, the biggest overlap with the kitchen, the requested meal type. Mood only adds words."""
+    names = [text(f.get("name"), 40) for f in foods if text(f.get("name"), 40)]
+    if not names:
+        return []
+    exp = [text(f["name"], 40) for f in foods if f.get("expiring") and text(f.get("name"), 40)]
+    extra = " ".join(x for x in (text(mood, 60), f"under {int(max_minutes)} minutes" if max_minutes else "") if x)
+    sfx = f" {extra}" if extra else ""
+    angles = []
+    if exp:
+        angles.append(f"recipe using {', '.join(exp[:3])}{sfx}")
+    angles.append(f"recipe with {', '.join(names[:5])}{sfx}")
+    if meal:
+        angles.append(f"{text(meal, 20)} recipe with {', '.join((exp or names)[:3])}{sfx}")
+    if len(names) > 5:
+        angles.append(f"recipe with {', '.join(names[5:9])}{sfx}")
+    if len(angles) < 2:
+        angles.append(f"easy recipe with {names[0]}{sfx}")
+    return list(dict.fromkeys(angles))[:4]
+
+
+def web_idea(rec, page_url):
+    """A recipe read from a page's own schema.org data (scraper output) -> idea, or None."""
+    u = url(page_url)
+    if not u.startswith("https://") or not isinstance(rec, dict):
+        return None
+    title = text(rec.get("name"), MAX_TITLE)
+    ings = [text(x.get("note") if isinstance(x, dict) else x, MAX_LINE) for x in rec.get("recipeIngredient") or []]
+    steps = [text(x.get("text") if isinstance(x, dict) else x, MAX_STEP) for x in rec.get("recipeInstructions") or []]
+    ings, steps = [x for x in ings if x], [x for x in steps if x]
+    if not title or not ings or not steps:
+        return None
+    mins = rec.get("totalTimeSeconds")
+    serv = rec.get("recipeServings")
+    site = host_of(u)
+    img = url(rec.get("image_url"))
+    return {"id": "web:" + hashlib.sha1(u.encode()).hexdigest()[:14], "source": "web", "label": site, "site": site,
+            "title": title, "url": u, "image": img if img.startswith("https://") else "",
+            "minutes": int(mins // 60) if isinstance(mins, (int, float)) and 0 < mins < 86400 else None,
+            "servings": int(serv) if isinstance(serv, (int, float)) and 0 < serv < 100 else None,
+            "ingredients": ings[:MAX_INGS], "steps": steps[:MAX_STEPS], "why": "", "ai": False}
+
+
+# ---- Wikibooks Cookbook (CC BY-SA): recipes are wikitext with an Ingredients list and a numbered Procedure
+WIKIBOOKS = "Wikibooks Cookbook"
+WIKI_LICENSE = "CC BY-SA 4.0"
+WIKI_LICENSE_URL = "https://creativecommons.org/licenses/by-sa/4.0/"
+_ING_H = re.compile(r"ingredient", re.I)
+_STEP_H = re.compile(r"procedure|method|direction|instruction|preparation|steps", re.I)
+_BOLD = re.compile(r"'{2,5}")
+
+
+def wiki_clean(s):
+    """Wikitext -> plain text: templates, refs, files and markup removed, links turned into their words."""
+    s = str(s or "")
+    s = re.sub(r"<ref[^>]*/>|<ref[^>]*>.*?</ref>", "", s, flags=re.S | re.I)
+    for _ in range(4):
+        s = re.sub(r"\{\{[^{}]*\}\}", "", s)
+    s = re.sub(r"\[\[(?:File|Image|Category):[^\]]*\]\]", "", s, flags=re.I)
+    s = re.sub(r"\[\[[^\]|]*\|([^\]]*)\]\]", r"\1", s)
+    s = re.sub(r"\[\[([^\]]*)\]\]", lambda m: m.group(1).split(":")[-1], s)
+    s = re.sub(r"\[https?://\S+\s+([^\]]*)\]", r"\1", s)
+    s = re.sub(r"\[https?://[^\]]*\]", "", s)
+    return text(_BOLD.sub("", s), MAX_STEP)
+
+
+def wikibooks_idea(page_title, wikitext):
+    """A Cookbook page's wikitext -> idea (with its licence and attribution), or None if it isn't a recipe."""
+    title = text(str(page_title or "").removeprefix("Cookbook:"), MAX_TITLE)
+    if not title or "/" in title:
+        return None
+    sec, sections = "", {}
+    for ln in str(wikitext or "").splitlines():
+        h = re.match(r"^\s*=+\s*(.*?)\s*=+\s*$", ln)
+        if h:
+            sec = h.group(1)
             continue
-        food = no_urls(text(x.get("food"), 80))
-        if not food:
-            continue
-        try:
-            qty = float(x.get("qty") or 0)
-        except (TypeError, ValueError):
-            qty = 0.0
-        if qty < 0 or qty > 100000:
-            return None, f"odd amount for {food}"
-        unit = no_urls(text(x.get("unit"), 20))
-        note = no_urls(text(x.get("note"), 80))
-        line = (fmt(qty, unit, food) if qty else food) + (f", {note}" if note else "")
-        src = x.get("from")
-        stock = have(food)
-        if src == "staple" and is_staple(food):
-            ings.append(line)
-            continue
-        if src == "inventory" and stock:
-            if qty and not enough(qty, unit, stock):
-                return None, f"uses more {food} than you have"
-            ings.append(line)
-            continue
-        if src == "inventory" and is_staple(food):
-            ings.append(line)
-            continue
-        missing.append(line)   # claimed to be at home but isn't, or openly missing
-        ings.append(line)
-    if len(missing) > AI_MAX_MISSING:
-        return None, f"needs {len(missing)} things you don't have"
-    steps = [no_urls(text(s, MAX_STEP)) for s in (raw.get("steps") or [])[:MAX_STEPS] if isinstance(s, str)]
-    steps = [s for s in steps if s]
+        sections.setdefault(sec, []).append(ln)
+    ings, steps = [], []
+    for name, lines in sections.items():
+        rows = [wiki_clean(re.sub(r"^\s*[*#:]+\s*", "", ln)) for ln in lines if re.match(r"^\s*[*#]", ln)]
+        if _ING_H.search(name):
+            ings += rows
+        elif _STEP_H.search(name):
+            steps += rows
+    ings, steps = [x for x in ings if x][:MAX_INGS], [x for x in steps if x][:MAX_STEPS]
     if not ings or not steps:
-        return None, "no ingredients or steps"
-    mins = raw.get("minutes")
-    serv = raw.get("servings")
-    return {"source": "ai", "label": LABELS["ai"], "title": title, "url": "", "image": "",
-            "minutes": int(mins) if isinstance(mins, int) and 0 < mins < 1440 else None,
-            "servings": int(serv) if isinstance(serv, int) and 0 < serv < 50 else None,
-            "ingredients": ings, "steps": steps, "why": no_urls(text(raw.get("why"), MAX_WHY)), "ai": True,
-            "ai_missing": missing}, None
+        return None
+    page = "Cookbook:" + title
+    link = "https://en.wikibooks.org/wiki/" + urllib.parse.quote(page.replace(" ", "_"), safe=":")
+    return {"id": "wb:" + hashlib.sha1(page.encode()).hexdigest()[:14], "source": "wikibooks",
+            "label": f"{WIKIBOOKS} · CC BY-SA", "site": "en.wikibooks.org", "title": title, "url": link, "image": "",
+            "minutes": None, "servings": None, "ingredients": ings, "steps": steps, "why": "", "ai": False,
+            "credit": {"site": WIKIBOOKS, "title": page, "url": link, "license": WIKI_LICENSE, "license_url": WIKI_LICENSE_URL,
+                       "authors": "Wikibooks contributors"}}
+
+
+def rank_key(i):
+    """One ranked list across sources: fewest missing, then most expiring food used, then rating when there is one."""
+    return (i.get("missing_n") or 0, -len(i.get("expiring") or []), -float(i.get("rating") or 0), (i.get("title") or "").lower())
 
 
 def safe_name(s, cap=60):
-    """An inventory name as plain data for the AI: no control characters, no markup, capped."""
+    """An inventory name as plain data for a search prompt: no control characters, no markup, capped."""
     return text(s, cap)
