@@ -1022,7 +1022,7 @@ function startScanSession(after) {
     <div id="sb-input"></div>
     <div class="sb-opts"><label class="sb-toggle"><input type="checkbox" id="sb-counting" ${counting() ? "checked" : ""}> Counting what I already have</label>
       <label class="sb-all">Set date for all <input type="date" id="sb-all-date" aria-label="Use-by date for every item this session"></label></div>
-    <div class="muted small" id="sb-n" aria-live="polite"></div>
+    <div class="sb-nrow"><div class="muted small" id="sb-n" aria-live="polite"></div><span class="seg mini-seg sb-view" id="sb-view" role="radiogroup" aria-label="Scan list view"><button data-v="cards" role="radio">Cards</button><button data-v="batch" role="radio">Batch</button></span></div>
     <div class="sb-rows" id="sb-rows"></div></div>`);
   $("#sb-done").onclick = endScanSession;
   $("#sb-counting").onchange = (e) => { try { localStorage.setItem("tp.counting", e.target.checked ? "1" : "0"); } catch (_) {} drawSession(); };
@@ -1121,11 +1121,15 @@ function drawSession() {
     $("#sb-locs").innerHTML = scanLocs().map(([k, l]) => `<button class="filter sm ${loc === k ? "on" : ""}" data-sl="${esc(k)}" role="radio" aria-checked="${loc === k}">${esc(l)}</button>`).join("");
     $$("#sb-locs [data-sl]").forEach((b) => (b.onclick = () => { SS.loc = b.dataset.sl; try { localStorage.setItem("tp.scanLoc", SS.loc); } catch (_) {} drawSession(); }));
     const n = scanCount(), waiting = SCANQ.q.length + (SCANQ.busy ? 1 : 0);
-    $("#sb-n").textContent = [n ? `${plural(n, "item")} added` : stockMethod() === "scanner" ? "Ready, scan away" : "", waiting > 1 ? `${waiting} scans in line` : ""].filter(Boolean).join(" · ");
+    $("#sb-n").textContent = [n ? (scanView() === "batch" ? "" : `${plural(n, "item")} added`) : stockMethod() === "scanner" ? "Ready, scan away" : "", waiting > 1 ? `${waiting} scans in line` : ""].filter(Boolean).join(" · ");
   }
+  const batch = scanView() === "batch";
+  $$("#sb-view [data-v]").forEach((b) => { const on = b.dataset.v === scanView(); b.classList.toggle("on", on); b.setAttribute("aria-checked", String(on)); b.onclick = () => { try { localStorage.setItem("tp.scanView", b.dataset.v); } catch (_) {} drawSession(); }; });
   const rowsHtml = SS.rows.map(scanRowHtml).reverse().join("");
   [$("#sb-rows"), $("#sc-rows")].forEach((box) => {
     if (!box) return;
+    if (batch && box.id === "sb-rows") return drawBatch(box);
+    box.classList.remove("batch");
     box.innerHTML = rowsHtml;
     $$("[data-more],[data-less]", box).forEach((b) => (b.onclick = () => bumpScan(SS.rows[+b.closest("[data-i]").dataset.i], b.hasAttribute("data-more") ? 1 : -1)));
     SS.rows.forEach((r) => bindScanRow(box, r));
@@ -2627,4 +2631,40 @@ function bindFillSlider(el, start, onMove, onCommit) {
     show(); clearTimeout(t); t = setTimeout(() => onCommit(v), 600);
   };
   show();
+}
+
+// ------------------------------------------------------------------ fast batch view: one dense list, big type, swipe to delete
+const scanView = () => { try { return localStorage.getItem("tp.scanView") || "cards"; } catch (_) { return "cards"; } };
+const BATCH_FILLS = [1, 0.75, 0.5, 0.25];
+function drawBatch(box) {
+  box.classList.add("batch");
+  const n = scanCount(), review = SS.rows.filter((r) => r.unknown).reduce((a, r) => a + r.count, 0);
+  const place = (it) => it.place_label || cap(it.location || "");
+  box.innerHTML = `<div class="bt-sum" role="status">${esc(plural(n, "item"))} scanned${review ? ` · <b>${esc(review)} to review</b>` : ""}</div>` +
+    SS.rows.map((r, i) => {
+      const it = r.item, left = it.amount_left ?? 1;
+      return `<div class="bt-row" data-i="${i}"><div class="bt-del" aria-hidden="true">${ic("trash")} Delete</div><div class="bt-in">
+        <span class="bt-pic">${it.image ? `<img src="${esc(it.image)}" alt="">` : esc(it.emoji || "🥫")}</span>
+        <div class="bt-main"><div class="bt-name">${esc(it.name)}</div><div class="bt-line"><div class="bt-sub">${esc(place(it))}${r.count > 1 ? ` · <b>×${esc(r.count)}</b>` : ""}${r.unknown ? ` · <span class="bt-rv">Review</span>` : ""}</div>
+        <div class="bt-chips"><button class="chip-s" data-bfill aria-label="How full: ${esc(fillText(left))}. Tap to change">${esc(left >= 0.995 ? "Full" : fillText(left).replace(" left", ""))}</button>
+          <span class="bt-date"><button class="chip-s ${it.expires_on ? "set" : ""}" data-bdate>${esc(it.expires_on ? fmt(parseISO(it.expires_on), { month: "short", day: "numeric" }) : "Date")}</button><input type="date" data-bdate-in value="${esc(it.expires_on || "")}" aria-label="Use-by date for ${esc(it.name)}"></span>
+          <button class="bt-x" data-bdel aria-label="Remove ${esc(it.name)}">${ic("x")}</button></div></div></div></div></div>`;
+    }).reverse().join("");
+  $$(".bt-row", box).forEach((el) => {
+    const row = SS.rows[+el.dataset.i]; if (!row) return;
+    const del = async () => {
+      el.classList.add("gone");
+      while (row.count > 0 && SS.rows.includes(row)) { const c = row.count; await bumpScan(row, -1); if (row.count === c && SS.rows.includes(row)) { el.classList.remove("gone"); break; } }
+    };
+    $("[data-bfill]", el).onclick = () => { const k = BATCH_FILLS.findIndex((f) => Math.abs(f - (row.item.amount_left ?? 1)) < 0.02); patchScanned(row, { action: "fill", left: BATCH_FILLS[(k + 1) % BATCH_FILLS.length] }); };
+    const din = $("[data-bdate-in]", el);
+    $("[data-bdate]", el).onclick = () => { try { din.showPicker(); } catch (_) { din.focus(); din.click(); } };
+    din.onchange = () => din.value && patchScanned(row, { action: "set_date", expires_on: din.value, source: "package" });
+    $("[data-bdel]", el).onclick = del;
+    const inner = $(".bt-in", el); let x0 = null, dx = 0;
+    inner.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+    inner.onpointerdown = (e) => { if (e.target.closest("button,input")) return; x0 = e.clientX; dx = 0; inner.setPointerCapture(e.pointerId); };
+    inner.onpointermove = (e) => { if (x0 == null) return; dx = Math.min(0, e.clientX - x0); inner.style.transform = `translateX(${dx}px)`; el.classList.toggle("drag", dx < -4); el.classList.toggle("arm", dx < -90); };
+    inner.onpointerup = inner.onpointercancel = () => { if (x0 == null) return; x0 = null; inner.style.transform = ""; el.classList.remove("arm", "drag"); if (dx < -90) del(); };
+  });
 }

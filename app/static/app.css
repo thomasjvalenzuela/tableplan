@@ -1613,3 +1613,34 @@ input[type=range]{-webkit-appearance:auto;appearance:auto;background:none;paddin
 .pi-done .ci-ic svg{width:28px;height:28px}
 .pi-done span{color:var(--sub)}
 .pi-done .btn-row{width:100%}
+
+/* scan session: fast batch view */
+.sb-nrow{display:flex;align-items:center;gap:8px;min-height:32px}
+.sb-nrow #sb-n{flex:1;min-width:0}
+.sb-view{flex:none}
+.sb-view button{padding:4px 12px;font-size:13px}
+.sb-rows.batch{display:flex;flex-direction:column;gap:6px}
+.bt-sum{position:sticky;top:-10px;margin-top:-4px;z-index:2;background:var(--bg-elev);padding:8px 2px;font-size:15px;font-weight:600;border-bottom:.5px solid var(--sep)}
+.bt-sum b{color:var(--soon-fg)}
+.bt-row{position:relative;border-radius:14px;overflow:hidden;isolation:isolate}
+.bt-row.gone{opacity:.4;pointer-events:none}
+.bt-del{position:absolute;inset:0;background:var(--red);opacity:0;display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:0 18px;color:#fff;font-weight:700}
+.bt-del svg{width:18px;height:18px}
+.bt-in{position:relative;display:flex;align-items:flex-start;gap:12px;padding:10px 12px;background:var(--card);touch-action:pan-y;transition:transform .15s}
+.bt-row.drag .bt-del{opacity:1}
+.bt-row.drag .bt-in{transition:none}
+.bt-pic{width:44px;height:44px;border-radius:12px;background:var(--fill);display:grid;place-items:center;font-size:26px;flex:none;overflow:hidden}
+.bt-pic img{width:100%;height:100%;object-fit:contain}
+.bt-main{flex:1;min-width:0}
+.bt-line{display:flex;align-items:center;gap:8px;margin-top:4px}
+.bt-name{font-size:18px;font-weight:700;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bt-sub{flex:1;min-width:0;font-size:15px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bt-sub b{color:var(--text)}
+.bt-rv{color:var(--soon-fg);font-weight:600}
+.bt-chips{display:flex;align-items:center;gap:6px;flex:none}
+.bt-chips .chip-s{font-size:14px;padding:7px 11px}
+.bt-date{position:relative}
+.bt-date input{position:absolute;inset:0;opacity:0;pointer-events:none;width:100%}
+.bt-x{width:32px;height:32px;border:0;border-radius:50%;background:transparent;color:var(--sub);display:grid;place-items:center}
+.bt-x svg{width:16px;height:16px}
+@media (prefers-reduced-motion:reduce){.bt-in{transition:none}}
