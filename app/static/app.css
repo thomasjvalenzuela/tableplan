@@ -1644,3 +1644,23 @@ input[type=range]{-webkit-appearance:auto;appearance:auto;background:none;paddin
 .bt-x{width:32px;height:32px;border:0;border-radius:50%;background:transparent;color:var(--sub);display:grid;place-items:center}
 .bt-x svg{width:16px;height:16px}
 @media (prefers-reduced-motion:reduce){.bt-in{transition:none}}
+
+/* Expiring view (#inventory/expiring) and the focused Use it up */
+.pill-btn .pb-n{margin-left:6px;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--soon-bg);color:var(--soon-fg);font-size:12.5px;font-weight:700;display:inline-grid;place-items:center}
+.ex-hint{margin:10px 2px 0}
+.ex-rows{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.ex-row{background:var(--card);border-radius:14px;padding:10px 12px;box-shadow:var(--shadow)}
+.ex-top{display:flex;align-items:center;gap:12px;width:100%;border:0;background:none;padding:0;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.ex-top .emo{width:40px;height:40px;border-radius:10px;background:var(--fill);display:grid;place-items:center;font-size:22px;flex:none}
+.ex-top .sb-img{width:40px;height:40px;flex:none}
+.ex-top .main{flex:1;min-width:0;display:flex;flex-direction:column}
+.ex-top .a{font-weight:600;font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ex-top .b{font-size:13.5px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ex-acts{display:flex;gap:6px;margin-top:10px}
+.ex-acts .chip-s{flex:1 1 auto;justify-content:center;min-height:36px;padding:6px 8px;font-size:14px;white-space:nowrap}
+.ex-acts [data-x=gone]{color:var(--bad-fg)}
+@media (max-width:340px){.ex-acts{flex-wrap:wrap}}
+.pop-date{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;font-size:15px}
+.pop-date input{font:inherit;font-size:15px;border:1px solid var(--sep);border-radius:8px;padding:4px 6px;background:var(--card);color:var(--text)}
+.mk-focus{display:flex;align-items:center;gap:8px;padding:10px 2px;font-size:15px}
+.mk-focus span{flex:1;min-width:0}

@@ -1660,6 +1660,9 @@ def apply_pantry_action(c, item_id, body):
         c.execute("UPDATE pantry_items SET status='tossed', finished_on=? WHERE id=?", (iso(t), item_id))
         event(c, item_id, "tossed")
 
+    elif action == "still_good":   # "Still good": looked at it today, so it isn't stale (dates are changed with set_date)
+        event(c, item_id, "still good")
+
     elif action == "restore":
         c.execute("UPDATE pantry_items SET status='active', finished_on=NULL, amount_left=CASE WHEN amount_left<=0 THEN 1 ELSE amount_left END WHERE id=?", (item_id,))
         event(c, item_id, "restored")
@@ -1790,6 +1793,41 @@ def list_pantry(c, status="active"):
         """SELECT * FROM pantry_items WHERE status=? ORDER BY
            CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, name COLLATE NOCASE""", (status,)).fetchall()
     return [pantry_json(c, r) for r in rows]
+
+
+EXPIRING_SOON_DAYS = 3    # "Use soon": expires within this many days
+STALE_DAYS = 21           # "Stale": nobody has touched it in 3 weeks (not counting the freezer)
+
+
+def expiry_segment(days_left, location, touched_days):
+    """Which Expiring segment an active item belongs in: expired | soon | stale | None."""
+    if days_left is not None and days_left < 0:
+        return "expired"
+    if days_left is not None and days_left <= EXPIRING_SOON_DAYS:
+        return "soon"
+    if location != "freezer" and touched_days is not None and touched_days >= STALE_DAYS:
+        return "stale"
+    return None
+
+
+def expiring_view():
+    """GET /api/pantry/expiring: {expired, soon, stale} (each a list of items, with touched_days), soonest first."""
+    t = today()
+    out = {"expired": [], "soon": [], "stale": []}
+    with db() as c:
+        touched = {r[0]: r[1] for r in c.execute("SELECT item_id, MAX(at) FROM pantry_events WHERE item_id IS NOT NULL GROUP BY item_id")}
+        for r in c.execute("SELECT * FROM pantry_items WHERE status='active' ORDER BY "
+                           "CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, name COLLATE NOCASE"):
+            exp = parse_date(r["expires_on"])
+            last = max(filter(None, (parse_date((touched.get(r["id"]) or "")[:10]), parse_date(r["purchased_on"]),
+                                     parse_date((r["created_at"] or "")[:10]))), default=None)
+            td = (t - last).days if last else None
+            seg = expiry_segment((exp - t).days if exp else None, r["location"], td)
+            if seg:
+                out[seg].append({**pantry_json(c, r), "touched_days": td})
+    out["stale"].sort(key=lambda i: -(i["touched_days"] or 0))
+    out["counts"] = {k: len(v) for k, v in out.items()}
+    return out
 
 
 def expiring_items(c, window):
@@ -10089,14 +10127,15 @@ MAKE_EXPIRING_DAYS = 3   # "Use it up": expiring within this many days
 MAKE_PLANNED_DAYS = 3    # recipes planned this soon are left out
 
 
-def _make_stock(c, t):
-    """{key: [{row, free}]}: active, unexpired inventory, soonest-expiring first; free = amount not reserved for a plan."""
+def _make_stock(c, t, include_id=None):
+    """{key: [{row, free}]}: active, unexpired inventory, soonest-expiring first; free = amount not reserved for a plan.
+    include_id: one item to count even if it's past its date or waiting for review (Find recipes for that food)."""
     reserved = {r[0]: r[1] for r in c.execute(
         "SELECT pantry_item_id, SUM(qty) FROM allocations WHERE qty IS NOT NULL GROUP BY pantry_item_id")}
     stock = {}
-    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND COALESCE(review,0)=0 "
-                       "AND (expires_on IS NULL OR expires_on>=?) "
-                       "ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id", (iso(t),)):
+    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND (id=? OR (COALESCE(review,0)=0 "
+                       "AND (expires_on IS NULL OR expires_on>=?))) "
+                       "ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id", (include_id or -1, iso(t))):
         if r["qty"] is not None and r["qty"] <= 0:
             continue
         free = None if r["qty"] is None else max(0.0, r["qty"] - (reserved.get(r["id"]) or 0))
@@ -10125,7 +10164,7 @@ def recipe_check(c, rec, stock, skeys, t, scale=1):
     for n in needs:
         groups.setdefault(n["key"], []).append(n)
     soon = iso(t + timedelta(days=MAKE_EXPIRING_DAYS))
-    missing, expiring, seen = [], [], set()
+    missing, expiring, seen, uses = [], [], set(), set()
     for k, ns in groups.items():
         ents = stock.get(k) or []
         if not ents and (ns[0]["food"] or "").strip():
@@ -10135,6 +10174,7 @@ def recipe_check(c, rec, stock, skeys, t, scale=1):
             missing.append({"food": ns[0]["food"] or ns[0]["line"], "text": _make_need_text(ns[0]), "short": False,
                             "qty": ns[0]["qty"], "unit": ns[0]["unit"]})
             continue
+        uses.update(e["row"]["id"] for e in ents)
         first = ns[0]
         qty = None
         if all(n["qty"] is not None for n in ns):
@@ -10151,17 +10191,24 @@ def recipe_check(c, rec, stock, skeys, t, scale=1):
                 expiring.append({"id": r["id"], "name": r["name"], "days_left": d})
                 break
     expiring.sort(key=lambda x: x["days_left"])
-    return {"missing": missing, "expiring": expiring, "need_n": len(groups)}
+    return {"missing": missing, "expiring": expiring, "need_n": len(groups), "uses": sorted(uses)}
 
 
-def what_can_i_make():
-    """GET /api/make: Make right now / Almost there / Use it up."""
+def what_can_i_make(food=None):
+    """GET /api/make[?food=<inventory id>]: Make right now / Almost there / Use it up.
+    With food, Use it up is the recipes that use that one item (at most 3 other things missing), and focus is the item."""
     require_native()
     t = today()
     pool = {r["id"]: r for r in recipe_pool()}
+    focus = None
     with db() as c:
+        if food is not None:
+            row = pantry_row(c, _int_id(food, "item"))
+            if not row or row["status"] != "active":
+                raise ApiError(404, "That item isn't in your inventory any more.")
+            focus = pantry_json(c, row)
         skeys = staple_keys(c)
-        stock = _make_stock(c, t)
+        stock = _make_stock(c, t, focus["id"] if focus else None)
         planned = {r[0] for r in c.execute(
             "SELECT DISTINCT recipe_id FROM meal_plans WHERE recipe_id IS NOT NULL AND cooked_at IS NULL AND skipped_at IS NULL "
             "AND date BETWEEN ? AND ?", (iso(t), iso(t + timedelta(days=MAKE_PLANNED_DAYS))))}
@@ -10179,6 +10226,10 @@ def what_can_i_make():
             "SELECT * FROM pantry_items WHERE status='active' AND expires_on IS NOT NULL AND expires_on>=? AND expires_on<=? "
             "ORDER BY expires_on", (iso(t), soon))]
     out = n_whatcan.buckets(cands)
+    if focus:
+        out["use_up"] = sorted((r for r in cands if focus["id"] in r["uses"] and len(r["missing"]) <= n_whatcan.ALMOST_MAX),
+                               key=lambda r: (len(r["missing"]), r.get("planned_soon", False)) + n_whatcan.rank_key(r)[1:])[:60]
+        out["focus"] = focus
     with db() as c:
         book = PriceBook(c)
         for r in out["almost"] + [x for x in out["use_up"] if x["missing"]]:
@@ -11793,7 +11844,7 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and path == "/api/demo":
             return self.send(200, demo_add())
         if m == "GET" and path == "/api/make":
-            return self.send(200, what_can_i_make())
+            return self.send(200, what_can_i_make(q.get("food")))
         if m == "POST" and path == "/api/make/web":
             return self.send(200, make_web_suggestions(self.body()))
         if m == "POST" and path == "/api/scan/identify":
@@ -11854,6 +11905,8 @@ class Handler(BaseHTTPRequestHandler):
             out = fn(self.body())
             self._sync_after = NATIVE
             return self.send(200, out)
+        if m == "GET" and path == "/api/pantry/expiring":
+            return self.send(200, expiring_view())
         if m == "GET" and path == "/api/pantry/checkin":
             return self.send(200, pantry_checkin_status())
         # ---- recipes

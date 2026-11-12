@@ -1,5 +1,13 @@
 [
  {
+  "id": "expiring-view",
+  "date": "2026-12-01",
+  "icon": "clock",
+  "color": "orange",
+  "title": "One place for what needs using",
+  "text": "Tap Expiring on Inventory (or the expiring soon tile on Home) to see what's Expired, what to Use soon (3 days or less) and what's gone Stale (not touched in 3 weeks, freezer aside). Each item has one-tap answers: Used, Gone (counted as waste in Spending), Still good, and Find recipes, which opens Use it up for just that food."
+ },
+ {
   "id": "batch-scan",
   "date": "2026-11-30",
   "icon": "scan",

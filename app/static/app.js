@@ -218,7 +218,9 @@ function route() {
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
   if (h === "diary") { window.scrollTo(0, 0); return renderDiary(); }
   if (h === "spending") { window.scrollTo(0, 0); return renderSpending(); }
+  if (h.startsWith("make/use/")) { window.scrollTo(0, 0); return renderMake("use_up", h.slice(9)); }
   if (h === "make" || h.startsWith("make/")) { window.scrollTo(0, 0); return renderMake({ use: "use_up", almost: "almost", ideas: "ideas" }[h.slice(5)] || "ready"); }
+  if (h === "inventory/expiring") { window.scrollTo(0, 0); return renderExpiring(); }
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
 const upd = () => !!state.update?.update_available;
@@ -341,7 +343,7 @@ async function renderHome() {
     bindDiaryTimeline(box);
   }).catch(() => {});
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
-  $("#stat-exp") && ($("#stat-exp").onclick = () => { location.hash = "make/use"; });
+  $("#stat-exp") && ($("#stat-exp").onclick = () => { location.hash = "inventory/expiring"; });
   $("#fix-mealie") && ($("#fix-mealie").onclick = () => openSetupSection("mealie", "Recipe library", reloadCfg));
   $$(".wk-day[data-entry]").forEach((b) => (b.onclick = () => { const e = s.week.find((x) => String(x.id) === b.dataset.entry); if (e?.recipe?.slug) openRecipe(e.recipe.slug); else openEntry(e); }));
   $$("[data-plan-day]").forEach((b) => (b.onclick = () => openPicker(b.dataset.planDay, "dinner", null, { seq: true })));
@@ -373,7 +375,7 @@ function homeStats(s, list) {
   const mins = week.reduce((n, e) => n + (+(e.recipe.eta?.shown || e.recipe.minutes) || 0), 0);
   const hrs = mins >= 60 ? `${Math.round(mins / 6) / 10} h` : `${mins} min`;
   return `<div class="stats" role="group" aria-label="At a glance">
-    ${soon.length ? `<button class="stat" id="stat-exp"><b>${esc(soon.length)}</b><span>expiring soon</span><i class="warn">What can I make?</i></button>`
+    ${soon.length ? `<button class="stat" id="stat-exp"><b>${esc(soon.length)}</b><span>expiring soon</span><i class="warn">See what to use</i></button>`
       : `<button class="stat" data-go="pantry"><b>${esc(s.pantry_count || 0)}</b><span>in inventory</span>${gone ? `<i class="bad">${esc(gone)} expired</i>` : `<i>all fresh</i>`}</button>`}
     <button class="stat" data-go="list"><b>${esc(toBuy.length)}</b><span>to buy</span><i>${esc(plural(new Set(toBuy.flatMap((i) => (i.uses || []).map((u) => u.date))).size, "day"))}</i></button>
     <button class="stat" data-go="meals"><b>${esc(mins ? hrs : week.length)}</b><span>${mins ? "cooking this week" : "meals this week"}</span><i>${esc(plural(week.length, "meal"))}</i></button></div>`;
@@ -1505,11 +1507,12 @@ async function renderPantry() {
   document.body.classList.toggle("selecting", !!INV.sel);
   app.innerHTML = topbar(`<div class="seg mini-seg" id="inv-view" role="tablist" aria-label="View"><button data-v="grid" class="${view === "grid" ? "on" : ""}" role="tab" aria-selected="${view === "grid"}">Grid</button><button data-v="list" class="${view === "list" ? "on" : ""}" role="tab" aria-selected="${view === "list"}">List</button></div><span class="grow"></span><button class="text-btn" id="p-select">${INV.sel ? "Cancel" : "Select"}</button><button class="round-btn" id="p-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button><button class="round-btn" id="btn-addp" aria-label="Add">${ic("plus")}</button>`) +
     `<h1 class="title">Inventory</h1>
-    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button></div>
+    <div class="toolbar"><button class="pill-btn ink" id="p-scan">${ic("scan")} Stock up</button><button class="pill-btn" id="p-exp">${ic("clock")} Expiring<span class="pb-n" id="p-exp-n" hidden></span></button></div>
     <div id="inv-items">${loading()}</div><div class="sel-bar" id="inv-bar" hidden></div>`;
   bindTopbar();
   $("#p-select").onclick = () => { INV.sel = INV.sel ? null : new Set(); state.invKeepSel = true; renderPantry(); };
   $("#p-scan").onclick = () => startStockUp(renderPantry);
+  $("#p-exp").onclick = () => { location.hash = "inventory/expiring"; };
   $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Kitchen check-in</button><button data-a="share">${ic("share")} Share or print</button>${c_native() ? `<button data-a="export">${ic("file")} Export</button>` : ""}`, (el) => {
     $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ trip: () => openTrip(renderPantry), ci: () => openCheckin(renderPantry), share: () => openShare("pantry", {}), export: () => openExport() })[b.dataset.a](); }));
   });
@@ -1523,6 +1526,7 @@ async function renderPantry() {
   items.forEach((i) => counts[i.location]++);
   const shown = f === "all" ? items : items.filter((i) => i.location === f);
   const soon = items.filter((i) => i.days_left !== null && i.days_left <= 3).length;
+  if (soon && $("#p-exp-n")) { $("#p-exp-n").textContent = soon; $("#p-exp-n").hidden = false; $("#p-exp").setAttribute("aria-label", `Expiring, ${soon} to use soon or past date`); }
   const toReview = items.filter((i) => i.review).length;
   let html = `<div class="subtitle">${items.length} items${soon ? ` · ${soon} to use soon` : ""}</div>${toReview ? `<button class="nudge" id="inv-review"><span class="ic bg-ink">${ic("scan")}</span><span><b>${esc(plural(toReview, "item"))} to review</b><small>Add a name, size or photo so the next scan is instant</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>` : ""}
     <div class="seg">${[["all", "All"], ["fridge", "Fridge"], ["freezer", "Freezer"], ["pantry", "Pantry"]].map(([k, l]) =>

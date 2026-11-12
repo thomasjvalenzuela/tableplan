@@ -1742,14 +1742,14 @@ function openEta(rec) {
 }
 
 // ------------------------------------------------------------------ What can I make? (route #make, #make/use, #make/almost)
-const MK = { tab: "ready", data: null, web: null };
+const MK = { tab: "ready", data: null, web: null, focus: null };
 const expTag = (e) => {
   const d = e.days_left;
   return `<span class="pill ${d <= 0 ? "bad" : "soon"}">${esc(e.name)} · ${esc(d < 0 ? "expired" : d === 0 ? "today" : d === 1 ? "tomorrow" : `${d} days`)}</span>`;
 };
-async function renderMake(tab) {
+async function renderMake(tab, focus) {
   state.tab = "recipes"; renderTabs();
-  if (tab) MK.tab = tab;
+  if (tab) { MK.tab = tab; MK.focus = focus || null; }
   app.innerHTML = `${topbar(`<button class="round-btn left" id="mk-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="mk-refresh" aria-label="Refresh">${ic("refresh")}</button>`)}
     <h1 class="title">What can I make?</h1><div class="subtitle" id="mk-sub">Checking your kitchen…</div>
     <div class="toolbar"><button class="pill-btn ink" id="mk-cook">${ic("sparkle")} Cook with what I have</button></div>
@@ -1758,7 +1758,7 @@ async function renderMake(tab) {
   $("#mk-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
   $("#mk-refresh").onclick = () => { MK.data = null; MK.ideas = null; renderMake(); };
   $("#mk-cook").onclick = () => { MK.tab = "ideas"; history.replaceState(null, "", "#make/ideas"); lastHash = location.hash; if (MK.data) drawMake(); };
-  try { MK.data = await api("GET", "/api/make"); } catch (e) { if ($("#mk-list")) $("#mk-list").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  try { MK.data = await api("GET", MK.focus ? `/api/make?food=${enc(MK.focus)}` : "/api/make"); } catch (e) { if ($("#mk-list")) $("#mk-list").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
   if (!$("#mk-list")) return;
   drawMake();
 }
@@ -1766,22 +1766,25 @@ function drawMake() {
   const d = MK.data, tabs = [["ready", "Make now"], ["almost", "Almost there"], ["use_up", "Use it up"], ["ideas", "Ideas"]];
   $("#mk-sub").textContent = `${plural(d.recipes, "recipe")} checked against your inventory${d.planned_skipped ? ` · ${d.planned_skipped} already planned left out` : ""}`;
   $("#mk-seg").innerHTML = tabs.map(([k, l]) => `<button data-t="${k}" class="${MK.tab === k ? "on" : ""}" role="tab" aria-selected="${MK.tab === k}">${esc(l)}${d[k] ? ` ${esc(d[k].length)}` : ""}</button>`).join("");
-  $$("#mk-seg [data-t]").forEach((b) => (b.onclick = () => { MK.tab = b.dataset.t; history.replaceState(null, "", MK.tab === "ready" ? "#make" : `#make/${{ use_up: "use", almost: "almost", ideas: "ideas" }[MK.tab]}`); lastHash = location.hash; drawMake(); }));
+  $$("#mk-seg [data-t]").forEach((b) => (b.onclick = () => { if (MK.focus) { location.hash = b.dataset.t === "ready" ? "make" : `make/${{ use_up: "use", almost: "almost", ideas: "ideas" }[b.dataset.t]}`; return; } MK.tab = b.dataset.t; history.replaceState(null, "", MK.tab === "ready" ? "#make" : `#make/${{ use_up: "use", almost: "almost", ideas: "ideas" }[MK.tab]}`); lastHash = location.hash; drawMake(); }));
   if (MK.tab === "ideas") return drawIdeas();
   const rows = d[MK.tab];
   let html = "";
-  if (MK.tab === "use_up") {
+  if (MK.tab === "use_up" && d.focus) {
+    html += `<div class="mk-focus"><span>Recipes that use <b>${esc(d.focus.name)}</b></span><button class="text-btn" id="mk-unfocus">Show all</button></div>`;
+  } else if (MK.tab === "use_up") {
     html += d.expiring.length ? `<div class="group-label">Use soon</div><div class="mk-exp">${d.expiring.map((i) => expTag(i)).join("")}</div>`
       : `<div class="all-set">Nothing in your inventory expires in the next 3 days ✓</div>`;
   }
-  const empty = { ready: "Nothing is fully in stock right now. Try Almost there.", almost: "No recipes are 1–3 items away.", use_up: d.expiring.length ? "None of your recipes use what's expiring. Look for one online below." : "" };
+  const empty = { ready: "Nothing is fully in stock right now. Try Almost there.", almost: "No recipes are 1–3 items away.", use_up: d.focus ? `None of your recipes use ${d.focus.name} with 3 or fewer things missing.` : d.expiring.length ? "None of your recipes use what's expiring. Look for one online below." : "" };
   html += rows.length ? `<div class="mk-cards">${rows.map(mkCard).join("")}</div>` : empty[MK.tab] ? `<div class="empty">${esc(empty[MK.tab])}</div>` : "";
-  if (MK.tab === "use_up" && d.expiring.length && state.cfg?.ai_key) {
+  if (MK.tab === "use_up" && !d.focus && d.expiring.length && state.cfg?.ai_key) {
     html += `<section class="home-card mk-web" aria-label="Recipes online"><div class="hc-h"><h2>Find recipes online</h2></div>
       <p class="muted small">Searches the web for recipes using ${esc(d.expiring.slice(0, 4).map((i) => i.name).join(", "))}. Every link is opened and checked before it's shown.</p>
       <div id="mk-web">${MK.web ? "" : `<button class="btn sec" id="mk-web-go">${ic("search")} Search the web</button>`}</div></section>`;
   }
   $("#mk-list").innerHTML = html;
+  $("#mk-unfocus") && ($("#mk-unfocus").onclick = () => { location.hash = "make/use"; });
   bindMakeCards($("#mk-list"), rows);
   if (MK.web) drawWeb(); else $("#mk-web-go") && ($("#mk-web-go").onclick = searchWeb);
 }
@@ -2667,4 +2670,66 @@ function drawBatch(box) {
     inner.onpointermove = (e) => { if (x0 == null) return; dx = Math.min(0, e.clientX - x0); inner.style.transform = `translateX(${dx}px)`; el.classList.toggle("drag", dx < -4); el.classList.toggle("arm", dx < -90); };
     inner.onpointerup = inner.onpointercancel = () => { if (x0 == null) return; x0 = null; inner.style.transform = ""; el.classList.remove("arm", "drag"); if (dx < -90) del(); };
   });
+}
+
+// ------------------------------------------------------------------ Expiring (#inventory/expiring): expired, use soon, stale, with one-tap answers
+const EXPV = { seg: null, data: null };
+const EXP_SEGS = [["expired", "Expired"], ["soon", "Use soon"], ["stale", "Stale"]];
+async function renderExpiring(keep) {
+  state.tab = "pantry"; renderTabs();
+  if (!keep) EXPV.seg = null;   // a fresh visit opens on the first segment with something in it
+  app.innerHTML = `${topbar(`<button class="round-btn left" id="ex-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span>`)}
+    <h1 class="title">Expiring</h1><div class="subtitle" id="ex-sub">Checking dates…</div>
+    <div class="seg" id="ex-seg" role="tablist" aria-label="Show"></div><div id="ex-list">${loading()}</div>`;
+  bindTopbar();
+  $("#ex-back").onclick = () => (history.length > 1 ? history.back() : go("pantry"));
+  try { EXPV.data = await api("GET", "/api/pantry/expiring"); } catch (e) { if ($("#ex-list")) $("#ex-list").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
+  if (!$("#ex-list")) return;
+  const n = EXPV.data.counts;
+  if (!EXPV.seg) EXPV.seg = (EXP_SEGS.find(([k]) => n[k]) || EXP_SEGS[1])[0];
+  drawExpiring();
+}
+function expRowSub(it, seg) {
+  const where = it.place_label || cap(it.location);
+  if (seg === "stale") return `${where} · not touched in ${it.touched_days >= 14 ? `${Math.floor(it.touched_days / 7)} weeks` : plural(it.touched_days, "day")}`;
+  return `${where} · ${relExpiry(it)}`;
+}
+function drawExpiring() {
+  const d = EXPV.data, seg = EXPV.seg, n = d.counts, items = d[seg] || [];
+  const total = n.expired + n.soon + n.stale;
+  $("#ex-sub").textContent = total ? [n.expired ? `${n.expired} expired` : "", n.soon ? `${n.soon} to use soon` : "", n.stale ? `${n.stale} stale` : ""].filter(Boolean).join(" · ") : "Everything's fresh";
+  $("#ex-seg").innerHTML = EXP_SEGS.map(([k, l]) => `<button data-s="${k}" class="${seg === k ? "on" : ""}" role="tab" aria-selected="${seg === k}">${esc(l)}${n[k] ? ` ${esc(n[k])}` : ""}</button>`).join("");
+  $$("#ex-seg [data-s]").forEach((b) => (b.onclick = () => { EXPV.seg = b.dataset.s; drawExpiring(); }));
+  const empty = { expired: "Nothing is past its date ✓", soon: "Nothing needs using in the next 3 days ✓", stale: "Everything outside the freezer has been looked at in the last 3 weeks ✓" };
+  const hint = { expired: "", soon: "", stale: "Not touched in 3 weeks or more. The freezer isn't counted." };
+  $("#ex-list").innerHTML = (hint[seg] && items.length ? `<p class="muted small ex-hint">${esc(hint[seg])}</p>` : "") + (items.length ? `<div class="ex-rows">${items.map((it) => `
+    <div class="ex-row" data-id="${esc(it.id)}"><button class="ex-top" data-open aria-label="Open ${esc(it.name)}">${it.image ? `<img class="sb-img" src="${esc(it.image)}" alt="">` : `<span class="emo">${esc(it.emoji || "🥫")}</span>`}
+      <span class="main"><span class="a">${esc(it.name)}</span><span class="b">${esc(expRowSub(it, seg))}</span></span>${seg === "stale" ? "" : expiryPill(it)}</button>
+      <div class="ex-acts"><button class="chip-s" data-x="used" aria-label="Used ${esc(it.name)}">Used</button><button class="chip-s" data-x="gone" aria-label="${esc(it.name)} is gone, spoiled">Gone</button><button class="chip-s" data-x="good" aria-label="${esc(it.name)} is still good">Still good</button><button class="chip-s" data-x="recipes" aria-label="Find recipes using ${esc(it.name)}">Find recipes</button></div></div>`).join("")}</div>`
+    : `<div class="all-set">${esc(empty[seg])}</div>`);
+  $$("#ex-list .ex-row").forEach((row) => {
+    const it = items.find((i) => String(i.id) === row.dataset.id); if (!it) return;
+    $("[data-open]", row).onclick = () => openPantryItem(it, () => renderExpiring(true));
+    $$("[data-x]", row).forEach((b) => (b.onclick = () => expAction(it, b.dataset.x, b)));
+  });
+}
+async function expPatch(it, body) { return api("PATCH", `/api/pantry/${enc(it.id)}`, body); }
+async function expAction(it, kind, btn) {
+  const undo = () => toastUndo(it);
+  try {
+    if (kind === "recipes") { location.hash = `make/use/${encodeURIComponent(it.id)}`; return; }
+    if (kind === "used") { await expPatch(it, { action: "use", left: 0 }); toast(`${it.name} used up`, "Undo", undo); return renderExpiring(true); }
+    if (kind === "gone") { await expPatch(it, { action: "toss" }); toast(`${it.name} marked spoiled · counted as waste`, "Undo", undo); return renderExpiring(true); }
+    if (EXPV.seg === "stale") { await expPatch(it, { action: "still_good" }); toast(`Got it, ${it.name} is still good`); return renderExpiring(true); }
+    // past or near its date: still good means a new date
+    popover(btn, `<div class="pop-h">Good until</div><button data-d="3">3 more days</button><button data-d="7">1 more week</button><button data-d="30">1 more month</button>
+      <label class="pop-date">Pick a date <input type="date" id="ex-date" min="${esc(isoDate(today()))}"></label>`, (el) => {
+      const set = async (iso) => { closePop(); try { await expPatch(it, { action: "set_date", expires_on: iso, source: "manual" }); toast(`${it.name}: good until ${fmt(parseISO(iso), { month: "short", day: "numeric" })}`); renderExpiring(true); } catch (e) { fail(e); } };
+      $$("[data-d]", el).forEach((b) => (b.onclick = () => set(isoDate(addDays(today(), +b.dataset.d)))));
+      $("#ex-date", el).onchange = (e) => e.target.value && set(e.target.value);
+    });
+  } catch (e) { fail(e); }
+}
+async function toastUndo(it) {
+  try { await expPatch(it, { action: "restore" }); renderExpiring(true); } catch (e) { fail(e); }
 }
