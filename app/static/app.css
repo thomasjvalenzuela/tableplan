@@ -1500,3 +1500,19 @@ h1.title{font-size:34px;line-height:1.08;color:var(--title)}
 .idea-form{margin-bottom:10px}
 .ai-badge{display:inline-block;margin:4px 0 2px;font-size:12px;font-weight:700;padding:3px 9px;border-radius:999px;background:var(--soon-bg);color:var(--soon-fg)}
 @media (max-width:420px){.idea-prev{padding-left:4px}}
+/* ---------------------------------------------------------------- faster adding (autocomplete, usual items, browse) */
+.qa-sug{background:var(--bg-elev);border:1px solid var(--hair);border-radius:var(--r-md);margin:6px 0 4px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.08)}
+.qa-opt{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;text-align:left;padding:10px 14px;min-height:44px;border-top:1px solid var(--hair)}
+.qa-opt:first-child{border-top:0}
+.qa-opt.on,.qa-opt:hover{background:var(--fill)}
+.qa-opt small{color:var(--sub);font-size:12.5px}
+.chips.usual{margin:8px 0 2px;flex-wrap:nowrap;overflow-x:auto}
+.chips.usual:empty{display:none}
+.chips.usual .filter{white-space:nowrap}
+.chips.usual svg{width:14px;height:14px}
+.use-tag.mine{background:var(--fill);color:var(--sub)}
+.b.last-hint{color:var(--sub);font-size:12.5px}
+.b.bought{color:var(--sub);font-size:12.5px;text-decoration:none}
+.bc-bar{position:sticky;bottom:0;padding:12px 0 4px;background:var(--bg)}
+.tag[hidden],.bc-aisle[hidden],.group-label[hidden]{display:none}
+.sb-ask{background:var(--card);border:1px solid var(--hair);border-radius:16px;padding:12px;margin:8px 0;display:flex;flex-direction:column;gap:8px}

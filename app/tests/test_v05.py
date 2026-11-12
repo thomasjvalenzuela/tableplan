@@ -284,7 +284,7 @@ class StoresAndList(Base):
         data = S.ongoing_list()
         self.assertEqual(set(data), {"id", "name", "items", "recently_checked", "stores", "count"})
         self.assertEqual(set(data["items"][0]), {"id", "text", "name", "food", "qty", "emoji", "checked", "store_id",
-                                                 "aisle", "recipes", "checked_at", "have", "uses", "manual"})
+                                                 "aisle", "recipes", "checked_at", "have", "uses", "manual", "food_id", "bought", "last"})
         self.assertEqual(data["stores"][0], {"id": aldi, "name": "Aldi"})
         # replace: ids kept, renamed, reordered; a removed store un-assigns its items and forgets its foods
         out = S.stores_replace([{"id": costco, "name": "Costco Wholesale"}, {"name": "Target"}])

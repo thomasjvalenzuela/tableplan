@@ -1,0 +1,2011 @@
+[
+{
+"name": "Bananas",
+"food": "bananas",
+"aisle": "Produce",
+"size": "1 bunch",
+"popular": true
+},
+{
+"name": "Apples",
+"food": "apples",
+"aisle": "Produce",
+"size": "3 lb bag",
+"popular": true
+},
+{
+"name": "Gala apples",
+"food": "gala apples",
+"aisle": "Produce",
+"size": "3 lb bag"
+},
+{
+"name": "Honeycrisp apples",
+"food": "honeycrisp apples",
+"aisle": "Produce",
+"size": "3 lb bag"
+},
+{
+"name": "Granny Smith apples",
+"food": "granny smith apples",
+"aisle": "Produce",
+"size": "3 lb bag"
+},
+{
+"name": "Oranges",
+"food": "oranges",
+"aisle": "Produce",
+"size": "4 lb bag"
+},
+{
+"name": "Navel oranges",
+"food": "navel oranges",
+"aisle": "Produce",
+"size": "4 lb bag"
+},
+{
+"name": "Clementines",
+"food": "clementines",
+"aisle": "Produce",
+"size": "3 lb bag"
+},
+{
+"name": "Lemons",
+"food": "lemons",
+"aisle": "Produce",
+"size": "2",
+"popular": true
+},
+{
+"name": "Limes",
+"food": "limes",
+"aisle": "Produce",
+"size": "3",
+"popular": true
+},
+{
+"name": "Grapefruit",
+"food": "grapefruit",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Strawberries",
+"food": "strawberries",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Blueberries",
+"food": "blueberries",
+"aisle": "Produce",
+"size": "1 pint"
+},
+{
+"name": "Raspberries",
+"food": "raspberries",
+"aisle": "Produce",
+"size": "6 oz"
+},
+{
+"name": "Blackberries",
+"food": "blackberries",
+"aisle": "Produce",
+"size": "6 oz"
+},
+{
+"name": "Grapes",
+"food": "grapes",
+"aisle": "Produce",
+"size": "2 lb"
+},
+{
+"name": "Red grapes",
+"food": "red grapes",
+"aisle": "Produce",
+"size": "2 lb"
+},
+{
+"name": "Green grapes",
+"food": "green grapes",
+"aisle": "Produce",
+"size": "2 lb"
+},
+{
+"name": "Pineapple",
+"food": "pineapple",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Mango",
+"food": "mango",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Peaches",
+"food": "peaches",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Pears",
+"food": "pears",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Cantaloupe",
+"food": "cantaloupe",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Watermelon",
+"food": "watermelon",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Kiwi",
+"food": "kiwi",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Cherries",
+"food": "cherries",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Avocados",
+"food": "avocados",
+"aisle": "Produce",
+"size": "3",
+"popular": true
+},
+{
+"name": "Tomatoes",
+"food": "tomatoes",
+"aisle": "Produce",
+"size": "1 lb",
+"popular": true
+},
+{
+"name": "Roma tomatoes",
+"food": "roma tomatoes",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Cherry tomatoes",
+"food": "cherry tomatoes",
+"aisle": "Produce",
+"size": "1 pint"
+},
+{
+"name": "Grape tomatoes",
+"food": "grape tomatoes",
+"aisle": "Produce",
+"size": "1 pint"
+},
+{
+"name": "Yellow onions",
+"food": "yellow onion",
+"aisle": "Produce",
+"size": "3 lb bag",
+"popular": true
+},
+{
+"name": "Red onions",
+"food": "red onion",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "White onions",
+"food": "white onion",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Sweet onions",
+"food": "sweet onion",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Green onions",
+"food": "green onions",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Shallots",
+"food": "shallots",
+"aisle": "Produce",
+"size": "3"
+},
+{
+"name": "Garlic",
+"food": "garlic",
+"aisle": "Produce",
+"size": "1 head",
+"popular": true
+},
+{
+"name": "Potatoes",
+"food": "potatoes",
+"aisle": "Produce",
+"size": "5 lb bag",
+"popular": true
+},
+{
+"name": "Russet potatoes",
+"food": "russet potatoes",
+"aisle": "Produce",
+"size": "5 lb bag"
+},
+{
+"name": "Yukon Gold potatoes",
+"food": "yukon gold potatoes",
+"aisle": "Produce",
+"size": "3 lb bag"
+},
+{
+"name": "Red potatoes",
+"food": "red potatoes",
+"aisle": "Produce",
+"size": "3 lb bag"
+},
+{
+"name": "Sweet potatoes",
+"food": "sweet potatoes",
+"aisle": "Produce",
+"size": "2 lb"
+},
+{
+"name": "Carrots",
+"food": "carrots",
+"aisle": "Produce",
+"size": "2 lb bag",
+"popular": true
+},
+{
+"name": "Baby carrots",
+"food": "baby carrots",
+"aisle": "Produce",
+"size": "1 lb bag"
+},
+{
+"name": "Celery",
+"food": "celery",
+"aisle": "Produce",
+"size": "1 bunch",
+"popular": true
+},
+{
+"name": "Broccoli",
+"food": "broccoli",
+"aisle": "Produce",
+"size": "1 head"
+},
+{
+"name": "Broccoli florets",
+"food": "broccoli florets",
+"aisle": "Produce",
+"size": "12 oz"
+},
+{
+"name": "Cauliflower",
+"food": "cauliflower",
+"aisle": "Produce",
+"size": "1 head"
+},
+{
+"name": "Green beans",
+"food": "green beans",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Asparagus",
+"food": "asparagus",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Brussels sprouts",
+"food": "brussels sprouts",
+"aisle": "Produce",
+"size": "1 lb"
+},
+{
+"name": "Zucchini",
+"food": "zucchini",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Yellow squash",
+"food": "yellow squash",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Butternut squash",
+"food": "butternut squash",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Cucumbers",
+"food": "cucumber",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "English cucumber",
+"food": "english cucumber",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Red bell peppers",
+"food": "red bell pepper",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Green bell peppers",
+"food": "green bell pepper",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Yellow bell peppers",
+"food": "yellow bell pepper",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Jalapeños",
+"food": "jalapeno",
+"aisle": "Produce",
+"size": "3"
+},
+{
+"name": "Mushrooms",
+"food": "mushrooms",
+"aisle": "Produce",
+"size": "8 oz"
+},
+{
+"name": "Baby bella mushrooms",
+"food": "cremini mushrooms",
+"aisle": "Produce",
+"size": "8 oz"
+},
+{
+"name": "Portobello mushrooms",
+"food": "portobello mushrooms",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Romaine lettuce",
+"food": "romaine lettuce",
+"aisle": "Produce",
+"size": "1 head",
+"popular": true
+},
+{
+"name": "Iceberg lettuce",
+"food": "iceberg lettuce",
+"aisle": "Produce",
+"size": "1 head"
+},
+{
+"name": "Spring mix",
+"food": "spring mix",
+"aisle": "Produce",
+"size": "5 oz"
+},
+{
+"name": "Baby spinach",
+"food": "baby spinach",
+"aisle": "Produce",
+"size": "5 oz",
+"popular": true
+},
+{
+"name": "Kale",
+"food": "kale",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Arugula",
+"food": "arugula",
+"aisle": "Produce",
+"size": "5 oz"
+},
+{
+"name": "Cabbage",
+"food": "cabbage",
+"aisle": "Produce",
+"size": "1 head"
+},
+{
+"name": "Red cabbage",
+"food": "red cabbage",
+"aisle": "Produce",
+"size": "1 head"
+},
+{
+"name": "Coleslaw mix",
+"food": "coleslaw mix",
+"aisle": "Produce",
+"size": "14 oz"
+},
+{
+"name": "Corn on the cob",
+"food": "corn",
+"aisle": "Produce",
+"size": "4 ears"
+},
+{
+"name": "Fresh ginger",
+"food": "ginger",
+"aisle": "Produce",
+"size": "1 piece"
+},
+{
+"name": "Cilantro",
+"food": "cilantro",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Parsley",
+"food": "parsley",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Basil",
+"food": "basil",
+"aisle": "Produce",
+"size": "1 package"
+},
+{
+"name": "Fresh thyme",
+"food": "thyme",
+"aisle": "Produce",
+"size": "1 package"
+},
+{
+"name": "Fresh rosemary",
+"food": "rosemary",
+"aisle": "Produce",
+"size": "1 package"
+},
+{
+"name": "Fresh mint",
+"food": "mint",
+"aisle": "Produce",
+"size": "1 package"
+},
+{
+"name": "Fresh dill",
+"food": "dill",
+"aisle": "Produce",
+"size": "1 package"
+},
+{
+"name": "Leeks",
+"food": "leeks",
+"aisle": "Produce",
+"size": "2"
+},
+{
+"name": "Radishes",
+"food": "radishes",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Beets",
+"food": "beets",
+"aisle": "Produce",
+"size": "1 bunch"
+},
+{
+"name": "Eggplant",
+"food": "eggplant",
+"aisle": "Produce",
+"size": "1"
+},
+{
+"name": "Snap peas",
+"food": "snap peas",
+"aisle": "Produce",
+"size": "8 oz"
+},
+{
+"name": "Bean sprouts",
+"food": "bean sprouts",
+"aisle": "Produce",
+"size": "8 oz"
+},
+{
+"name": "Whole milk",
+"food": "whole milk",
+"aisle": "Dairy & Eggs",
+"size": "1 gal",
+"popular": true
+},
+{
+"name": "2% milk",
+"food": "2% milk",
+"aisle": "Dairy & Eggs",
+"size": "1 gal",
+"popular": true
+},
+{
+"name": "1% milk",
+"food": "1% milk",
+"aisle": "Dairy & Eggs",
+"size": "1 gal"
+},
+{
+"name": "Skim milk",
+"food": "skim milk",
+"aisle": "Dairy & Eggs",
+"size": "1 gal"
+},
+{
+"name": "Lactose-free milk",
+"food": "lactose-free milk",
+"aisle": "Dairy & Eggs",
+"size": "half gal"
+},
+{
+"name": "Oat milk",
+"food": "oat milk",
+"aisle": "Dairy & Eggs",
+"size": "half gal"
+},
+{
+"name": "Almond milk",
+"food": "almond milk",
+"aisle": "Dairy & Eggs",
+"size": "half gal"
+},
+{
+"name": "Soy milk",
+"food": "soy milk",
+"aisle": "Dairy & Eggs",
+"size": "half gal"
+},
+{
+"name": "Half and half",
+"food": "half and half",
+"aisle": "Dairy & Eggs",
+"size": "1 pint"
+},
+{
+"name": "Heavy cream",
+"food": "heavy cream",
+"aisle": "Dairy & Eggs",
+"size": "1 pint",
+"popular": true
+},
+{
+"name": "Whipping cream",
+"food": "whipping cream",
+"aisle": "Dairy & Eggs",
+"size": "1 pint"
+},
+{
+"name": "Buttermilk",
+"food": "buttermilk",
+"aisle": "Dairy & Eggs",
+"size": "1 quart"
+},
+{
+"name": "Large eggs",
+"food": "eggs",
+"aisle": "Dairy & Eggs",
+"size": "1 dozen",
+"popular": true
+},
+{
+"name": "Extra-large eggs",
+"food": "eggs",
+"aisle": "Dairy & Eggs",
+"size": "1 dozen"
+},
+{
+"name": "Egg whites",
+"food": "egg whites",
+"aisle": "Dairy & Eggs",
+"size": "16 oz"
+},
+{
+"name": "Unsalted butter",
+"food": "unsalted butter",
+"aisle": "Dairy & Eggs",
+"size": "1 lb",
+"popular": true
+},
+{
+"name": "Salted butter",
+"food": "salted butter",
+"aisle": "Dairy & Eggs",
+"size": "1 lb",
+"popular": true
+},
+{
+"name": "Margarine",
+"food": "margarine",
+"aisle": "Dairy & Eggs",
+"size": "1 lb"
+},
+{
+"name": "Shredded cheddar",
+"food": "shredded cheddar cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz",
+"popular": true
+},
+{
+"name": "Sharp cheddar",
+"food": "sharp cheddar cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Shredded mozzarella",
+"food": "shredded mozzarella cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Fresh mozzarella",
+"food": "fresh mozzarella",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Parmesan",
+"food": "parmesan cheese",
+"aisle": "Dairy & Eggs",
+"size": "5 oz"
+},
+{
+"name": "Grated parmesan",
+"food": "grated parmesan cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Monterey Jack",
+"food": "monterey jack cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Pepper jack",
+"food": "pepper jack cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Swiss cheese",
+"food": "swiss cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Provolone",
+"food": "provolone cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "American cheese slices",
+"food": "american cheese",
+"aisle": "Dairy & Eggs",
+"size": "16 slices"
+},
+{
+"name": "Feta",
+"food": "feta cheese",
+"aisle": "Dairy & Eggs",
+"size": "6 oz"
+},
+{
+"name": "Goat cheese",
+"food": "goat cheese",
+"aisle": "Dairy & Eggs",
+"size": "4 oz"
+},
+{
+"name": "Cream cheese",
+"food": "cream cheese",
+"aisle": "Dairy & Eggs",
+"size": "8 oz"
+},
+{
+"name": "Ricotta",
+"food": "ricotta cheese",
+"aisle": "Dairy & Eggs",
+"size": "15 oz"
+},
+{
+"name": "Cottage cheese",
+"food": "cottage cheese",
+"aisle": "Dairy & Eggs",
+"size": "16 oz"
+},
+{
+"name": "Sour cream",
+"food": "sour cream",
+"aisle": "Dairy & Eggs",
+"size": "16 oz",
+"popular": true
+},
+{
+"name": "Greek yogurt",
+"food": "greek yogurt",
+"aisle": "Dairy & Eggs",
+"size": "32 oz",
+"popular": true
+},
+{
+"name": "Plain yogurt",
+"food": "plain yogurt",
+"aisle": "Dairy & Eggs",
+"size": "32 oz"
+},
+{
+"name": "Vanilla yogurt",
+"food": "vanilla yogurt",
+"aisle": "Dairy & Eggs",
+"size": "32 oz"
+},
+{
+"name": "Yogurt cups",
+"food": "yogurt",
+"aisle": "Dairy & Eggs",
+"size": "6"
+},
+{
+"name": "String cheese",
+"food": "string cheese",
+"aisle": "Dairy & Eggs",
+"size": "12"
+},
+{
+"name": "Coffee creamer",
+"food": "coffee creamer",
+"aisle": "Dairy & Eggs",
+"size": "32 oz"
+},
+{
+"name": "Whipped cream",
+"food": "whipped cream",
+"aisle": "Dairy & Eggs",
+"size": "7 oz"
+},
+{
+"name": "Boneless chicken breasts",
+"food": "boneless skinless chicken breast",
+"aisle": "Meat & Seafood",
+"size": "2 lb",
+"popular": true
+},
+{
+"name": "Chicken thighs",
+"food": "chicken thighs",
+"aisle": "Meat & Seafood",
+"size": "2 lb"
+},
+{
+"name": "Boneless chicken thighs",
+"food": "boneless skinless chicken thighs",
+"aisle": "Meat & Seafood",
+"size": "2 lb"
+},
+{
+"name": "Chicken drumsticks",
+"food": "chicken drumsticks",
+"aisle": "Meat & Seafood",
+"size": "3 lb"
+},
+{
+"name": "Whole chicken",
+"food": "whole chicken",
+"aisle": "Meat & Seafood",
+"size": "1"
+},
+{
+"name": "Chicken wings",
+"food": "chicken wings",
+"aisle": "Meat & Seafood",
+"size": "2 lb"
+},
+{
+"name": "Rotisserie chicken",
+"food": "rotisserie chicken",
+"aisle": "Meat & Seafood",
+"size": "1"
+},
+{
+"name": "Ground beef",
+"food": "ground beef",
+"aisle": "Meat & Seafood",
+"size": "1 lb",
+"popular": true
+},
+{
+"name": "Lean ground beef",
+"food": "lean ground beef",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Ground turkey",
+"food": "ground turkey",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Ground pork",
+"food": "ground pork",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Stew beef",
+"food": "beef stew meat",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Chuck roast",
+"food": "beef chuck roast",
+"aisle": "Meat & Seafood",
+"size": "3 lb"
+},
+{
+"name": "Sirloin steak",
+"food": "sirloin steak",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Ribeye steak",
+"food": "ribeye steak",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Flank steak",
+"food": "flank steak",
+"aisle": "Meat & Seafood",
+"size": "1.5 lb"
+},
+{
+"name": "Pork chops",
+"food": "pork chops",
+"aisle": "Meat & Seafood",
+"size": "1.5 lb"
+},
+{
+"name": "Pork tenderloin",
+"food": "pork tenderloin",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Pork shoulder",
+"food": "pork shoulder",
+"aisle": "Meat & Seafood",
+"size": "3 lb"
+},
+{
+"name": "Bacon",
+"food": "bacon",
+"aisle": "Meat & Seafood",
+"size": "12 oz",
+"popular": true
+},
+{
+"name": "Breakfast sausage",
+"food": "breakfast sausage",
+"aisle": "Meat & Seafood",
+"size": "12 oz"
+},
+{
+"name": "Italian sausage",
+"food": "italian sausage",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Hot dogs",
+"food": "hot dogs",
+"aisle": "Meat & Seafood",
+"size": "8"
+},
+{
+"name": "Smoked sausage",
+"food": "smoked sausage",
+"aisle": "Meat & Seafood",
+"size": "14 oz"
+},
+{
+"name": "Deli turkey",
+"food": "deli turkey",
+"aisle": "Meat & Seafood",
+"size": "8 oz"
+},
+{
+"name": "Deli ham",
+"food": "deli ham",
+"aisle": "Meat & Seafood",
+"size": "8 oz"
+},
+{
+"name": "Pepperoni",
+"food": "pepperoni",
+"aisle": "Meat & Seafood",
+"size": "6 oz"
+},
+{
+"name": "Ham steak",
+"food": "ham",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Salmon fillets",
+"food": "salmon",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Cod fillets",
+"food": "cod",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Tilapia fillets",
+"food": "tilapia",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Shrimp",
+"food": "shrimp",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Canned tuna",
+"food": "canned tuna",
+"aisle": "Meat & Seafood",
+"size": "5 oz can"
+},
+{
+"name": "Ground lamb",
+"food": "ground lamb",
+"aisle": "Meat & Seafood",
+"size": "1 lb"
+},
+{
+"name": "Sliced bread",
+"food": "sandwich bread",
+"aisle": "Bakery",
+"size": "1 loaf",
+"popular": true
+},
+{
+"name": "Whole wheat bread",
+"food": "whole wheat bread",
+"aisle": "Bakery",
+"size": "1 loaf"
+},
+{
+"name": "Sourdough bread",
+"food": "sourdough bread",
+"aisle": "Bakery",
+"size": "1 loaf"
+},
+{
+"name": "French bread",
+"food": "french bread",
+"aisle": "Bakery",
+"size": "1 loaf"
+},
+{
+"name": "Hamburger buns",
+"food": "hamburger buns",
+"aisle": "Bakery",
+"size": "8"
+},
+{
+"name": "Hot dog buns",
+"food": "hot dog buns",
+"aisle": "Bakery",
+"size": "8"
+},
+{
+"name": "Dinner rolls",
+"food": "dinner rolls",
+"aisle": "Bakery",
+"size": "12"
+},
+{
+"name": "Bagels",
+"food": "bagels",
+"aisle": "Bakery",
+"size": "6"
+},
+{
+"name": "English muffins",
+"food": "english muffins",
+"aisle": "Bakery",
+"size": "6"
+},
+{
+"name": "Flour tortillas",
+"food": "flour tortillas",
+"aisle": "Bakery",
+"size": "10",
+"popular": true
+},
+{
+"name": "Corn tortillas",
+"food": "corn tortillas",
+"aisle": "Bakery",
+"size": "30"
+},
+{
+"name": "Pita bread",
+"food": "pita bread",
+"aisle": "Bakery",
+"size": "6"
+},
+{
+"name": "Naan",
+"food": "naan",
+"aisle": "Bakery",
+"size": "4"
+},
+{
+"name": "Croissants",
+"food": "croissants",
+"aisle": "Bakery",
+"size": "4"
+},
+{
+"name": "Muffins",
+"food": "muffins",
+"aisle": "Bakery",
+"size": "4"
+},
+{
+"name": "All-purpose flour",
+"food": "all-purpose flour",
+"aisle": "Pantry",
+"size": "5 lb",
+"popular": true
+},
+{
+"name": "Bread flour",
+"food": "bread flour",
+"aisle": "Pantry",
+"size": "5 lb"
+},
+{
+"name": "Whole wheat flour",
+"food": "whole wheat flour",
+"aisle": "Pantry",
+"size": "5 lb"
+},
+{
+"name": "Granulated sugar",
+"food": "granulated sugar",
+"aisle": "Pantry",
+"size": "4 lb",
+"popular": true
+},
+{
+"name": "Brown sugar",
+"food": "brown sugar",
+"aisle": "Pantry",
+"size": "2 lb"
+},
+{
+"name": "Powdered sugar",
+"food": "powdered sugar",
+"aisle": "Pantry",
+"size": "2 lb"
+},
+{
+"name": "Baking soda",
+"food": "baking soda",
+"aisle": "Pantry",
+"size": "1 lb"
+},
+{
+"name": "Baking powder",
+"food": "baking powder",
+"aisle": "Pantry",
+"size": "10 oz"
+},
+{
+"name": "Cornstarch",
+"food": "cornstarch",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Active dry yeast",
+"food": "active dry yeast",
+"aisle": "Pantry",
+"size": "3 packets"
+},
+{
+"name": "Vanilla extract",
+"food": "vanilla extract",
+"aisle": "Pantry",
+"size": "2 oz"
+},
+{
+"name": "Chocolate chips",
+"food": "chocolate chips",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Cocoa powder",
+"food": "cocoa powder",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Olive oil",
+"food": "olive oil",
+"aisle": "Pantry",
+"size": "17 oz",
+"popular": true
+},
+{
+"name": "Extra virgin olive oil",
+"food": "extra virgin olive oil",
+"aisle": "Pantry",
+"size": "17 oz"
+},
+{
+"name": "Vegetable oil",
+"food": "vegetable oil",
+"aisle": "Pantry",
+"size": "48 oz"
+},
+{
+"name": "Canola oil",
+"food": "canola oil",
+"aisle": "Pantry",
+"size": "48 oz"
+},
+{
+"name": "Cooking spray",
+"food": "cooking spray",
+"aisle": "Pantry",
+"size": "6 oz"
+},
+{
+"name": "Coconut oil",
+"food": "coconut oil",
+"aisle": "Pantry",
+"size": "14 oz"
+},
+{
+"name": "Sesame oil",
+"food": "sesame oil",
+"aisle": "Pantry",
+"size": "5 oz"
+},
+{
+"name": "White vinegar",
+"food": "white vinegar",
+"aisle": "Pantry",
+"size": "32 oz"
+},
+{
+"name": "Apple cider vinegar",
+"food": "apple cider vinegar",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Balsamic vinegar",
+"food": "balsamic vinegar",
+"aisle": "Pantry",
+"size": "8.5 oz"
+},
+{
+"name": "Red wine vinegar",
+"food": "red wine vinegar",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Rice vinegar",
+"food": "rice vinegar",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "White rice",
+"food": "white rice",
+"aisle": "Pantry",
+"size": "2 lb",
+"popular": true
+},
+{
+"name": "Brown rice",
+"food": "brown rice",
+"aisle": "Pantry",
+"size": "2 lb"
+},
+{
+"name": "Jasmine rice",
+"food": "jasmine rice",
+"aisle": "Pantry",
+"size": "2 lb"
+},
+{
+"name": "Basmati rice",
+"food": "basmati rice",
+"aisle": "Pantry",
+"size": "2 lb"
+},
+{
+"name": "Spaghetti",
+"food": "spaghetti",
+"aisle": "Pantry",
+"size": "1 lb",
+"popular": true
+},
+{
+"name": "Penne",
+"food": "penne",
+"aisle": "Pantry",
+"size": "1 lb"
+},
+{
+"name": "Elbow macaroni",
+"food": "elbow macaroni",
+"aisle": "Pantry",
+"size": "1 lb"
+},
+{
+"name": "Egg noodles",
+"food": "egg noodles",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Lasagna noodles",
+"food": "lasagna noodles",
+"aisle": "Pantry",
+"size": "1 lb"
+},
+{
+"name": "Rice noodles",
+"food": "rice noodles",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Ramen noodles",
+"food": "ramen noodles",
+"aisle": "Pantry",
+"size": "3 oz"
+},
+{
+"name": "Quinoa",
+"food": "quinoa",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Rolled oats",
+"food": "rolled oats",
+"aisle": "Pantry",
+"size": "42 oz"
+},
+{
+"name": "Breadcrumbs",
+"food": "breadcrumbs",
+"aisle": "Pantry",
+"size": "15 oz"
+},
+{
+"name": "Panko",
+"food": "panko breadcrumbs",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Chicken broth",
+"food": "chicken broth",
+"aisle": "Pantry",
+"size": "32 oz",
+"popular": true
+},
+{
+"name": "Beef broth",
+"food": "beef broth",
+"aisle": "Pantry",
+"size": "32 oz"
+},
+{
+"name": "Vegetable broth",
+"food": "vegetable broth",
+"aisle": "Pantry",
+"size": "32 oz"
+},
+{
+"name": "Canned diced tomatoes",
+"food": "diced tomatoes",
+"aisle": "Pantry",
+"size": "14.5 oz can"
+},
+{
+"name": "Crushed tomatoes",
+"food": "crushed tomatoes",
+"aisle": "Pantry",
+"size": "28 oz can"
+},
+{
+"name": "Tomato sauce",
+"food": "tomato sauce",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Tomato paste",
+"food": "tomato paste",
+"aisle": "Pantry",
+"size": "6 oz can"
+},
+{
+"name": "Marinara sauce",
+"food": "marinara sauce",
+"aisle": "Pantry",
+"size": "24 oz jar"
+},
+{
+"name": "Black beans",
+"food": "black beans",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Kidney beans",
+"food": "kidney beans",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Pinto beans",
+"food": "pinto beans",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Chickpeas",
+"food": "chickpeas",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Cannellini beans",
+"food": "cannellini beans",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Refried beans",
+"food": "refried beans",
+"aisle": "Pantry",
+"size": "16 oz can"
+},
+{
+"name": "Lentils",
+"food": "lentils",
+"aisle": "Pantry",
+"size": "1 lb"
+},
+{
+"name": "Canned corn",
+"food": "canned corn",
+"aisle": "Pantry",
+"size": "15 oz can"
+},
+{
+"name": "Coconut milk",
+"food": "coconut milk",
+"aisle": "Pantry",
+"size": "13.5 oz can"
+},
+{
+"name": "Cream of mushroom soup",
+"food": "cream of mushroom soup",
+"aisle": "Pantry",
+"size": "10.5 oz can"
+},
+{
+"name": "Peanut butter",
+"food": "peanut butter",
+"aisle": "Pantry",
+"size": "16 oz",
+"popular": true
+},
+{
+"name": "Jelly",
+"food": "grape jelly",
+"aisle": "Pantry",
+"size": "18 oz"
+},
+{
+"name": "Honey",
+"food": "honey",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Maple syrup",
+"food": "maple syrup",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Pancake mix",
+"food": "pancake mix",
+"aisle": "Pantry",
+"size": "32 oz"
+},
+{
+"name": "Ketchup",
+"food": "ketchup",
+"aisle": "Pantry",
+"size": "20 oz",
+"popular": true
+},
+{
+"name": "Yellow mustard",
+"food": "yellow mustard",
+"aisle": "Pantry",
+"size": "14 oz"
+},
+{
+"name": "Dijon mustard",
+"food": "dijon mustard",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Mayonnaise",
+"food": "mayonnaise",
+"aisle": "Pantry",
+"size": "30 oz",
+"popular": true
+},
+{
+"name": "Soy sauce",
+"food": "soy sauce",
+"aisle": "Pantry",
+"size": "10 oz"
+},
+{
+"name": "Worcestershire sauce",
+"food": "worcestershire sauce",
+"aisle": "Pantry",
+"size": "10 oz"
+},
+{
+"name": "Hot sauce",
+"food": "hot sauce",
+"aisle": "Pantry",
+"size": "5 oz"
+},
+{
+"name": "Sriracha",
+"food": "sriracha",
+"aisle": "Pantry",
+"size": "17 oz"
+},
+{
+"name": "BBQ sauce",
+"food": "barbecue sauce",
+"aisle": "Pantry",
+"size": "18 oz"
+},
+{
+"name": "Salsa",
+"food": "salsa",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Ranch dressing",
+"food": "ranch dressing",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Italian dressing",
+"food": "italian dressing",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Pickles",
+"food": "pickles",
+"aisle": "Pantry",
+"size": "24 oz"
+},
+{
+"name": "Olives",
+"food": "olives",
+"aisle": "Pantry",
+"size": "6 oz can"
+},
+{
+"name": "Breakfast cereal",
+"food": "cereal",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Granola",
+"food": "granola",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Crackers",
+"food": "crackers",
+"aisle": "Pantry",
+"size": "9 oz"
+},
+{
+"name": "Tortilla chips",
+"food": "tortilla chips",
+"aisle": "Pantry",
+"size": "13 oz"
+},
+{
+"name": "Potato chips",
+"food": "potato chips",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Pretzels",
+"food": "pretzels",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Popcorn",
+"food": "popcorn",
+"aisle": "Pantry",
+"size": "3 bags"
+},
+{
+"name": "Almonds",
+"food": "almonds",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Walnuts",
+"food": "walnuts",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Pecans",
+"food": "pecans",
+"aisle": "Pantry",
+"size": "8 oz"
+},
+{
+"name": "Peanuts",
+"food": "peanuts",
+"aisle": "Pantry",
+"size": "16 oz"
+},
+{
+"name": "Raisins",
+"food": "raisins",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Coffee",
+"food": "ground coffee",
+"aisle": "Pantry",
+"size": "12 oz",
+"popular": true
+},
+{
+"name": "Coffee beans",
+"food": "coffee beans",
+"aisle": "Pantry",
+"size": "12 oz"
+},
+{
+"name": "Black tea",
+"food": "black tea",
+"aisle": "Pantry",
+"size": "20 bags"
+},
+{
+"name": "Green tea",
+"food": "green tea",
+"aisle": "Pantry",
+"size": "20 bags"
+},
+{
+"name": "Table salt",
+"food": "table salt",
+"aisle": "Spices",
+"size": "26 oz",
+"popular": true
+},
+{
+"name": "Kosher salt",
+"food": "kosher salt",
+"aisle": "Spices",
+"size": "3 lb"
+},
+{
+"name": "Sea salt",
+"food": "sea salt",
+"aisle": "Spices",
+"size": "17.6 oz"
+},
+{
+"name": "Black pepper",
+"food": "black pepper",
+"aisle": "Spices",
+"size": "4 oz",
+"popular": true
+},
+{
+"name": "Garlic powder",
+"food": "garlic powder",
+"aisle": "Spices",
+"size": "3 oz"
+},
+{
+"name": "Onion powder",
+"food": "onion powder",
+"aisle": "Spices",
+"size": "3 oz"
+},
+{
+"name": "Paprika",
+"food": "paprika",
+"aisle": "Spices",
+"size": "2 oz"
+},
+{
+"name": "Smoked paprika",
+"food": "smoked paprika",
+"aisle": "Spices",
+"size": "2 oz"
+},
+{
+"name": "Chili powder",
+"food": "chili powder",
+"aisle": "Spices",
+"size": "2.5 oz"
+},
+{
+"name": "Ground cumin",
+"food": "ground cumin",
+"aisle": "Spices",
+"size": "2 oz"
+},
+{
+"name": "Dried oregano",
+"food": "dried oregano",
+"aisle": "Spices",
+"size": "1 oz"
+},
+{
+"name": "Dried basil",
+"food": "dried basil",
+"aisle": "Spices",
+"size": "1 oz"
+},
+{
+"name": "Dried thyme",
+"food": "dried thyme",
+"aisle": "Spices",
+"size": "1 oz"
+},
+{
+"name": "Italian seasoning",
+"food": "italian seasoning",
+"aisle": "Spices",
+"size": "1 oz"
+},
+{
+"name": "Red pepper flakes",
+"food": "red pepper flakes",
+"aisle": "Spices",
+"size": "1.5 oz"
+},
+{
+"name": "Ground cinnamon",
+"food": "ground cinnamon",
+"aisle": "Spices",
+"size": "2.5 oz"
+},
+{
+"name": "Ground nutmeg",
+"food": "ground nutmeg",
+"aisle": "Spices",
+"size": "1 oz"
+},
+{
+"name": "Bay leaves",
+"food": "bay leaves",
+"aisle": "Spices",
+"size": "0.1 oz"
+},
+{
+"name": "Cayenne pepper",
+"food": "cayenne pepper",
+"aisle": "Spices",
+"size": "1.5 oz"
+},
+{
+"name": "Curry powder",
+"food": "curry powder",
+"aisle": "Spices",
+"size": "2 oz"
+},
+{
+"name": "Taco seasoning",
+"food": "taco seasoning",
+"aisle": "Spices",
+"size": "1 oz packet"
+},
+{
+"name": "Ground ginger",
+"food": "ground ginger",
+"aisle": "Spices",
+"size": "1.5 oz"
+},
+{
+"name": "Frozen peas",
+"food": "frozen peas",
+"aisle": "Frozen",
+"size": "12 oz"
+},
+{
+"name": "Frozen corn",
+"food": "frozen corn",
+"aisle": "Frozen",
+"size": "12 oz"
+},
+{
+"name": "Frozen broccoli",
+"food": "frozen broccoli",
+"aisle": "Frozen",
+"size": "12 oz"
+},
+{
+"name": "Frozen mixed vegetables",
+"food": "frozen mixed vegetables",
+"aisle": "Frozen",
+"size": "12 oz"
+},
+{
+"name": "Frozen spinach",
+"food": "frozen spinach",
+"aisle": "Frozen",
+"size": "10 oz"
+},
+{
+"name": "Frozen berries",
+"food": "frozen berries",
+"aisle": "Frozen",
+"size": "16 oz"
+},
+{
+"name": "Frozen strawberries",
+"food": "frozen strawberries",
+"aisle": "Frozen",
+"size": "16 oz"
+},
+{
+"name": "Frozen pizza",
+"food": "frozen pizza",
+"aisle": "Frozen",
+"size": "1"
+},
+{
+"name": "Frozen french fries",
+"food": "frozen french fries",
+"aisle": "Frozen",
+"size": "32 oz"
+},
+{
+"name": "Ice cream",
+"food": "ice cream",
+"aisle": "Frozen",
+"size": "1.5 qt"
+},
+{
+"name": "Frozen waffles",
+"food": "frozen waffles",
+"aisle": "Frozen",
+"size": "10"
+},
+{
+"name": "Frozen chicken nuggets",
+"food": "chicken nuggets",
+"aisle": "Frozen",
+"size": "29 oz"
+},
+{
+"name": "Frozen shrimp",
+"food": "frozen shrimp",
+"aisle": "Frozen",
+"size": "1 lb"
+},
+{
+"name": "Ice",
+"food": "ice",
+"aisle": "Frozen",
+"size": "7 lb bag"
+},
+{
+"name": "Orange juice",
+"food": "orange juice",
+"aisle": "Beverages",
+"size": "52 oz"
+},
+{
+"name": "Apple juice",
+"food": "apple juice",
+"aisle": "Beverages",
+"size": "64 oz"
+},
+{
+"name": "Sparkling water",
+"food": "sparkling water",
+"aisle": "Beverages",
+"size": "12 pack"
+},
+{
+"name": "Bottled water",
+"food": "bottled water",
+"aisle": "Beverages",
+"size": "24 pack"
+},
+{
+"name": "Soda",
+"food": "soda",
+"aisle": "Beverages",
+"size": "12 pack"
+},
+{
+"name": "Lemonade",
+"food": "lemonade",
+"aisle": "Beverages",
+"size": "52 oz"
+},
+{
+"name": "Iced tea",
+"food": "iced tea",
+"aisle": "Beverages",
+"size": "64 oz"
+},
+{
+"name": "Paper towels",
+"food": "paper towels",
+"aisle": "Household",
+"size": "6 rolls",
+"popular": true
+},
+{
+"name": "Toilet paper",
+"food": "toilet paper",
+"aisle": "Household",
+"size": "12 rolls",
+"popular": true
+},
+{
+"name": "Dish soap",
+"food": "dish soap",
+"aisle": "Household",
+"size": "19 oz"
+},
+{
+"name": "Dishwasher pods",
+"food": "dishwasher detergent",
+"aisle": "Household",
+"size": "40 pods"
+},
+{
+"name": "Laundry detergent",
+"food": "laundry detergent",
+"aisle": "Household",
+"size": "92 oz"
+},
+{
+"name": "Trash bags",
+"food": "trash bags",
+"aisle": "Household",
+"size": "40"
+},
+{
+"name": "Aluminum foil",
+"food": "aluminum foil",
+"aisle": "Household",
+"size": "75 sq ft"
+},
+{
+"name": "Plastic wrap",
+"food": "plastic wrap",
+"aisle": "Household",
+"size": "200 sq ft"
+},
+{
+"name": "Zip-top bags",
+"food": "storage bags",
+"aisle": "Household",
+"size": "50"
+},
+{
+"name": "Parchment paper",
+"food": "parchment paper",
+"aisle": "Household",
+"size": "45 sq ft"
+},
+{
+"name": "Sponges",
+"food": "sponges",
+"aisle": "Household",
+"size": "3"
+},
+{
+"name": "Hand soap",
+"food": "hand soap",
+"aisle": "Household",
+"size": "7.5 oz"
+},
+{
+"name": "Napkins",
+"food": "napkins",
+"aisle": "Household",
+"size": "200"
+}
+]

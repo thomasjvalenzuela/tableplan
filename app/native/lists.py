@@ -94,6 +94,7 @@ def _item(r):
         "recipeIds": json.loads(r["recipe_ids"] or "[]"),
         "storeId": r["store_id"], "checkedAt": r["checked_at"],
         "checkedHow": (r["checked_how"] if "checked_how" in r.keys() else None) if r["checked"] else None,
+        "bought": json.loads(r["bought"]) if "bought" in r.keys() and r["bought"] else None,
     }
 
 
@@ -117,6 +118,8 @@ def init(c):
         c.execute("ALTER TABLE shopping_items ADD COLUMN checked_how TEXT")
     if "manual" not in cols:    # 1 = typed in by someone (quick add), so recipe removals never delete it
         c.execute("ALTER TABLE shopping_items ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
+    if "bought" not in cols:    # what actually went in the cart: {"product", "size", "price", "store_id", "upc"}
+        c.execute("ALTER TABLE shopping_items ADD COLUMN bought TEXT")
 
 
 def single_list(c, name="Groceries"):

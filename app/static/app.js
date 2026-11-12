@@ -1143,8 +1143,10 @@ function drawList(focusAdd) {
     <form class="quick-add" id="qa-form" autocomplete="off"><span class="qa-ic">${ic("plus")}</span>
       <input id="qa" name="qa" placeholder="${esc(addTo ? `Add to ${addTo}…` : "Add an item…")}" enterkeyhint="done" maxlength="200" aria-label="Add an item">
       <button type="submit" class="qa-go" aria-label="Add">${ic("check")}</button></form>
+    <div class="qa-sug" id="qa-sug" role="listbox" aria-label="Suggestions" hidden></div>
+    <div class="chips usual" id="qa-usual" aria-label="Usual items"></div>
     <div class="subtitle list-sub">${listSubtitle(toBuy, anyLeft)}</div><div class="list-cost" id="list-cost"></div>
-    <div class="toolbar"><button class="pill-btn" id="l-trip">${ic("cart")} Log a grocery trip</button></div>`;
+    <div class="toolbar"><button class="pill-btn" id="l-trip">${ic("cart")} Log a grocery trip</button><button class="pill-btn" id="l-browse">${ic("list") || ic("plus")} Browse common items</button></div>`;
 
   // store → aisle grouping (stores in their saved order, "Any store" last)
   const order = [...stores.map((s) => String(s.id)), "none"];
@@ -1168,6 +1170,9 @@ function drawList(focusAdd) {
   $("#st-add").onclick = () => addStoreInline();
   $("#l-trip").onclick = () => openTrip(() => reloadList());
   $("#qa-form").onsubmit = (e) => { e.preventDefault(); quickAdd(); };
+  $("#l-browse").onclick = () => browseCommon();
+  bindSuggest();
+  drawUsual();
   $("#qa").onpaste = (e) => {
     const t = e.clipboardData?.getData("text") || "";
     if (t.includes("\n")) { e.preventDefault(); quickAdd(t.split(/\r?\n/)); }
@@ -1192,7 +1197,7 @@ function listRow(it) {
   if (it.checked) {
     return `<div class="row li checked ${it.have ? "had" : ""}" data-id="${esc(it.id)}"><div class="li-in">
       <span class="emo">${esc(it.emoji || "🛒")}</span>
-      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}</div>
+      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${it.bought ? `<div class="b bought">${esc(it.bought)}</div>` : ""}</div>
       ${it.have ? `<span class="have-tag">have</span>` : ""}
       <button class="check sq on" data-check aria-label="Put ${esc(itemTitle(it))} back on the list" aria-pressed="true">${ic("check")}</button>
     </div></div>`;
@@ -1201,7 +1206,7 @@ function listRow(it) {
     <div class="li-under" aria-hidden="true">${ic("check")} I have it</div>
     <div class="li-in">
       <span class="emo">${esc(it.emoji || "🛒")}</span>
-      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${usesHtml(it, recs)}</div>
+      <div class="main" data-check><div class="a">${esc(itemTitle(it))}</div>${sub ? `<div class="b">${esc(sub)}</div>` : ""}${usesHtml(it, recs)}${it.manual && !(it.uses || []).length ? `<div class="uses-tags"><span class="use-tag mine">Added by you</span></div>` : ""}${it.last ? `<div class="b last-hint">${esc(it.last)}</div>` : ""}</div>
       <button class="have-btn" data-have title="I already have this">Have</button>
       <button class="store-chip ${it.store_id == null ? "none" : ""}" data-store aria-haspopup="menu" aria-label="Store: ${esc(storeLabel(it.store_id))}">${esc(storeLabel(it.store_id))}</button>
       <button class="check sq" data-check aria-label="Got ${esc(itemTitle(it))}">${ic("check")}</button>
@@ -1341,6 +1346,65 @@ function storeMenu(anchor, it) {
       } catch (e) { it.store_id = prev; drawList(); fail(e); }
     }));
   });
+}
+// ---------- faster adding: autocomplete (your items → your foods → common groceries), usual items, browse by aisle
+const QA = { t: null, items: [], i: -1 };
+function bindSuggest() {
+  const inp = $("#qa"), box = $("#qa-sug"); if (!inp || !box) return;
+  const hide = () => { box.hidden = true; QA.items = []; QA.i = -1; inp.setAttribute("aria-expanded", "false"); };
+  const draw = () => {
+    if (!QA.items.length) return hide();
+    box.hidden = false; inp.setAttribute("aria-expanded", "true");
+    box.innerHTML = QA.items.map((x, k) => `<button type="button" class="qa-opt ${k === QA.i ? "on" : ""}" role="option" data-k="${k}"><b>${esc(x.name)}</b>
+      <small>${esc([x.source === "history" ? "You've added this" : x.source === "food" ? "" : x.aisle, x.size ? `usually ${x.size}` : "", x.last || ""].filter(Boolean).join(" · "))}</small></button>`).join("");
+    $$("[data-k]", box).forEach((b) => (b.onmousedown = (e) => e.preventDefault()));
+    $$("[data-k]", box).forEach((b) => (b.onclick = () => pick(QA.items[+b.dataset.k])));
+  };
+  const pick = (x) => { const m = /^\s*(\d+(?:[./]\d+)?)\s+/.exec(inp.value); hide(); quickAdd([`${m ? m[1] + " " : ""}${x.name}`]); };
+  inp.oninput = () => {
+    clearTimeout(QA.t);
+    const q = inp.value.replace(/^\s*\d+(?:[./]\d+)?\s*/, "").trim();
+    if (q.length < 2) return hide();
+    QA.t = setTimeout(async () => { try { QA.items = (await api("GET", `/api/grocery/suggest?q=${enc(inp.value)}`)).items || []; QA.i = -1; if (document.activeElement === inp) draw(); } catch (_) {} }, 140);
+  };
+  inp.onkeydown = (e) => {
+    if (box.hidden) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); QA.i = Math.min(QA.items.length - 1, QA.i + 1); draw(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); QA.i = Math.max(-1, QA.i - 1); draw(); }
+    else if (e.key === "Enter" && QA.i >= 0) { e.preventDefault(); pick(QA.items[QA.i]); }
+    else if (e.key === "Escape") hide();
+  };
+  inp.onblur = () => setTimeout(hide, 150);
+  inp.setAttribute("role", "combobox"); inp.setAttribute("aria-autocomplete", "list"); inp.setAttribute("aria-controls", "qa-sug");
+}
+async function drawUsual() {
+  const box = $("#qa-usual"); if (!box) return;
+  let u; try { u = await api("GET", "/api/grocery/usual"); } catch (_) { return; }
+  if (!$("#qa-usual")) return;
+  box.innerHTML = (u.items || []).map((n) => `<button class="filter sm" data-usual="${esc(n)}">${ic("plus")} ${esc(n)}</button>`).join("");
+  $$("[data-usual]", box).forEach((b) => (b.onclick = () => quickAdd([b.dataset.usual])));
+}
+async function browseCommon() {
+  openSheet("Common items", loading());
+  let d; try { d = await api("GET", "/api/grocery/catalog"); } catch (e) { return fail(e); }
+  const picked = new Set();
+  const body = sheetBody(); if (!body) return;
+  body.innerHTML = `<div class="search">${ic("search")}<input id="bc-q" placeholder="Filter, e.g. milk" autocomplete="off" aria-label="Filter common items"></div>
+    <div id="bc-list">${d.aisles.map((a) => `<div class="group-label">${esc(a.aisle)}</div><div class="tag-cloud bc-aisle">${a.items.map((it) =>
+      `<button class="tag" data-bc="${esc(it.name)}" data-w="${esc((it.name + " " + it.food).toLowerCase())}" aria-pressed="false">${esc(it.name)}</button>`).join("")}</div>`).join("")}</div>
+    <div class="bc-bar"><button class="btn" id="bc-add" disabled>Add to list</button></div>`;
+  const btn = $("#bc-add");
+  const sync = () => { btn.disabled = !picked.size; btn.textContent = picked.size ? `Add ${plural(picked.size, "item")} to list` : "Add to list"; };
+  $$("[data-bc]", body).forEach((b) => (b.onclick = () => {
+    const n = b.dataset.bc; picked.has(n) ? picked.delete(n) : picked.add(n);
+    b.classList.toggle("on", picked.has(n)); b.setAttribute("aria-pressed", String(picked.has(n))); sync();
+  }));
+  $("#bc-q").oninput = (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    $$("[data-bc]", body).forEach((b) => (b.hidden = q && !b.dataset.w.includes(q)));
+    $$(".bc-aisle", body).forEach((g) => { const any = $$("[data-bc]", g).some((b) => !b.hidden); g.hidden = !any; g.previousElementSibling.hidden = !any; });
+  };
+  btn.onclick = async () => { const items = [...picked]; closeSheet(); await quickAdd(items); };
 }
 async function quickAdd(lines) {
   const inp = $("#qa");

@@ -1,5 +1,13 @@
 [
  {
+  "id": "faster-lists",
+  "date": "2026-11-23",
+  "icon": "cart",
+  "color": "blue",
+  "title": "Faster shopping lists",
+  "text": "Start typing and TablePlan suggests what you've bought before, your foods and about 300 common groceries (\"2 milk\" works too). Tap your usual items, or browse common items by aisle. When you scan or log a receipt, the generic \"Milk\" on your list is matched to what you actually bought, and you're asked when it's not clear. Next time you add it, the list shows what you bought last time and where."
+ },
+ {
   "id": "recipe-ideas",
   "date": "2026-11-22",
   "icon": "sparkle",

@@ -1127,6 +1127,20 @@ function drawSession() {
     $$("[data-details]", box).forEach((b) => (b.onclick = () => { const row = SS.rows[+b.closest("[data-i]").dataset.i]; if (row) openItemDetails(row.item, null); }));
   });
 }
+// A product that could fill a generic list line ("Milk"), or one of several: ask, one tap, instead of guessing.
+function askListMatch(ask, row) {
+  const box = $("#sb-rows") || $("#sc-rows"); if (!box) return;
+  const card = document.createElement("div"); card.className = "sb-ask";
+  card.innerHTML = `<b>${ask.candidates.length > 1 ? `Which list item is ${esc(ask.product)} for?` : `Is ${esc(ask.product)} for “${esc(ask.candidates[0].text)}” on your list?`}</b>
+    <div class="rv-row">${ask.candidates.map((c) => `<button class="btn small" data-li="${esc(c.id)}">${ask.candidates.length > 1 ? esc(c.text) : "Yes, check it off"}</button>`).join("")}<button class="btn small sec" data-li="">No</button></div>`;
+  box.prepend(card);
+  $$("[data-li]", card).forEach((b) => (b.onclick = async () => {
+    card.remove();
+    if (!b.dataset.li) return;
+    try { await api("POST", "/api/list/fulfill", { item_id: b.dataset.li, pantry_item_id: ask.pantry_item_id, store_id: ask.store_id }); row.list = true; drawSession(); toast("Checked off your list"); }
+    catch (e) { fail(e); }
+  }));
+}
 // Scan feedback you can hear and feel: found = one short high tone; not found = two low tones and a double buzz.
 let ACX = null;
 function scanBeep(kind) {
@@ -1172,6 +1186,7 @@ async function sessionScan(code) {
     drawSession();
     if (row.unknown) { scanBeep("unknown"); return; }   // the row says "Not found · Review later": no modal, keep scanning
     scanBeep("ok");
+    if (r.list_ask) askListMatch(r.list_ask, row);
     toast(`${r.item.name}${r.list_checked ? " · checked off your list" : ""}`, "Undo", async () => {
       try { await api("POST", "/api/scan/undo", { pantry_item_id: row.item.id }); SS.rows = SS.rows.filter((x) => x !== row); drawSession(); } catch (e) { fail(e); }
     });
@@ -1857,7 +1872,7 @@ function listCosts() {
       if (s.t) h.insertAdjacentHTML("beforeend", `<em class="st-cost">${esc(money(s.t, s.ap || s.n > 0))}</em>`);
     });
     const all = sum(open), box = $("#list-cost");
-    if (box) box.innerHTML = all.t || all.n ? `<button class="link-btn" id="lc-open">${all.t ? `Estimated ${esc(money(all.t, all.ap || all.n > 0))}` : ""}${all.n ? `${all.t ? " · " : ""}${esc(plural(all.n, "item"))} without a price` : ""}</button>` : "";
+    if (box) box.innerHTML = all.t ? `<button class="link-btn" id="lc-open">${all.t ? `Estimated ${esc(money(all.t, all.ap || all.n > 0))}` : ""}${all.n ? `${all.t ? " · " : ""}${esc(plural(all.n, "item"))} without a price` : ""}</button>` : "";
     $("#lc-open") && ($("#lc-open").onclick = () => openPricesSettings());
   };
   if (L.costs && L.costsFor === L.data) return apply();

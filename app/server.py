@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS cook_times (
 CREATE INDEX IF NOT EXISTS ix_cook_times_recipe ON cook_times(recipe_id);
 CREATE TABLE IF NOT EXISTS plan_eat_at (entry_id TEXT PRIMARY KEY, eat_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scan_log (id INTEGER PRIMARY KEY, code TEXT NOT NULL, at TEXT NOT NULL, results TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS food_pref (
+  food_id INTEGER PRIMARY KEY, product TEXT, size TEXT, store_id TEXT, price REAL, upc TEXT, at TEXT
+);
 CREATE TABLE IF NOT EXISTS import_jobs (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, user_id INTEGER, pages INTEGER NOT NULL DEFAULT 0,
   draft TEXT, image_url TEXT, meta TEXT NOT NULL DEFAULT '{}', error TEXT, slug TEXT, dismissed INTEGER NOT NULL DEFAULT 0,
@@ -1890,6 +1893,7 @@ from native import prices as n_prices
 from native import checkin as n_checkin
 from native import imgmeta as n_imgmeta
 from native import ideas as n_ideas  # noqa: E402
+from native import catalog as n_catalog  # noqa: E402
 
 AISLES = [
     ("Produce", "apple banana lemon lime orange berr grape peach pear mango avocado tomato potato onion garlic shallot carrot celery "
@@ -5875,7 +5879,8 @@ def trip_apply(b):
                 li = c.execute("SELECT id FROM shopping_items WHERE id=? AND list_id=? AND checked=0",
                                (_s(r.get("list_item_id"), 64), lid)).fetchone() if r.get("list_item_id") else None
                 if li:
-                    n_lists.set_checked(c, lid, li["id"], True)
+                    fulfill_line(c, lid, li["id"], None, " ".join(_s(r.get("raw_text"), 120).split()) or name,
+                                 n_units.fmt(qty, unit) if qty is not None else "", price, store_id, _s(r.get("upc"), 20))
                     undo["checked"].append(li["id"])
                     li_id = li["id"]
                     checked += 1
@@ -6052,22 +6057,26 @@ def scan_add(b):
         pid = add_pantry_item(c, canon, loc, iso(printed) if printed and printed >= today() else None, p.get("quantity") or "",
                               None, qty, unit, p.get("food_id"))
         c.execute("UPDATE pantry_items SET product=?, upc=?, pack_qty=? WHERE id=?", (product or None, code, qty, pid))
-        # on the shopping list? tick it off (the pantry item is the one just made)
-        checked = None
-        if p.get("food_id") and NATIVE:
+        # on the shopping list? one clear match is ticked off; several, or a generic line, are asked about
+        checked = ask = None
+        if NATIVE:
             lid = n_lists.single_list(c)
-            li = c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=0 AND food_id=? ORDER BY position LIMIT 1",
-                           (lid, p["food_id"])).fetchone()
-            if li:
-                n_lists.set_checked(c, lid, li["id"], True)
-                c.execute("UPDATE pantry_items SET mealie_item_id=? WHERE id=?", (li["id"], pid))
-                checked = {"id": li["id"], "text": n_lists._display(li)}
+            exact, related = list_matches(c, lid, p.get("food_id"), canon)
+            size = p.get("quantity") or (n_units.fmt(qty, unit) if qty is not None else "")
+            store = _store_arg(b.get("store_id"))
+            if len(exact) == 1:
+                checked = fulfill_line(c, lid, exact[0]["id"], pid, product or canon, size, None, store, code)
+            elif exact or related:
+                ask = {"pantry_item_id": pid, "product": product or canon, "size": size, "store_id": store,
+                       "candidates": [{"id": r["id"], "text": n_lists._display(r)} for r in (exact or related)][:6]}
+            elif p.get("food_id"):
+                remember_purchase(c, p["food_id"], product or canon, size, store, None, code)
         row = pantry_json(c, pantry_row(c, pid))
     if p.get("image_url"):
         if _pantry_image(pid, p["image_url"]):
             with db() as c:
                 row = pantry_json(c, pantry_row(c, pid))
-    return {"ok": True, "code": code, "item": row, "list_checked": checked, "pack": pack or None,
+    return {"ok": True, "code": code, "item": row, "list_checked": checked, "list_ask": ask, "pack": pack or None,
             "product": {"name": p.get("name"), "brand": p.get("brand"), "quantity": p.get("quantity")}}
 
 
@@ -8893,7 +8902,71 @@ def list_item_json(i, names, entries=None):
             "checked_at": i.get("checkedAt"), "have": i.get("checkedHow") == "have",
             "store_id": i.get("storeId"), "aisle": ((i.get("label") or {}).get("name") or "Other"),
             "recipes": [names[r] for r in i.get("recipeIds") or [] if r in names],
-            "uses": _uses(i, entries) if entries else [], "manual": bool(i.get("manual"))}
+            "uses": _uses(i, entries) if entries else [], "manual": bool(i.get("manual")),
+            "food_id": i.get("foodId"), "bought": _bought_text(i), "last": _last_hint(i.get("foodId")) if not i.get("checked") else None}
+
+
+def _bought_text(i):
+    b = i.get("bought")
+    if not b:
+        return None
+    parts = [b.get("product") or "", b.get("size") or "", f"${b['price']:.2f}" if isinstance(b.get("price"), (int, float)) else ""]
+    return f"{item_name(i)} → " + ", ".join(x for x in parts if x)
+
+
+_prefs = {"at": 0, "rows": {}, "stores": {}}
+
+
+def _last_hint(food_id):
+    """'Last time: Kemps · 1 gal at Aldi' for a food bought before (cached a few seconds per request burst)."""
+    if not food_id:
+        return None
+    if time.time() - _prefs["at"] > 5:
+        with db() as c:
+            _prefs["rows"] = {r["food_id"]: dict(r) for r in c.execute("SELECT * FROM food_pref")}
+            _prefs["stores"] = {s["id"]: s["name"] for s in n_lists.list_stores(c)}
+        _prefs["at"] = time.time()
+    p = _prefs["rows"].get(food_id)
+    if not p or not (p.get("product") or p.get("size")):
+        return None
+    where = _prefs["stores"].get(p.get("store_id"))
+    return "Last time: " + " ".join(x for x in (p.get("product") or "", p.get("size") or "") if x) + (f" at {where}" if where else "")
+
+
+def remember_purchase(c, food_id, product="", size="", store_id=None, price=None, upc=""):
+    if not food_id:
+        return
+    old = c.execute("SELECT * FROM food_pref WHERE food_id=?", (food_id,)).fetchone()
+    c.execute("INSERT INTO food_pref(food_id, product, size, store_id, price, upc, at) VALUES (?,?,?,?,?,?,?) "
+              "ON CONFLICT(food_id) DO UPDATE SET product=excluded.product, size=excluded.size, store_id=excluded.store_id, "
+              "price=excluded.price, upc=excluded.upc, at=excluded.at",
+              (food_id, product or (old["product"] if old else ""), size or (old["size"] if old else ""),
+               store_id or (old["store_id"] if old else None), price if price is not None else None, upc or "", iso(today())))
+    _prefs["at"] = 0
+
+
+def fulfill_line(c, list_id, li_id, pantry_item_id=None, product="", size="", price=None, store_id=None, upc=""):
+    """Tick a list line off with what was actually bought, link the inventory item, and remember the choice."""
+    li = c.execute("SELECT * FROM shopping_items WHERE id=? AND list_id=?", (li_id, list_id)).fetchone()
+    if not li:
+        return None
+    n_lists.set_checked(c, list_id, li["id"], True)
+    bought = {k: v for k, v in (("product", product), ("size", size), ("price", price), ("store_id", store_id), ("upc", upc)) if v not in ("", None)}
+    c.execute("UPDATE shopping_items SET bought=? WHERE id=?", (json.dumps(bought) if bought else None, li["id"]))
+    if pantry_item_id:
+        c.execute("UPDATE pantry_items SET mealie_item_id=? WHERE id=?", (li["id"], pantry_item_id))
+    remember_purchase(c, li["food_id"], product, size, store_id, price, upc)
+    return {"id": li["id"], "text": n_lists._display(li)}
+
+
+def list_matches(c, list_id, food_id, food_name):
+    """Open list lines a bought product fills. exact: same canonical food; related: a generic line ("Milk") the
+    specific product ("Whole milk") could fill. Variants (2% vs whole) never match."""
+    rows = c.execute("SELECT s.*, f.name AS food_name FROM shopping_items s LEFT JOIN foods f ON f.id=s.food_id "
+                     "WHERE s.list_id=? AND s.checked=0", (list_id,)).fetchall()
+    exact = [r for r in rows if food_id is not None and r["food_id"] == food_id]
+    related = [] if exact else [r for r in rows if n_catalog.related(r["food"] or r["food_name"] or r["text"], food_name)]
+    return exact, related
 
 
 def _recipe_names(c):
@@ -8950,12 +9023,97 @@ def list_add(b):
     with db() as c:
         lid = n_lists.single_list(c)
         try:
-            ids = n_lists.add_items(c, lid, items, parse_ing_text, aisle_for, food_key, sid, resolve=_food_id)
+            ids = n_lists.add_items(c, lid, items, list_parse, lambda t: n_catalog.aisle_of(t) or aisle_for(t), food_key, sid,
+                                    resolve=_food_id)
         except KeyError:
             raise ApiError(404, "Store not found")
+        for i in dict.fromkeys(ids):   # bought it before at a particular store: suggest that store
+            r = c.execute("SELECT s.food_id, s.store_id, p.store_id ps FROM shopping_items s LEFT JOIN food_pref p ON p.food_id=s.food_id "
+                          "WHERE s.id=?", (i,)).fetchone()
+            if r and not r["store_id"] and r["ps"] and n_lists.get_store(c, r["ps"]):
+                n_lists.set_item_store(c, i, r["ps"])
         names = _recipe_names(c)
         out = [list_item_json(n_lists.get_item(c, i), names) for i in dict.fromkeys(ids)]
     return {"ok": True, "added": len(out), "items": out}
+
+
+def list_parse(text):
+    """Like parse_ing_text, but "2% milk" and "1% milk" are names, so "2 2% milk" is two of them."""
+    m = re.match(r"^\s*(?:(\d+(?:\.\d+)?)\s*(?:x\s+)?)?(\d+(?:\.\d+)?%\s+\S.*)$", text or "", re.I)
+    if m:
+        return {"food": m.group(2).strip(), "quantity": float(m.group(1)) if m.group(1) else 0, "unit": "", "unit_plural": "",
+                "note": "", "amount_text": ""}
+    return parse_ing_text(text)
+
+
+def grocery_suggest(q):
+    """Autocomplete for "Add an item…": the household's own past items first, then its foods, then common groceries."""
+    require_native()
+    q = re.sub(r"^\s*\d+(?:[./]\d+)?\s*(?:x\s*)?", "", _s(q, 80)).strip()   # "2 whole milk" → "whole milk"
+    if not q:
+        return {"items": []}
+    out, seen = [], set()
+
+    def add(name, source, aisle=None, size="", food_id=None, sc=0):
+        k = " ".join(n_catalog.words(name))
+        if not k or k in seen:
+            return
+        seen.add(k)
+        out.append({"name": name, "source": source, "aisle": aisle or n_catalog.aisle_of(name) or aisle_for(name) or "Other",
+                    "size": size, "last": _last_hint(food_id), "score": sc})
+    with db() as c:
+        hist = c.execute("SELECT text, food, food_id, COUNT(*) n, MAX(created_at) at FROM shopping_items WHERE manual=1 "
+                         "GROUP BY lower(coalesce(food, text)) ORDER BY n DESC, at DESC LIMIT 300").fetchall()
+        foods = c.execute("SELECT id, name FROM foods ORDER BY name LIMIT 3000").fetchall()
+    for r in sorted(hist, key=lambda r: -r["n"]):
+        name = sentence_case(r["food"] or r["text"])
+        sc = n_catalog.score(q, name)
+        if sc:
+            add(name, "history", food_id=r["food_id"], sc=2000 + sc + min(r["n"], 10))
+    for f in foods:
+        sc = n_catalog.score(q, f["name"])
+        if sc:
+            add(sentence_case(f["name"]), "food", food_id=f["id"], sc=1000 + sc)
+    for it in n_catalog.search(q, 12):
+        add(it["name"], "catalog", it["aisle"], it["size"], sc=it["score"])
+    out.sort(key=lambda x: -x["score"])
+    for x in out:
+        x.pop("score", None)
+    return {"items": out[:8]}
+
+
+def grocery_usual():
+    """The household's most-added extras (not from recipes), topped up with popular common groceries."""
+    require_native()
+    with db() as c:
+        lid = n_lists.single_list(c)
+        open_keys = {(r["food"] or r["text"] or "").lower() for r in c.execute("SELECT food, text FROM shopping_items WHERE list_id=? AND checked=0", (lid,))}
+        rows = c.execute("SELECT text, food, COUNT(*) n FROM shopping_items WHERE manual=1 GROUP BY lower(coalesce(food, text)) "
+                         "HAVING n >= 2 ORDER BY n DESC LIMIT 20").fetchall()
+    staples = {x.lower() for x in staple_names()}
+    out = [sentence_case(r["food"] or r["text"]) for r in rows]
+    out = [x for x in out if x.lower() not in open_keys and x.lower() not in staples][:12]
+    for it in n_catalog.popular():
+        if len(out) >= 12:
+            break
+        if it["name"].lower() not in {x.lower() for x in out} and it["name"].lower() not in open_keys and it["food"].lower() not in staples:
+            out.append(it["name"])
+    return {"items": out, "from_history": len(rows)}
+
+
+def list_fulfill(b):
+    """POST /api/list/fulfill {item_id, pantry_item_id}: the answer to "Is this for 'Milk'?" after a scan."""
+    require_native()
+    with db() as c:
+        lid = n_lists.single_list(c)
+        p = pantry_row(c, _int_id(b.get("pantry_item_id"), "item"))
+        if not p:
+            raise ApiError(404, "Item not found")
+        res = fulfill_line(c, lid, _s(b.get("item_id"), 64), p["id"], p["product"] or p["name"], p["quantity_text"] or "",
+                           None, _store_arg(b.get("store_id")), p["upc"] or "")
+        if not res:
+            raise ApiError(404, "That list item is gone.")
+    return {"ok": True, "list_checked": res}
 
 
 def stores_replace(b):
@@ -11483,6 +11641,14 @@ class Handler(BaseHTTPRequestHandler):
         # --- the ongoing list and stores
         if m == "GET" and path == "/api/list":
             return self.send(200, ongoing_list())
+        if m == "GET" and path == "/api/grocery/suggest":
+            return self.send(200, grocery_suggest(q.get("q", "")))
+        if m == "GET" and path == "/api/grocery/usual":
+            return self.send(200, grocery_usual())
+        if m == "GET" and path == "/api/grocery/catalog":
+            return self.send(200, {"aisles": n_catalog.by_aisle()})
+        if m == "POST" and path == "/api/list/fulfill":
+            return self.send(200, list_fulfill(self.body()))
         if m == "POST" and path == "/api/list/items":
             return self.send(200, list_add(self.body()))
         mm = re.fullmatch(r"/api/list/items/([A-Za-z0-9-]{1,64})(/have)?", path)

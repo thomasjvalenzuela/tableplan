@@ -126,6 +126,8 @@ class GuidedCache(unittest.TestCase):
         rid = S.recipe_detail(planned)["id"]
         S.save_plan([{"date": S.iso(S.today() + timedelta(days=2)), "entry_type": "dinner", "recipe_id": rid}])
         self.assertEqual(S.guided_warm_candidates()[0], planned)
+        time.sleep(0.3)            # let the edit-triggered background builds (no AI here) finish and fail first
+        S._gw_failed.clear()
         with mock.patch.object(S, "openai_chat", return_value=AI_REPLY):
             self.assertEqual(S.guided_warm_next(), planned)
 
