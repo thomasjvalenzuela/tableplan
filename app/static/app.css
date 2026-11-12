@@ -1550,3 +1550,21 @@ h1.title{font-size:34px;line-height:1.08;color:var(--title)}
 .tour-nav{display:flex;justify-content:flex-end;gap:8px}
 .tour-nav .btn{width:auto;padding:8px 18px}
 .tour-acts{justify-content:space-between;margin-top:6px}
+
+/* browse common items: tile grid */
+.bc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:4px 0 10px}
+.bc-tile{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 6px 10px;border:0;border-radius:16px;background:var(--card);box-shadow:var(--shadow);color:var(--text);font:inherit;cursor:pointer;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
+.bc-tile[hidden]{display:none}
+.bc-tile.on{box-shadow:0 0 0 2px var(--accent)}
+.bc-pic{width:56px;height:56px;border-radius:14px;background:var(--fill);display:grid;place-items:center;overflow:hidden}
+.bc-pic img{width:100%;height:100%;object-fit:contain}
+.bc-emo{font-size:32px;line-height:1}
+.bc-n{font-size:12.5px;font-weight:600;text-align:center;line-height:1.2}
+.bc-home{position:absolute;top:6px;left:6px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:999px;background:var(--ok-bg);color:var(--ok-fg);max-width:calc(100% - 40px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bc-q{position:absolute;top:6px;right:6px;width:24px;height:24px;border-radius:50%;background:var(--fill);display:grid;place-items:center;font-size:11px;font-weight:800}
+.bc-q svg{width:14px;height:14px}
+.bc-tile.on .bc-q{background:var(--accent);color:var(--on-accent)}
+.bc-ah{font-weight:600;text-transform:none;letter-spacing:0;color:var(--ok-fg);margin-left:6px;font-size:12px}
+.bc-stepper{display:flex;align-items:center;gap:10px;padding:6px}
+.bc-stepper button[data-s]{width:36px;height:36px;border-radius:50%;border:0;background:var(--fill);font-size:20px;color:var(--text)}
+.bc-stepper b{min-width:24px;text-align:center;font-size:18px}

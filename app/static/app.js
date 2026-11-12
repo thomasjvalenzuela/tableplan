@@ -1385,27 +1385,49 @@ async function drawUsual() {
   box.innerHTML = (u.items || []).map((n) => `<button class="filter sm" data-usual="${esc(n)}">${ic("plus")} ${esc(n)}</button>`).join("");
   $$("[data-usual]", box).forEach((b) => (b.onclick = () => quickAdd([b.dataset.usual])));
 }
+// "Browse common items": a photo/emoji grid by aisle, with what's already at home. Tap to pick, long-press for how many.
 async function browseCommon() {
-  openSheet("Common items", loading());
+  openSheet("Common items", loading(), { wide: true });
   let d; try { d = await api("GET", "/api/grocery/catalog"); } catch (e) { return fail(e); }
-  const picked = new Set();
+  const picked = new Map();   // name -> quantity
+  const all = d.aisles.flatMap((a) => a.items);
   const body = sheetBody(); if (!body) return;
+  const tile = (it) => `<button class="bc-tile" data-bc="${esc(it.name)}" data-w="${esc((it.name + " " + it.food).toLowerCase())}" aria-pressed="false" aria-label="${esc(it.name)}${it.home ? `, ${it.home} at home` : ""}">
+      <span class="bc-pic">${it.photo ? `<img src="/img/ing?name=${encodeURIComponent(it.name)}" alt="" loading="lazy">` : `<span class="bc-emo">${esc(it.emoji)}</span>`}</span>
+      ${it.home ? `<span class="bc-home">${esc(it.home)} at home${it.left ? ` · ${esc(it.left)}` : ""}</span>` : ""}
+      <span class="bc-q" aria-hidden="true">${ic("plus")}</span><span class="bc-n">${esc(it.name)}</span></button>`;
   body.innerHTML = `<div class="search">${ic("search")}<input id="bc-q" placeholder="Filter, e.g. milk" autocomplete="off" aria-label="Filter common items"></div>
-    <div id="bc-list">${d.aisles.map((a) => `<div class="group-label">${esc(a.aisle)}</div><div class="tag-cloud bc-aisle">${a.items.map((it) =>
-      `<button class="tag" data-bc="${esc(it.name)}" data-w="${esc((it.name + " " + it.food).toLowerCase())}" aria-pressed="false">${esc(it.name)}</button>`).join("")}</div>`).join("")}</div>
+    <p class="hint" style="margin:6px 2px">Tap to pick, long-press to choose how many.</p>
+    <div id="bc-list">${d.aisles.map((a) => `<div class="group-label bc-h">${esc(a.aisle)}${a.home ? ` <span class="bc-ah">${esc(a.home)} at home</span>` : ""}</div><div class="bc-grid bc-aisle">${a.items.map(tile).join("")}</div>`).join("")}</div>
     <div class="bc-bar"><button class="btn" id="bc-add" disabled>Add to list</button></div>`;
   const btn = $("#bc-add");
-  const sync = () => { btn.disabled = !picked.size; btn.textContent = picked.size ? `Add ${plural(picked.size, "item")} to list` : "Add to list"; };
-  $$("[data-bc]", body).forEach((b) => (b.onclick = () => {
-    const n = b.dataset.bc; picked.has(n) ? picked.delete(n) : picked.add(n);
-    b.classList.toggle("on", picked.has(n)); b.setAttribute("aria-pressed", String(picked.has(n))); sync();
-  }));
+  const sync = () => { const n = picked.size; btn.disabled = !n; btn.textContent = n ? `Add ${plural(n, "item")} to list` : "Add to list"; };
+  const mark = (b) => {
+    const q = picked.get(b.dataset.bc) || 0;
+    b.classList.toggle("on", q > 0); b.setAttribute("aria-pressed", String(q > 0));
+    $(".bc-q", b).innerHTML = q > 1 ? `×${q}` : q ? ic("check") : ic("plus");
+  };
+  const qtyPicker = (b) => {
+    const n = b.dataset.bc; let q = picked.get(n) || 1;
+    popover(b, `<div class="bc-stepper" role="group" aria-label="How many ${esc(n)}"><button data-s="-1" aria-label="Fewer">−</button><b id="bc-qn">${q}</b><button data-s="1" aria-label="More">+</button><button class="btn small" data-ok>Done</button></div>`, (el) => {
+      $$("[data-s]", el).forEach((x) => (x.onclick = () => { q = Math.max(0, Math.min(24, q + +x.dataset.s)); $("#bc-qn", el).textContent = q; }));
+      $("[data-ok]", el).onclick = () => { closePop(); q ? picked.set(n, q) : picked.delete(n); mark(b); sync(); };
+    });
+  };
+  $$("[data-bc]", body).forEach((b) => {
+    let t = 0, long = false;
+    b.onpointerdown = () => { long = false; clearTimeout(t); t = setTimeout(() => { long = true; try { navigator.vibrate?.(15); } catch (_) {} qtyPicker(b); }, 500); };
+    b.onpointerup = b.onpointerleave = b.onpointercancel = () => clearTimeout(t);
+    b.oncontextmenu = (e) => e.preventDefault();
+    b.onclick = () => { if (long) { long = false; return; } const n = b.dataset.bc; picked.has(n) ? picked.delete(n) : picked.set(n, 1); mark(b); sync(); };
+  });
   $("#bc-q").oninput = (e) => {
     const q = e.target.value.trim().toLowerCase();
     $$("[data-bc]", body).forEach((b) => (b.hidden = q && !b.dataset.w.includes(q)));
     $$(".bc-aisle", body).forEach((g) => { const any = $$("[data-bc]", g).some((b) => !b.hidden); g.hidden = !any; g.previousElementSibling.hidden = !any; });
   };
-  btn.onclick = async () => { const items = [...picked]; closeSheet(); await quickAdd(items); };
+  btn.onclick = async () => { const items = [...picked].map(([n, q]) => (q > 1 ? `${q} ${n}` : n)); closeSheet(); await quickAdd(items); };
+  void all;
 }
 async function quickAdd(lines) {
   const inp = $("#qa");

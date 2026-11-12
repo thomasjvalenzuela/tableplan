@@ -1,5 +1,13 @@
 [
  {
+  "id": "browse-grid",
+  "date": "2026-11-27",
+  "icon": "cart",
+  "color": "blue",
+  "title": "Browse groceries by picture",
+  "text": "Shopping → Browse common items is now a picture grid by aisle. Each aisle and item shows what's already at home (\"1 at home · ½ left\"), so you don't buy twice. Tap to pick, long-press to choose how many."
+ },
+ {
   "id": "tour",
   "date": "2026-11-26",
   "icon": "sparkle",

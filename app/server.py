@@ -4866,6 +4866,19 @@ FOOD_EMOJI = [
     ("parsley", "🌿"), ("cilantro", "🌿"), ("oregano", "🌿"), ("thyme", "🌿"), ("rosemary", "🌿"), ("mint", "🌿"),
     ("ginger", "🫚"), ("cinnamon", "🟤"), ("nut", "🥜"), ("peanut", "🥜"), ("almond", "🥜"), ("tofu", "🧊"), ("sauce", "🥫"),
     ("paste", "🥫"), ("can", "🥫"),
+    ("clementine", "🍊"), ("mandarin", "🍊"), ("tangerine", "🍊"), ("raspberr", "🫐"), ("blackberr", "🫐"), ("kiwi", "🥝"),
+    ("shallot", "🧅"), ("leek", "🧅"), ("celery", "🥬"), ("cauliflower", "🥦"), ("asparagus", "🥬"), ("brussels", "🥬"),
+    ("squash", "🎃"), ("pumpkin", "🎃"), ("jalapeño", "🌶️"), ("spring mix", "🥬"), ("arugula", "🥬"), ("coleslaw", "🥬"),
+    ("dill", "🌿"), ("radish", "🥕"), ("beet", "🥕"), ("half and half", "🥛"), ("margarine", "🧈"), ("cheddar", "🧀"),
+    ("mozzarella", "🧀"), ("monterey", "🧀"), ("provolone", "🧀"), ("feta", "🧀"), ("ricotta", "🧀"), ("roast", "🥩"),
+    ("hot dog", "🌭"), ("cod", "🐟"), ("tilapia", "🐟"), ("lamb", "🍖"), ("bun", "🍞"), ("roll", "🍞"), ("bagel", "🥯"),
+    ("muffin", "🧁"), ("naan", "🫓"), ("croissant", "🥐"), ("baking soda", "🧂"), ("baking powder", "🧂"), ("yeast", "🌾"),
+    ("vanilla", "🍶"), ("cooking spray", "🫒"), ("quinoa", "🌾"), ("panko", "🍞"), ("chickpea", "🫘"), ("lentil", "🫘"),
+    ("jelly", "🍇"), ("jam", "🍓"), ("pancake", "🥞"), ("ketchup", "🥫"), ("mustard", "🥫"), ("mayo", "🥫"), ("sriracha", "🌶️"),
+    ("salsa", "🍅"), ("dressing", "🥗"), ("pickle", "🥒"), ("cereal", "🥣"), ("granola", "🥣"), ("cracker", "🍘"),
+    ("pretzel", "🥨"), ("popcorn", "🍿"), ("walnut", "🥜"), ("pecan", "🥜"), ("raisin", "🍇"), ("coffee", "☕"), ("tea", "🍵"),
+    ("paprika", "🌶️"), ("cumin", "🟤"), ("seasoning", "🧂"), ("bay lea", "🌿"), ("curry", "🍛"), ("frozen", "🧊"),
+    ("cherri", "🍒"), ("soda", "🥤"), ("seltzer", "🥤"), ("juice", "🧃"), ("zip-top", "🛍️"), ("bags", "🛍️"), ("parchment", "🧻"),
 ]
 
 
@@ -9217,6 +9230,43 @@ def grocery_suggest(q):
     return {"items": out[:8]}
 
 
+def grocery_catalog_view():
+    """GET /api/grocery/catalog: the common-items grid, by aisle, with what's already at home.
+    Each item: emoji, a cached photo when there is one (never fetched just for this), and how many are at home;
+    each aisle: how many inventory items are in it."""
+    aisles = n_catalog.by_aisle()
+    with db() as c:
+        home, by_aisle = {}, {}
+        for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND COALESCE(review,0)=0").fetchall():
+            keys = {food_key(clean_food(r["name"])), food_key(r["name"])}
+            if r["food_id"] is not None:
+                keys.add(f"f:{r['food_id']}")
+            for k in keys:
+                if k:
+                    home.setdefault(k, []).append(r)
+        cached = {r["key"] for r in c.execute("SELECT key FROM image_picks WHERE kind='ing' AND file IS NOT NULL AND missing=0")}
+        out = []
+        for a in aisles:
+            items, n_aisle = [], set()
+            for it in a["items"]:
+                fid = n_foods.lookup(c, it["food"]) if n_foods.normalize(it["food"]) else None
+                rows = (home.get(f"f:{fid}") if fid is not None else None) or home.get(food_key(clean_food(it["food"]))) \
+                    or home.get(food_key(clean_food(it["name"]))) or []
+                rows = list({r["id"]: r for r in rows}.values())
+                n_aisle.update(r["id"] for r in rows)
+                left = ""
+                if len(rows) == 1 and (rows[0]["amount_left"] or 1) < 0.999:
+                    left = n_whatcan_left(rows[0]["amount_left"])
+                items.append({**it, "emoji": food_emoji(it["name"]), "home": len(rows), "left": left,
+                              "photo": (food_key(it["name"]) or it["name"].lower()) in cached})
+            out.append({"aisle": a["aisle"], "items": items, "home": len(n_aisle)})
+    return {"aisles": out}
+
+
+def n_whatcan_left(v):
+    return {1.0: "", 0.75: "¾ left", 0.5: "½ left", 0.25: "¼ left"}.get(round(float(v) * 4) / 4, f"{round(float(v) * 100)}% left") if v else ""
+
+
 def grocery_usual():
     """The household's most-added extras (not from recipes), topped up with popular common groceries."""
     require_native()
@@ -11990,7 +12040,7 @@ class Handler(BaseHTTPRequestHandler):
         if m == "GET" and path == "/api/grocery/usual":
             return self.send(200, grocery_usual())
         if m == "GET" and path == "/api/grocery/catalog":
-            return self.send(200, {"aisles": n_catalog.by_aisle()})
+            return self.send(200, grocery_catalog_view())
         if m == "POST" and path == "/api/list/fulfill":
             return self.send(200, list_fulfill(self.body()))
         if m == "POST" and path == "/api/list/items":
