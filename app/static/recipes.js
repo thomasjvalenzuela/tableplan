@@ -88,8 +88,9 @@ function drawRecipeList() {
     (f === "all" || (f === "fav" ? r.favorite : f === "quick" ? +(r.eta_min || r.minutes || 999) <= 30 : f === "none" ? !(r.categories || []).length : f.startsWith("cat:") ? (r.categories || []).includes(f.slice(4)) : true)));
   drawSelBar();
   if (!rstate.list.length) {
-    box.innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>`;
-    $("#r-first").onclick = openAddRecipe; return;
+    box.innerHTML = `<div class="empty"><div class="em">📖</div>No recipes yet.<br>Add one from a link or a screenshot.</div><button class="btn" id="r-first">${ic("plus")} Add your first recipe</button>
+      ${c_native() ? `<button class="btn sec" id="r-demo" style="margin-top:10px">${ic("sparkle")} Explore with sample recipes</button>` : ""}`;
+    $("#r-first").onclick = openAddRecipe; $("#r-demo") && ($("#r-demo").onclick = addSampleData); return;
   }
   if (!list.length) { box.innerHTML = `<div class="empty">No recipes match.</div>`; return; }
   const sel = rstate.sel;
@@ -1626,7 +1627,7 @@ async function loadWhatsNew() {
 const wnItem = (e) => `<li><span class="ic bg-${esc(e.color || "orange")}">${ic(e.icon || "sparkle")}</span><span><b>${esc(e.title)}</b><span>${esc(e.text)}</span></span></li>`;
 async function maybeWhatsNew(tries = 0) {
   if (!state.cfg?.setup_complete) return;
-  const busy = !!$("#layer")?.firstChild || !!$("#cook") || !!$(".wiz") || document.hidden;
+  const busy = !!$("#layer")?.firstChild || !!$("#cook") || !!$(".wiz") || !!$("#tour") || document.hidden;
   if (busy) { if (tries < 60) setTimeout(() => maybeWhatsNew(tries + 1), 5000); return; }
   const feed = await loadWhatsNew();
   const seen = new Set(state.cfg.settings?.whatsnew_seen || []);
@@ -2374,4 +2375,125 @@ function openPansSettings() {
       };
     },
   });
+}
+
+// ------------------------------------------------------------------ the tour: 7 coach marks over the real app
+const TOUR = [
+  { go: "home", sel: '#tabs .tab[data-tab="home"]', title: "Home", text: "Today at a glance: tonight's meal, what to buy, and what's expiring." },
+  { go: "home", sel: '#tabs .tab[data-tab="meals"]', title: "Plan", text: "Plan the week one day at a time, or let TablePlan fill it in. Missing ingredients go straight on your list." },
+  { go: "recipes", sel: "#btn-add", title: "Recipes", text: "Add recipes from a link, a screenshot or a cookbook page. Scan several in a row; TablePlan reads them while you go." },
+  { go: "recipes", sel: "#btn-make", title: "What can I make?", text: "What you can cook right now, what's one or two items away, and ideas to use up what's expiring." },
+  { go: "list", sel: "#qa", title: "Shopping list", text: "Type or tap your usual items. Planned meals add only what you don't already have." },
+  { go: "pantry", sel: "#p-scan", title: "Inventory", text: "Stock up with a barcode scanner, your camera or a receipt. Use-by dates follow each item." },
+  { go: "home", sel: "#btn-settings", title: "Settings", text: "Your household, stores, budget and notifications. Replay this tour any time from Settings → Help." },
+];
+const TS = { i: 0, el: null, safe: null };
+function tourSafe() {
+  if (TS.safe) return TS.safe;
+  const p = document.createElement("div");
+  p.style.cssText = "position:fixed;visibility:hidden;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)";
+  document.body.appendChild(p);
+  const cs = getComputedStyle(p);
+  TS.safe = { t: parseFloat(cs.paddingTop) || 0, r: parseFloat(cs.paddingRight) || 0, b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0 };
+  p.remove();
+  return TS.safe;
+}
+const tourSave = (t) => api("PUT", "/api/me/state", { tour: t }).catch(() => {});
+async function waitFor(sel, ms = 3000) {
+  const t0 = Date.now();
+  for (;;) {
+    const el = $(sel);
+    if (el && el.getClientRects().length) return el;
+    if (Date.now() - t0 > ms) return null;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+}
+function startTour(from = 0) {
+  if ($("#tour")) return;
+  closeSheet(true);
+  TS.i = from;
+  const box = document.createElement("div");
+  box.id = "tour"; box.className = "tour";
+  box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); box.setAttribute("aria-labelledby", "tour-t"); box.setAttribute("aria-describedby", "tour-p");
+  box.innerHTML = `<div class="tour-hole" aria-hidden="true"></div><div class="tour-tip"><div class="tour-n" id="tour-n"></div>
+    <div aria-live="polite"><h2 id="tour-t"></h2><p id="tour-p"></p></div>
+    <div class="tour-nav"><button class="btn sec small" data-t="back">Back</button><button class="btn small" data-t="next">Next</button></div>
+    <div class="tour-acts"><button class="link-btn" data-t="later">Remind me later</button><button class="link-btn" data-t="skip">Skip tour</button></div></div>`;
+  document.body.appendChild(box);
+  TS.el = box;
+  const close = (t, msg) => {
+    box.remove(); TS.el = null;
+    window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true);
+    tourSave(t); if (msg) toast(msg);
+  };
+  $("[data-t=next]", box).onclick = () => (TS.i >= TOUR.length - 1 ? finish() : show(TS.i + 1, 1));
+  $("[data-t=back]", box).onclick = () => TS.i > 0 && show(TS.i - 1, -1);
+  $("[data-t=skip]", box).onclick = () => close({ done: true, skipped: true }, "Tour skipped. Replay it from Settings → Help.");
+  $("[data-t=later]", box).onclick = () => close({ snoozed_until: Date.now() + 7 * 864e5 }, "We'll show the tour again in a week.");
+  box.onkeydown = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); $("[data-t=later]", box).click(); }
+    else if (e.key === "ArrowRight") $("[data-t=next]", box).click();
+    else if (e.key === "ArrowLeft") $("[data-t=back]", box).click();
+    else if (e.key === "Tab") {   // keep focus inside the tour
+      const f = $$("button", box).filter((b) => !b.disabled && b.offsetParent);
+      const k = f.indexOf(document.activeElement);
+      if (e.shiftKey && k <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && k === f.length - 1) { e.preventDefault(); f[0].focus(); }
+    }
+  };
+  const finish = async () => {
+    close({ done: true });
+    let none = false; try { none = !(await api("GET", "/api/recipes")).recipes.length; } catch (_) {}
+    if (none && c_native()) toast("You're all set. Want something to try it with?", "Add sample recipes", () => addSampleData());
+    else toast("You're all set");
+  };
+  function place() {
+    const s = TOUR[TS.i], el = s && $(s.sel); if (!el || !TS.el) return;
+    const r = el.getBoundingClientRect(), sf = tourSafe(), vw = innerWidth, vh = innerHeight, pad = 6;
+    const hole = $(".tour-hole", box), tip = $(".tour-tip", box);
+    Object.assign(hole.style, { left: `${r.left - pad}px`, top: `${r.top - pad}px`, width: `${r.width + pad * 2}px`, height: `${r.height + pad * 2}px` });
+    const tw = Math.min(360, vw - 24 - sf.l - sf.r), th = tip.offsetHeight || 180;
+    let top = r.bottom + 14;
+    if (top + th > vh - sf.b - 12) top = r.top - th - 14;
+    top = Math.max(sf.t + 12, Math.min(top, vh - sf.b - th - 12));
+    const left = Math.max(sf.l + 12, Math.min(r.left + r.width / 2 - tw / 2, vw - sf.r - tw - 12));
+    Object.assign(tip.style, { width: `${tw}px`, left: `${left}px`, top: `${top}px` });
+  }
+  async function show(i, dir = 1) {
+    let k = i;
+    while (k >= 0 && k < TOUR.length) {
+      const s = TOUR[k];
+      if (s.go && state.tab !== s.go) { location.hash = s.go; }
+      const el = await waitFor(s.sel);
+      if (el) {
+        if (!TS.el) return;
+        TS.i = k;
+        if (!el.closest(".tabbar") && !el.closest(".topbar")) el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        $("#tour-n").textContent = `${k + 1} of ${TOUR.length}`;
+        $("#tour-t").textContent = s.title; $("#tour-p").textContent = s.text;
+        $("[data-t=back]", box).disabled = k === 0;
+        $("[data-t=next]", box).textContent = k === TOUR.length - 1 ? "Done" : "Next";
+        box.dataset.step = String(k);
+        setTimeout(place, 30); setTimeout(place, 350);
+        $("[data-t=next]", box).focus();
+        tourSave({ step: k });
+        return;
+      }
+      k += dir;   // that part isn't on this setup (e.g. the Mealie backend): go on
+    }
+    if (k >= TOUR.length) finish();
+  }
+  window.addEventListener("resize", place); window.addEventListener("scroll", place, true);
+  show(from);
+}
+async function maybeTour() {
+  if ($("#tour") || $("#cook") || $("#layer")?.firstChild) return false;
+  let me; try { me = await api("GET", "/api/me"); } catch (_) { return false; }
+  if (!me.tour_due) return false;
+  const st = me.state?.tour || {};
+  startTour(Math.min(+st.step || 0, TOUR.length - 1));
+  return true;
+}
+async function addSampleData() {
+  try { const r = await api("POST", "/api/demo", {}); rstate.list = null; toast(r.already ? "Sample recipes are already here" : "Added 3 sample recipes and a few inventory items (marked Demo)"); if (state.tab === "recipes") renderRecipes(); else if (state.tab === "home") renderHome(); }
+  catch (e) { fail(e); }
 }

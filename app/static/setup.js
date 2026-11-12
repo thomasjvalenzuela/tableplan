@@ -98,11 +98,24 @@ const Setup = {
           <div class="stepper"><button type="button" data-d="-1">−</button><b id="hh-n">${_esc(h.people || 2)}</b><button type="button" data-d="1">+</button></div></div>
         <div class="wfield"><label>Scale recipes to fit</label><label class="toggle"><input type="checkbox" id="hh-scale" ${h.scale !== false ? "checked" : ""}><span></span></label></div>
       </div>
-      <p class="whint">When you plan a meal, TablePlan sets the serving scale so a recipe written for 4 automatically shopping-lists for <span id="hh-n2">${_esc(h.people || 2)}</span>. You can still change servings on any recipe.</p>`;
+      <p class="whint">When you plan a meal, TablePlan sets the serving scale so a recipe written for 4 automatically shopping-lists for <span id="hh-n2">${_esc(h.people || 2)}</span>. You can still change servings on any recipe.</p>
+      ${st.mealie?.native ? `<div class="wgroup"><div class="wfield col"><label>Where do you shop?</label><div class="chips wiz-stores" id="hh-stores"></div>
+        <form class="wiz-add" id="hh-add" autocomplete="off"><input id="hh-store" maxlength="40" placeholder="Add a store" aria-label="Add a store"><button class="btn sec small" type="submit">Add</button></form></div></div>` : ""}`;
     let n = Math.max(1, Math.min(30, Math.round(+h.people) || 2));
     el.querySelectorAll("[data-d]").forEach((b) => (b.onclick = () => { n = Math.max(1, Math.min(30, n + +b.dataset.d)); el.querySelector("#hh-n").textContent = n; el.querySelector("#hh-n2").textContent = n; }));
+    let stores = null;
+    const box = el.querySelector("#hh-stores");
+    if (box) {
+      const draw = () => {
+        box.innerHTML = stores.map((x, k) => `<button type="button" class="chip-s on store-chip-x" data-rm="${k}" aria-label="Remove ${_esc(x.name)}">${_esc(x.name)} <span aria-hidden="true">×</span></button>`).join("") || `<span class="whint">No stores yet (optional)</span>`;
+        box.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { stores.splice(+b.dataset.rm, 1); draw(); }));
+      };
+      _api("GET", "/api/stores").then((list) => { stores = list && list.length ? list.map((x) => ({ id: x.id, name: x.name })) : [{ name: "Aldi" }, { name: "Costco" }]; draw(); }).catch(() => { stores = [{ name: "Aldi" }, { name: "Costco" }]; draw(); });
+      el.querySelector("#hh-add").onsubmit = (e) => { e.preventDefault(); const v = el.querySelector("#hh-store").value.trim(); if (v && stores && stores.length < 12 && !stores.some((x) => x.name.toLowerCase() === v.toLowerCase())) { stores.push({ name: v }); draw(); } el.querySelector("#hh-store").value = ""; };
+    }
     return async () => {
       const r = await _api("POST", "/api/setup/household", { name: el.querySelector("#hh-name").value, people: n, scale: el.querySelector("#hh-scale").checked });
+      if (stores) await _api("PUT", "/api/stores", { stores });
       done && done(r); return true;
     };
   },
@@ -391,14 +404,13 @@ for (const k of Object.keys(Setup)) {
 }
 
 // ------------------------------------------------------------------ first-run wizard
+// First run: only what's needed to start. Everything else waits in the Getting started checklist.
 const WIZ_STEPS = [
-  { key: "welcome", title: "Welcome to TablePlan", sub: "Recipes, meal plans, a smart inventory and grocery lists for your household. This takes about 3 minutes, and you can skip anything and finish it later in Settings." },
-  { key: "household", title: "Your household", sub: "This sets how much every recipe makes." , section: "household" },
+  { key: "account", title: "Welcome to TablePlan", sub: "Create your account first. You'll be the household admin; everyone else gets their own sign-in later.", section: "account" },
+  { key: "household", title: "Your household", sub: "Who you cook for and where you shop. You can change this any time.", section: "household", skippable: true },
   { key: "mealie", title: "Recipe library", sub: "TablePlan keeps recipes in Mealie, which is included and runs on your server.", section: "mealie", skippable: true },
-  { key: "ai", title: "Import from screenshots", sub: "Let AI read recipe photos, screenshots and tricky web pages.", section: "ai", skippable: true },
-  { key: "notify", title: "Notifications", sub: "Get grocery lists, meal plans and use-soon alerts on your phone.", section: "notify", skippable: true },
-  { key: "account", title: "Your account", sub: "Each person signs in as themselves and shares the same recipes, plans and lists.", section: "account" },
-  { key: "done", title: "You're all set", sub: "" },
+  { key: "ai", title: "AI recipe import (optional)", sub: "Let AI read recipe photos, screenshots and tricky web pages. Add a key now or later.", section: "ai", skippable: true },
+  { key: "notify", title: "Notifications (optional)", sub: "Get lists, plans and heads-ups on your phone. Set it up now or later.", section: "notify", skippable: true },
 ];
 
 async function runWizard(onFinish) {
@@ -416,31 +428,17 @@ async function runWizard(onFinish) {
     const dots = WIZ_STEPS.map((_, n) => `<i class="${n === i ? "on" : n < i ? "past" : ""}"></i>`).join("");
     root.innerHTML = `<div class="wiz"><div class="wiz-card fade-in">
       <div class="wiz-dots">${dots}</div>
-      ${step.key === "welcome" || step.key === "done" ? `<div class="wiz-logo"><img class="brand-logo logo-l" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."><img class="brand-logo logo-d" src="/static/logo-white.png" alt="TablePlan · Plan meals. Shop smarter."></div>` : ""}
+      ${i === 0 ? `<div class="wiz-logo"><img class="brand-logo logo-l" src="/static/logo.png" alt="TablePlan · Plan meals. Shop smarter."><img class="brand-logo logo-d" src="/static/logo-white.png" alt="TablePlan · Plan meals. Shop smarter."></div>` : ""}
       <h2 class="wiz-title">${_esc(step.title)}</h2>${step.sub ? `<p class="wiz-sub">${_esc(step.sub)}</p>` : ""}
       <div id="wiz-body"></div><div class="wiz-err" id="wiz-err"></div>
       <div class="wiz-actions">
-        ${i > 0 && step.key !== "done" ? `<button class="btn sec" id="wz-back">Back</button>` : ""}
+        ${i > 0 ? `<button class="btn sec" id="wz-back">Back</button>` : ""}
         ${step.skippable ? `<button class="btn sec" id="wz-skip">Skip</button>` : ""}
-        <button class="btn" id="wz-next">${step.key === "welcome" ? "Get started" : step.key === "done" ? "Open TablePlan" : "Continue"}</button>
+        <button class="btn" id="wz-next">${i === WIZ_STEPS.length - 1 ? "Finish" : "Continue"}</button>
       </div></div></div>`;
     const body = document.getElementById("wiz-body");
     submit = null;
     if (step.section) { Setup[step.section](body, st); submit = () => (body._submit ? body._submit() : true); }
-    if (step.key === "welcome") body.innerHTML = `<ul class="wiz-feats">
-        <li><b>🍳 Recipes from anywhere</b><span>Links, screenshots and cookbook photos</span></li>
-        <li><b>🗓️ Auto meal plans</b><span>A week or a month in one tap</span></li>
-        <li><b>🥛 Smart inventory</b><span>Real use-by dates that update as you cook</span></li>
-        <li><b>🛒 Shopping lists</b><span>Scaled to your household, emailed or printed</span></li></ul>`;
-    if (step.key === "done") {
-      const row = (ok, label, todo) => `<li class="${ok ? "ok" : ""}"><b>${ok ? "✓" : "○"} ${_esc(label)}</b><span>${ok ? "" : _esc(todo)}</span></li>`;
-      body.innerHTML = `<ul class="wiz-feats">
-        ${st.mealie?.native ? "" : row(st.mealie?.connected, "Recipe library connected", "Settings → Mealie")}
-        ${row(st.ai?.enabled, "Screenshot import", "Settings → AI recipe import")}
-        ${row(st.notify?.channels && Object.values(st.notify.channels).some(Boolean), "Notifications", "Settings → Notifications")}
-        ${row(true, `Cooking for ${st.household?.people || 2}`, "")}</ul>
-        <p class="whint" style="text-align:center">Tip: in Safari, tap Share → <b>Add to Home Screen</b> to open TablePlan like an app.</p>`;
-    }
     const err = document.getElementById("wiz-err");
     const go = async (skip) => {
       err.textContent = "";
@@ -450,7 +448,7 @@ async function runWizard(onFinish) {
         try { await submit(); }
         catch (e) { if (!e.silent) err.textContent = e.message; btn.disabled = false; btn.textContent = label; return; }
       }
-      if (step.key === "done") {
+      if (i === WIZ_STEPS.length - 1) {
         await _api("POST", "/api/setup/complete").catch(() => {});
         document.querySelector(".tabbar").style.display = "";
         return onFinish();

@@ -1978,11 +1978,15 @@ async function openSettings() {
       <div class="group-label">Your data</div>
       <div class="group"><button class="row" id="st-backups"><span class="ic ${st.persistent === false || (st.integrity && st.integrity !== "ok") ? "bg-red" : "bg-green"}" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("shield")}</span><div class="main"><div class="a">Backups</div><div class="b">${esc(backupSummary(st))}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       ${st.persistent === false ? `<p class="hint" style="color:var(--red)">This container isn't using a persistent volume. Download a backup now and see <a ${extLink(DOCS_BACKUPS)}>docs/install.md#backups</a>.</p>` : ""}
+      <div class="group-label">Help</div>
+      <div class="group">
+        <button class="row" id="st-wn"><div class="main"><div class="a">What's new</div><div class="b">Everything added recently</div></div><span class="chev">${ic("chevR")}</span></button>
+        <button class="row" id="st-tour"><div class="main"><div class="a">Replay tour</div><div class="b">A one-minute walk through the app</div></div><span class="chev">${ic("chevR")}</span></button>
+      </div>
       <div class="group-label">Advanced</div>
       <div class="group">
         ${c.backend === "native" ? `<button class="row" id="st-mimport"><div class="main"><div class="a">Import from Mealie</div><div class="b">Copy recipes, photos, plans and lists from an old Mealie</div></div><span class="chev">${ic("chevR")}</span></button>` : `<a class="row" ${extLink(c.mealie_url)} style="text-decoration:none"><div class="main"><div class="a">Mealie admin</div><div class="b">Not needed day to day. TablePlan handles everything.</div></div><span class="chev">${ic("ext")}</span></a>`}
         <button class="row" id="st-wizard"><div class="main"><div class="a">Run setup wizard again</div></div><span class="chev">${ic("chevR")}</span></button>
-        <button class="row" id="st-wn"><div class="main"><div class="a">What's new</div><div class="b">Everything added recently</div></div><span class="chev">${ic("chevR")}</span></button>
         ${c.auth_required ? `<button class="row" id="st-logout"><div class="main"><div class="a" style="color:var(--red)">Sign out on this device</div></div></button>` : ""}
       </div>
       ${c.backend === "native" && isAdmin() ? `<div class="group-label danger-label">Danger zone</div>
@@ -2040,6 +2044,7 @@ async function openSettings() {
     };
     $("#st-rules").onclick = () => rulesBrowser(draw);
     $("#st-bctest").onclick = () => openBarcodeTest();
+    $("#st-tour").onclick = () => { closeSheet(true); go("home"); setTimeout(() => startTour(0), 300); };
     $("#st-pans") && ($("#st-pans").onclick = () => openPansSettings());
     $("#st-prices") && ($("#st-prices").onclick = () => openPricesSettings());
     $("#st-photos") && ($("#st-photos").onclick = () => openPhotoSettings());
@@ -2435,7 +2440,7 @@ function openUpdateHelp() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("#layer").firstChild && !$("#cook") && TABS.some((t) => t[0] === location.hash.slice(1))) refresh(); });
   if (sess.needs_account) setTimeout(() => maybeAccountPrompt(sess), 500);
-  else setTimeout(maybeWhatsNew, 600);
+  else setTimeout(async () => { if (!(await maybeTour())) maybeWhatsNew(); }, 600);
   setTimeout(() => resumeCook(), 300);   // timers survive a reload: reopen cook mode where it was
   if (c_native()) setTimeout(pollQueue, 900);   // scans still being read, and the Recipes badge
 })();

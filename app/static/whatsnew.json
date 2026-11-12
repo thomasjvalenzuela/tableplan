@@ -1,5 +1,13 @@
 [
  {
+  "id": "tour",
+  "date": "2026-11-26",
+  "icon": "sparkle",
+  "color": "blue",
+  "title": "A quicker start and a quick tour",
+  "text": "First-time setup is down to your account, your household and stores (Aldi and Costco to start, change them as you like), plus optional AI and notifications; the rest waits in the Getting started checklist. Then a one-minute tour points out Home, Plan, Recipes, What can I make?, Shopping, Inventory and Settings. Skip it or snooze it for a week, and replay it from Settings → Help. New here? Explore with sample recipes, and wipe them any time."
+ },
+ {
   "id": "missing-alerts",
   "date": "2026-11-25",
   "icon": "cart",

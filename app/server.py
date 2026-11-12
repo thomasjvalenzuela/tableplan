@@ -1028,6 +1028,7 @@ CHECKLIST = (
     ("inv_baking", "Inventory your baking supplies", "stock:baking"),
     ("cook", "Cook a meal", "#recipes"),
     ("notify", "Turn on notifications", "settings:notify"),
+    ("ai", "Turn on AI recipe import", "settings:ai"),
     ("members", "Invite your household", "settings:members"),
 )
 CHECKLIST_LINK = re.compile(r"(#[a-z]+(/[A-Za-z0-9_-]{1,80})?|settings:[a-z]+|stock:[a-z][a-z0-9_]{1,19})")
@@ -1049,6 +1050,8 @@ def checklist_auto(user):
         done.add("household")
     if any(channels_ready().values()) or (user and user.get("notify_email") and user.get("email")):
         done.add("notify")
+    if cfg("openai_key"):
+        done.add("ai")
     with db() as c:
         checks = {"recipe": "SELECT COUNT(*) FROM recipes", "plan": "SELECT COUNT(*) FROM meal_plans",
                   "list": "SELECT (SELECT COUNT(*) FROM shopping_items WHERE checked=1) + (SELECT COUNT(*) FROM trips)",
@@ -10822,6 +10825,84 @@ def notify_update():
         log("update notice not sent:", e.message)
 
 
+# ============================================================ onboarding tour + sample data
+
+TOUR_STEPS = 7
+TOUR_SNOOZE_MS = 7 * 86400 * 1000
+
+
+def clean_tour(t):
+    """Tour state: {done, skipped, snoozed_until (ms), step}. Anything else is refused."""
+    if t is None:
+        return None
+    if not isinstance(t, dict) or set(t) - {"done", "skipped", "snoozed_until", "step"}:
+        raise ApiError(400, "Bad tour state.")
+    out = {}
+    for k in ("done", "skipped"):
+        if k in t:
+            if not isinstance(t[k], bool):
+                raise ApiError(400, "Bad tour state.")
+            out[k] = t[k]
+    if "snoozed_until" in t:
+        v = t["snoozed_until"]
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 10 ** 14):
+            raise ApiError(400, "Bad tour state.")
+        out["snoozed_until"] = v
+    if "step" in t:
+        v = t["step"]
+        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v < TOUR_STEPS:
+            raise ApiError(400, "Bad tour state.")
+        out["step"] = v
+    return out
+
+
+def tour_due(t, now_ms):
+    """Show the tour automatically? Never once finished or skipped; not while snoozed."""
+    t = t if isinstance(t, dict) else {}
+    if t.get("done"):
+        return False
+    return not (t.get("snoozed_until") and now_ms < t["snoozed_until"])
+
+
+DEMO_RECIPES = [
+    {"name": "Sheet-Pan Lemon Chicken", "servings": 4, "minutes": 45,
+     "ingredients": ["2 lb chicken thighs", "1 lb baby potatoes", "1 lemon", "3 cloves garlic", "2 tbsp olive oil", "1 tsp salt"],
+     "steps": ["Heat the oven to 425°F.", "Halve the potatoes and toss everything on a sheet pan with the oil, salt, garlic and lemon slices.",
+               "Roast 35 minutes, until the chicken is golden and the potatoes are tender."]},
+    {"name": "Weeknight Veggie Fried Rice", "servings": 2, "minutes": 20,
+     "ingredients": ["2 cups cooked rice", "2 eggs", "1 cup frozen peas", "2 green onions", "2 tbsp soy sauce", "1 tbsp vegetable oil"],
+     "steps": ["Heat the oil in a large skillet over high heat.", "Scramble the eggs 1 minute, then push them aside.",
+               "Add the rice and peas and stir-fry 5 minutes.", "Stir in the soy sauce and green onions and serve."]},
+    {"name": "Banana Oat Pancakes", "servings": 2, "minutes": 15,
+     "ingredients": ["2 bananas", "2 eggs", "1 cup rolled oats", "1/2 cup milk", "1 tsp baking powder"],
+     "steps": ["Blend everything until smooth.", "Cook 1/4 cup at a time in a buttered pan, 2 minutes per side."]},
+]
+DEMO_ITEMS = [("eggs", "12", "fridge"), ("spinach", "1 bag", "fridge"), ("rice", "2 lb", "pantry"), ("bananas", "3", "pantry"),
+              ("chicken thighs", "2 lb", "fridge"), ("milk", "1 gallon", "fridge")]
+
+
+def demo_add():
+    """POST /api/demo: three sample recipes and a few inventory items, all marked Demo (Settings → Danger zone →
+    Wipe demo data removes them). Adding twice doesn't duplicate anything."""
+    require_native()
+    with db() as c:
+        have = any((json.loads(r["data"] or "{}").get("extras") or {}).get("demo") for r in c.execute("SELECT data FROM recipes"))
+        if have:
+            return {"ok": True, "added": 0, "already": True}
+        for d in DEMO_RECIPES:
+            data = {"recipeServings": float(d["servings"]), "totalTimeSeconds": d["minutes"] * 60,
+                    "recipeIngredient": [{"referenceId": str(uuid.uuid4()), "note": x, "display": x, "originalText": x,
+                                          "quantity": 0, "unit": None, "food": None} for x in d["ingredients"]],
+                    "recipeInstructions": [{"id": str(uuid.uuid4()), "title": "", "text": s, "ingredientReferences": []} for s in d["steps"]],
+                    "tags": [{"name": "Demo"}], "extras": {"demo": True}, "description": "A sample recipe to explore TablePlan."}
+            n_recipes.create(c, d["name"], _with_pan(data))
+        for name, q, loc in DEMO_ITEMS:
+            pid = add_pantry_item(c, name, loc, None, q)
+            c.execute("UPDATE pantry_items SET product='Demo' WHERE id=?", (pid,))
+    _recipe_cache["at"] = 0
+    return {"ok": True, "added": len(DEMO_RECIPES), "items": len(DEMO_ITEMS)}
+
+
 # ============================================================ missing-ingredient alerts (day before, same morning)
 
 def _checked_for_entries(c, lid):
@@ -11608,6 +11689,8 @@ class Handler(BaseHTTPRequestHandler):
         if m == "GET" and path == "/api/pantry/export":
             require_native()
             return self.send(200, {"rows": pantry_export_rows(q), "headers": CSV_HEADERS})
+        if m == "POST" and path == "/api/demo":
+            return self.send(200, demo_add())
         if m == "GET" and path == "/api/make":
             return self.send(200, what_can_i_make())
         if m == "POST" and path == "/api/make/web":
@@ -12202,7 +12285,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"me": n_users.public_user(row)}, headers={"Set-Cookie": self.cookie(tok)})
         if path == "/api/me":
             if m == "GET":
-                return self.send(200, {"me": self.user, "state": self.get_user_state(), "accounts": users_exist()})
+                st = self.get_user_state()
+                return self.send(200, {"me": self.user, "state": st, "accounts": users_exist(),
+                                       "tour_due": bool(cfg("setup_complete")) and tour_due(st.get("tour"), int(time.time() * 1000))})
             if m == "PATCH":
                 me = self._signed_in_member()
                 with db() as c:
@@ -12223,10 +12308,7 @@ class Handler(BaseHTTPRequestHandler):
         if m == "PUT" and path == "/api/me/state":
             patch = {}
             if "tour" in b:
-                t = b["tour"]
-                if t is not None and (not isinstance(t, dict) or len(json.dumps(t)) > 4000):
-                    raise ApiError(400, "Bad tour state.")
-                patch["tour"] = t
+                patch["tour"] = clean_tour(b["tour"])
             if "account_prompt" in b:
                 patch["account_prompt"] = _v_int(0, 10**14)(b["account_prompt"] or 0)
             return self.send(200, {"state": self.put_user_state(patch)})

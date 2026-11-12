@@ -201,7 +201,7 @@ class AccountsHttp(unittest.TestCase):
 
     def test_checklist_auto_manual_custom_dismiss(self):
         st, _, cl = self.req("GET", "/api/checklist")
-        self.assertEqual(cl["total"], 13)
+        self.assertEqual(cl["total"], 14)   # includes "Turn on AI recipe import"
         self.assertFalse({i["id"]: i for i in cl["items"]}["account"]["done"])
         cookie, me = self.first()
         cl = self.req("GET", "/api/checklist", cookie=cookie)[2]
@@ -214,7 +214,7 @@ class AccountsHttp(unittest.TestCase):
         items = {i["id"]: i for i in cl["items"]}
         self.assertTrue(items["cook"]["done"])
         self.assertEqual(items["plan"]["title"], "Plan Monday")
-        self.assertEqual(cl["total"], 13)         # 13 built-in - 1 hidden + 1 custom
+        self.assertEqual(cl["total"], 14)         # 14 built-in - 1 hidden + 1 custom
         self.assertEqual(self.req("POST", "/api/checklist", {"action": "add", "title": "x", "link": "javascript:alert(1)"}, cookie=cookie)[0], 400)
         self.assertEqual(self.req("POST", "/api/checklist", {"action": "dismiss"}, cookie=cookie)[0], 400)
         for it in cl["items"]:
