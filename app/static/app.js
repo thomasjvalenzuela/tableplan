@@ -381,11 +381,12 @@ function homeStats(s, list) {
 const storeName = (list, id) => (id == null ? "" : ((list.stores || []).find((x) => String(x.id) === String(id)) || {}).name || "");
 // At most one nudge on Home, most useful first: missing ingredients > kitchen check-in (time-bound) > plan running out > stock your kitchen
 function homeContextCard(s, tonight) {
-  const tomorrow = isoDate(addDays(today(), 1));
-  const soon = [tonight, s.week.find((e) => e.date === tomorrow && e.entry_type === "dinner")].find((e) => e && !e.cooked && +e.missing);
-  if (soon) {
-    const when = soon.date === isoDate(today()) ? "Tonight's" : "Tomorrow's";
-    return `<button class="nudge" id="ctx-missing" data-slug="${esc(soon.recipe?.slug || "")}"><span class="ic bg-orange">${ic("cart")}</span><span><b>Missing ${esc(plural(+soon.missing, "item"))} for ${esc(when === "Tonight's" ? (soon.entry_type === "dinner" ? "tonight" : `today's ${soon.entry_type}`) : (soon.entry_type === "dinner" ? "tomorrow" : `tomorrow's ${soon.entry_type}`))}</b><small>${esc(entryName(soon))}</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`;
+  const tomorrow = isoDate(addDays(today(), 1)), todayISO = isoDate(today());
+  const soon = (s.week || []).filter((e) => (e.date === todayISO || e.date === tomorrow) && e.recipe && !e.cooked && !e.skipped && +e.missing)
+    .sort((a, b) => a.date.localeCompare(b.date) || order(a.entry_type) - order(b.entry_type)).slice(0, 2);
+  if (soon.length) {
+    const when = (e) => (e.date === todayISO ? (e.entry_type === "dinner" ? "tonight" : `today's ${e.entry_type}`) : (e.entry_type === "dinner" ? "tomorrow" : `tomorrow's ${e.entry_type}`));
+    return `<div class="nudge-stack">${soon.map((e) => `<button class="nudge" data-miss-slug="${esc(e.recipe?.slug || "")}"><span class="ic bg-orange">${ic("cart")}</span><span><b>Missing ${esc(plural(+e.missing, "item"))} for ${esc(when(e))}</b><small>${esc(entryName(e))}${(e.missing_items || []).length ? ` · ${esc(e.missing_items.slice(0, 3).join(", "))}${e.missing_items.length > 3 ? "…" : ""}` : ""}</small></span><span class="sdot warn" aria-hidden="true"></span><span class="chev">${ic("chevR")}</span></button>`).join("")}</div>`;
   }
   if (s.pantry_checkin?.due) {
     return `<button class="nudge" id="home-ci"><span class="ic bg-green">${ic("box")}</span><span><b>Kitchen check-in</b><small>A few items might be gone or running low. Swipe through them, about a minute.</small></span><span class="chev">${ic("chevR")}</span></button>`;
@@ -404,7 +405,7 @@ function homeContextCard(s, tonight) {
   return "";
 }
 function bindContextCard(s) {
-  $("#ctx-missing") && ($("#ctx-missing").onclick = (e) => { const slug = e.currentTarget.dataset.slug; if (slug) openRecipe(slug); else go("list"); });
+  $$("[data-miss-slug]").forEach((b) => (b.onclick = () => { const slug = b.dataset.missSlug; if (slug) openRecipe(slug); else go("list"); }));
   $("#ctx-plan") && ($("#ctx-plan").onclick = () => planSequential());
   $("#home-ci") && ($("#home-ci").onclick = () => openCheckin(renderHome));
   $$("[data-stock]").forEach((b) => (b.onclick = () => { SS.loc = b.dataset.stock; try { localStorage.setItem("tp.scanLoc", SS.loc); } catch (_) {} startStockUp(renderHome); }));
@@ -1923,6 +1924,8 @@ async function openSettings() {
       <div class="group">
         ${[["breakfast", "Breakfast"], ["lunch", "Lunch"], ["dinner", "Dinner"]].map(([k, l]) => `<div class="field"><label for="st-eat-${k}">${l} at${k === "dinner" ? '<small class="lh">The plan shows when to start cooking so it’s ready on time.</small>' : ""}</label><input type="time" step="300" id="st-eat-${k}" data-eat="${k}" value="${esc((s.eat_times || {})[k] || "")}"></div>`).join("")}
         <div class="field"><label>Tell me when to start cooking<small class="lh">A message at the start time for today’s planned meals.</small></label><label class="toggle"><input type="checkbox" id="st-startrem" ${s.start_reminder ? "checked" : ""}><span></span></label></div>
+        ${c.backend === "native" ? `<div class="field"><label>Day-before heads-up<small class="lh">A message a day ahead when a planned meal is missing ingredients.</small></label><label class="toggle"><input type="checkbox" id="st-mdb" ${s.missing_alert_daybefore ? "checked" : ""}><span></span></label></div>
+        <div class="field"><label>Morning check<small class="lh">That morning, for meals still missing something.</small></label><span class="row-ctl"><input type="time" id="st-mtime" value="${esc(s.missing_alert_time || "08:00")}" aria-label="Morning check time" ${s.missing_alert_morning ? "" : "disabled"}><label class="toggle"><input type="checkbox" id="st-mmo" ${s.missing_alert_morning ? "checked" : ""}><span></span></label></span></div>` : ""}
         <div class="field"><label>Plan ahead<small class="lh">How many days the Plan board shows and keeps filled.</small></label><select id="st-hz">${[7, 14, 21, 28].map((v) => `<option value="${v}" ${(+s.plan_horizon_days || 14) === v ? "selected" : ""}>${v} days</option>`).join("")}</select></div>
         <div class="field"><label>Remind me before the plan runs out<small class="lh">A message when only this many planned days are left.</small></label><select id="st-rem">${[[0, "Off"], [1, "1 day"], [2, "2 days"], [3, "3 days"], [5, "5 days"], [7, "7 days"]].map(([v, l]) => `<option value="${v}" ${(s.plan_reminder_days ?? 3) === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       </div>
@@ -2003,6 +2006,10 @@ async function openSettings() {
     $("#st-hz").onchange = async (e) => { await save({ plan_horizon_days: +e.target.value }); if (state.tab === "meals") replan(); };
     $("#st-rem").onchange = (e) => save({ plan_reminder_days: +e.target.value });
     $$("[data-eat]").forEach((i) => (i.onchange = () => { const et = { ...(s.eat_times || {}) }; if (i.value) et[i.dataset.eat] = i.value; else delete et[i.dataset.eat]; save({ eat_times: et }); }));
+    const needCh = (on) => { if (on && !anyChannel()) toast("Set up Notifications so alerts can reach you", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg)); };
+    $("#st-mdb") && ($("#st-mdb").onchange = (e) => { save({ missing_alert_daybefore: e.target.checked }); needCh(e.target.checked); });
+    $("#st-mmo") && ($("#st-mmo").onchange = (e) => { save({ missing_alert_morning: e.target.checked }); $("#st-mtime").disabled = !e.target.checked; needCh(e.target.checked); });
+    $("#st-mtime") && ($("#st-mtime").onchange = (e) => { if (/^\d\d:\d\d$/.test(e.target.value)) save({ missing_alert_time: e.target.value }); });
     $("#st-startrem").onchange = (e) => { save({ start_reminder: e.target.checked }); if (e.target.checked && !anyChannel()) toast("Set up Notifications so reminders can reach you", "Set up", () => openSetupSection("notify", "Notifications", reloadCfg)); };
     $("#st-stores").onclick = () => storesManager(draw);
     $("#st-account").onclick = () => accountView(draw);

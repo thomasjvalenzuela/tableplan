@@ -1,5 +1,13 @@
 [
  {
+  "id": "missing-alerts",
+  "date": "2026-11-25",
+  "icon": "cart",
+  "color": "orange",
+  "title": "Heads-up when a meal is missing something",
+  "text": "Home now shows up to two of today's and tomorrow's meals that are still missing ingredients, counted from what's really set aside for each meal (food reserved for another meal, expired food and unknown scans don't count). Turn on Settings → Day-before heads-up and Morning check to get a message 24 hours before you start cooking and on the morning itself."
+ },
+ {
   "id": "pan-sizes",
   "date": "2026-11-24",
   "icon": "box",

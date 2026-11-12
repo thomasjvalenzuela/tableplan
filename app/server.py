@@ -138,7 +138,10 @@ DEFAULT_SETTINGS = {
                 "Granulated sugar", "All-purpose flour", "Baking soda", "Baking powder"],   # "always have": never on the list
     "budget": {"period": "week", "amount": 0, "week_start": "mon", "stores": {}, "timezone": "", "plan_aware": True},
     "price_ai": False,
-    "pans": [],                       # "Pans I have": [{kind, w, h, d, cups, quarts}] (used to suggest a pan when scaling)                # look up missing prices with AI web search (monthly per food, within the AI budget)
+    "pans": [],
+    "missing_alert_daybefore": False, # message the day before when a planned meal is missing ingredients
+    "missing_alert_morning": False,   # ...and that morning
+    "missing_alert_time": "08:00",                       # "Pans I have": [{kind, w, h, d, cups, quarts}] (used to suggest a pan when scaling)                # look up missing prices with AI web search (monthly per food, within the AI budget)
     "categories": ["Main dish", "Side dish", "Soup", "Salad", "Appetizer", "Dessert", "Breakfast", "Snack", "Sauce",
                    "Drink"],          # recipe categories, in display order
 }
@@ -796,7 +799,16 @@ SETTINGS_VALIDATORS = {
     "budget": lambda v: _v_budget(v),
     "price_ai": _v_bool,
     "pans": lambda v: _v_pans(v),
+    "missing_alert_daybefore": _v_bool,
+    "missing_alert_morning": _v_bool,
+    "missing_alert_time": lambda v: _v_hhmm(v),
 }
+
+
+def _v_hhmm(v):
+    if not isinstance(v, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+        raise ValueError("must be a time like 08:00")
+    return v
 
 
 def _v_pans(v):
@@ -1908,7 +1920,8 @@ from native import prices as n_prices
 from native import checkin as n_checkin
 from native import imgmeta as n_imgmeta
 from native import ideas as n_ideas
-from native import pans as n_pans  # noqa: E402
+from native import pans as n_pans
+from native import alerts as n_alerts  # noqa: E402
 from native import catalog as n_catalog  # noqa: E402
 
 AISLES = [
@@ -7955,7 +7968,7 @@ def sync_plan_list(c, now=None):
     eids = {str(e["id"]) for e in entries}
     # ---- pantry stock (active, not expired), soonest-expiring first
     stock, free = {}, {}
-    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND (expires_on IS NULL OR expires_on>=?) "
+    for r in c.execute("SELECT * FROM pantry_items WHERE status='active' AND COALESCE(review,0)=0 AND (expires_on IS NULL OR expires_on>=?) "
                        "ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END, expires_on, id", (start,)):
         if r["qty"] is not None and r["qty"] <= 0:
             continue
@@ -8166,7 +8179,15 @@ def enrich_plan(entries):
         pool = {r["id"]: r for r in recipe_pool()}
     except ApiError:
         pool = {}
-    counts = missing_counts()
+    miss = {}
+    if NATIVE:
+        ds = [parse_date(e.get("date")) for e in entries if parse_date(e.get("date"))]
+        if ds:
+            try:
+                miss = planned_missing(min(ds), max(ds))
+            except Exception as ex:   # readiness is a hint; never break the plan view over it
+                log("missing check skipped:", ex)
+    counts = {} if NATIVE else missing_counts()
     eat_times = get_settings().get("eat_times") or {}
     with db() as c:
         own = {r["entry_id"]: r["eat_at"] for r in c.execute("SELECT * FROM plan_eat_at")}
@@ -8177,7 +8198,12 @@ def enrich_plan(entries):
             r["minutes"] = p.get("minutes")
             r["eta"] = p.get("eta")
             r.setdefault("image_v", "")
-        e["missing"] = counts.get(str(e.get("id")), 0) if r else 0
+        if NATIVE:
+            m = miss.get(str(e.get("id"))) or []
+            e["missing"] = len(m) if r else 0
+            e["missing_items"] = [x["text"] for x in m][:8] if r else []
+        else:
+            e["missing"] = counts.get(str(e.get("id")), 0) if r else 0
         e["eat_at"] = own.get(str(e.get("id"))) or eat_times.get(e.get("entry_type"))
         e["eat_at_custom"] = str(e.get("id")) in own
         mins = ((r or {}).get("eta") or {}).get("shown") or (r or {}).get("minutes")
@@ -10796,6 +10822,125 @@ def notify_update():
         log("update notice not sent:", e.message)
 
 
+# ============================================================ missing-ingredient alerts (day before, same morning)
+
+def _checked_for_entries(c, lid):
+    """What bought / "have" list lines already covered, per planned meal: {entry id: {food key: [(qty, unit)]}}."""
+    out = {}
+    for r in c.execute("SELECT * FROM shopping_items WHERE list_id=? AND checked=1", (lid,)).fetchall():
+        for eid, v in _entry_part(_contrib_map(r)).items():
+            out.setdefault(str(eid), {}).setdefault(_row_key(r), []).append(((v or {}).get("qty"), r["unit"] or ""))
+    return out
+
+
+def meal_missing(c, e, skeys, checked=None, rec=None):
+    """What a planned meal still lacks, from the allocation ledger: inventory set aside for it (other meals' reservations
+    are theirs; expired items and unreviewed scans are never allocated) plus what was bought or marked "have" for it.
+    "Always have" foods count as present. -> [{food, text, key}]"""
+    rec = rec or n_recipes.get(c, e["recipe_id"])
+    if not rec:
+        return []
+    got = {}
+    for a in c.execute("SELECT food_key, qty, unit FROM allocations WHERE plan_entry_id=?", (e["id"],)):
+        got.setdefault(a["food_key"], []).append((a["qty"], a["unit"] or ""))
+    if checked is None:
+        checked = _checked_for_entries(c, n_lists.single_list(c))
+    for k, v in (checked.get(str(e["id"])) or {}).items():
+        got.setdefault(k, []).extend(v)
+    groups = {}
+    for n in _recipe_needs(rec, e["scale"] or 1, skeys, c, create=False):
+        groups.setdefault(n["key"], []).append(n)
+    out = []
+    for k, ns in groups.items():
+        have = got.get(k) or []
+        first = ns[0]
+        if not have:
+            out.append({"food": first["food"] or first["line"], "text": _make_need_text(first), "key": k})
+            continue
+        if any(n["qty"] is None for n in ns) or any(q is None for q, _ in have):
+            continue
+        need = sum(n_units.convert(n["qty"], n["unit"], first["unit"]) or 0 for n in ns)
+        hv = sum(n_units.convert(q, u, first["unit"]) or 0 for q, u in have)
+        if hv + 1e-6 < need:
+            out.append({"food": first["food"], "text": _make_need_text({**first, "qty": need - hv}), "key": k, "short": True})
+    return out
+
+
+def planned_missing(start, end, c=None):
+    """{entry id: [missing]} for planned, uncooked meals with a recipe between start and end."""
+    def run(c):
+        skeys = staple_keys(c)
+        checked = _checked_for_entries(c, n_lists.single_list(c))
+        rows = c.execute("SELECT * FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL AND cooked_at IS NULL "
+                         "AND skipped_at IS NULL", (iso(start), iso(end))).fetchall()
+        return {str(e["id"]): meal_missing(c, e, skeys, checked) for e in rows}
+    if c is not None:
+        return run(c)
+    with db() as c2:
+        return run(c2)
+
+
+def _local_now():
+    """The household's wall-clock time (Settings → Budget time zone, else the server's TZ)."""
+    tz = _household_tz()
+    return datetime.now(timezone.utc).astimezone(tz).replace(tzinfo=None) if tz else datetime.now()
+
+
+def notify_missing(now=None):
+    """Day-before heads-up and morning check for planned meals still missing something; once per meal per window."""
+    if not NATIVE:
+        return []
+    s = get_settings()
+    day_before, morning = bool(s.get("missing_alert_daybefore")), bool(s.get("missing_alert_morning"))
+    if not (day_before or morning) or not any(channels_ready().values()):
+        return []
+    now = now or _local_now()
+    eat_times = s.get("eat_times") or {}
+    sent = []
+    last = get_internal("missing_sync_at") or ""
+    if not last or (datetime.now() - datetime.fromisoformat(last)).total_seconds() > 3600:
+        with db() as c:
+            sync_plan_list(c)   # the ledger follows what expired or was used since the last change
+        set_internal("missing_sync_at", datetime.now().isoformat(timespec="seconds"))
+    with db() as c:
+        rows = c.execute("SELECT * FROM meal_plans WHERE date BETWEEN ? AND ? AND recipe_id IS NOT NULL AND cooked_at IS NULL "
+                         "AND skipped_at IS NULL", (iso(now.date()), iso(now.date() + timedelta(days=2)))).fetchall()
+        own = {r["entry_id"]: r["eat_at"] for r in c.execute("SELECT * FROM plan_eat_at")}
+        pool = {}
+        try:
+            pool = {r["id"]: r for r in recipe_pool()}
+        except ApiError:
+            pass
+        skeys = staple_keys(c)
+        checked = _checked_for_entries(c, n_lists.single_list(c))
+        due = []
+        for e in rows:
+            day = parse_date(e["date"])
+            p = pool.get(e["recipe_id"]) or {}
+            eat = own.get(str(e["id"])) or eat_times.get(e["entry_type"])
+            mins = ((p.get("eta") or {}).get("shown")) or p.get("minutes")
+            st = start_by(eat, mins, day) if eat and day else None
+            for w in n_alerts.due_windows(now, day, st, s.get("missing_alert_time") or "08:00", day_before, morning):
+                flag = f"missing_{w}_{e['id']}_{e['date']}"
+                if get_internal(flag):
+                    continue
+                miss = meal_missing(c, e, skeys, checked)
+                if miss:
+                    due.append((w, e, p.get("name") or "", miss, flag))
+    for w, e, name, miss, flag in due:
+        set_internal(flag, True)
+        when = "Tomorrow's" if w == "day_before" else ("Tonight's" if e["entry_type"] == "dinner" else "Today's")
+        items = ", ".join(m["text"] for m in miss[:6]) + ("…" if len(miss) > 6 else "")
+        n = len(miss)
+        deliver({"subject": f"🛒 {when} {name} is missing {n} item{'s' if n != 1 else ''}",
+                 "text": f"{when} {name} is missing {items}. They're on your shopping list; open TablePlan to add or tick them off.",
+                 "html": email_wrap(f"<p>{html.escape(when)} <b>{html.escape(name)}</b> is missing {html.escape(items)}.</p>"
+                                    "<p>They're on your shopping list. Open TablePlan to add anything else or tick them off.</p>"),
+                 "files": []})
+        sent.append((w, e["id"]))
+    return sent
+
+
 def notify_start_cooking(now):
     for e in enrich_plan(get_plans(now.date(), now.date())):
         if e.get("cooked") or e.get("skipped") or not e.get("start_by") or not e.get("recipe"):
@@ -10855,6 +11000,11 @@ def scheduler():
                     notify_start_cooking(now)
                 except ApiError as e:
                     log("start-cooking reminder not sent:", e.message)
+            # Missing ingredients: the day-before heads-up and the morning check
+            try:
+                notify_missing()
+            except ApiError as e:
+                log("missing-ingredient alert not sent:", e.message)
             # "Your meal plan runs out" reminder (once per run-out)
             try:
                 notify_plan_runout(now)
