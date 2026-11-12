@@ -26,6 +26,7 @@ import hmac
 import html
 import io
 import json
+from collections import Counter
 import mimetypes
 import os
 import random
@@ -1054,6 +1055,8 @@ def checklist_auto(user):
     if cfg("openai_key"):
         done.add("ai")
     with db() as c:
+        if _count(c, "SELECT COUNT(*) FROM users") > 0:   # an account exists (even if this device isn't signed in)
+            done.add("account")
         checks = {"recipe": "SELECT COUNT(*) FROM recipes", "plan": "SELECT COUNT(*) FROM meal_plans",
                   "list": "SELECT (SELECT COUNT(*) FROM shopping_items WHERE checked=1) + (SELECT COUNT(*) FROM trips)",
                   "cook": "SELECT COUNT(*) FROM diary",
@@ -1848,6 +1851,65 @@ def expiring_view():
     out["stale"].sort(key=lambda i: -(i["touched_days"] or 0))
     out["counts"] = {k: len(v) for k, v in out.items()}
     return out
+
+
+def pantry_page(pid):
+    """GET /api/pantry/{id}/page: everything the item page shows: the item, what you paid and the best known price,
+    recent purchases of the same food, the recipes that use it, and what Restock would put on the list."""
+    require_native()
+    t = today()
+    pool = recipe_pool()
+    with db() as c:
+        row = pantry_row(c, pid)
+        if not row or row["status"] == "deleted":
+            raise ApiError(404, "That item isn't in your inventory any more.")
+        item = pantry_json(c, row)
+        key, name = _pantry_key(row), clean_food(row["name"])
+        book = PriceBook(c)
+        recs = [r for r in book.records(key, row["name"]) if r.get("unit_price")]
+        p = c.execute("SELECT price, store_name, date, qty, unit FROM purchases WHERE pantry_item_id=? AND price>0 "
+                      "ORDER BY date DESC, id DESC LIMIT 1", (pid,)).fetchone()
+        paid = None
+        if p:
+            up, base = n_prices.unit_price(p["price"], p["qty"] or row["original_qty"], p["unit"] or row["unit"] or "", n_units.convert, n_units.dimension)
+            paid = {"price": n_prices.money(p["price"]), "store": p["store_name"] or "", "date": p["date"], "unit_price": up, "base": base}
+        fresh = [r for r in recs if not n_prices.is_stale(r, t)] or recs
+        base = (paid or {}).get("base") or (Counter(r["base"] for r in fresh).most_common(1)[0][0] if fresh else None)
+        cands = [r for r in fresh if r["base"] == base]
+        best = None
+        if cands:
+            b = min(cands, key=lambda r: r["unit_price"])
+            best = {"price": n_prices.money(b["price"]), "qty": b["qty"], "unit": b["unit"], "store": b["store"],
+                    "source": n_prices.LABEL.get(b["source"], b["source"]), "approx": n_prices.approx(b, t), "date": b["observed_on"],
+                    "cheaper": bool(paid and paid["unit_price"] and b["unit_price"] < paid["unit_price"] * 0.97)}
+        fid = row["food_id"]
+        hist = [dict(h) for h in c.execute(
+            "SELECT date, store_name AS store, price, qty, unit, name FROM purchases WHERE " + ("food_id=?" if fid is not None else "lower(name)=lower(?)")
+            + " ORDER BY date DESC, id DESC LIMIT 8", (fid if fid is not None else row["name"],))]
+        if not hist:   # no receipts yet: the times it was stocked
+            hist = [{"date": h["purchased_on"], "store": "", "price": None, "qty": None, "unit": "", "name": h["name"],
+                     "finished": h["finished_on"], "status": h["status"]}
+                    for h in c.execute("SELECT * FROM pantry_items WHERE id<>? AND status<>'deleted' AND "
+                                       + ("food_id=?" if fid is not None else "lower(name)=lower(?)") + " ORDER BY purchased_on DESC LIMIT 6",
+                                       (pid, fid if fid is not None else row["name"]))]
+        pref = c.execute("SELECT * FROM food_pref WHERE food_id=?", (fid,)).fetchone() if fid is not None else None
+        store = n_lists.get_store(c, pref["store_id"]) if pref and pref["store_id"] else None
+        f = n_foods.get(c, fid) if fid is not None else None
+        restock = {"text": (f or {}).get("name") or name or row["name"], "product": (pref["product"] if pref else "") or row["product"] or "",
+                   "size": (pref["size"] if pref else "") or row["quantity_text"] or "", "store": store["name"] if store else ""}
+        stock = _make_stock(c, t, pid)
+        skeys = staple_keys(c)
+        uses = []
+        for r in pool:
+            rec = n_recipes.get(c, r["id"])
+            if not rec:
+                continue
+            chk = recipe_check(c, rec, stock, skeys, t)
+            if pid in chk["uses"]:
+                uses.append({"slug": r["slug"], "name": r["name"], "has_image": r["has_image"], "image_v": r["image_v"], "id": r["id"],
+                             "minutes": r.get("eta_min") or r.get("minutes"), "missing_n": len(chk["missing"])})
+        uses.sort(key=lambda x: (x["missing_n"], x["name"].lower()))
+    return {"item": item, "paid": paid, "best": best, "history": hist, "recipes": uses[:12], "restock": restock}
 
 
 def expiring_items(c, window):
@@ -11978,6 +12040,9 @@ class Handler(BaseHTTPRequestHandler):
         if m == "POST" and mm:
             pid = int(mm.group(1))
             return self.send(200, pantry_photo_restore(pid) if mm.group(2) else pantry_photo(pid, self.body()))
+        mm = re.fullmatch(r"/api/pantry/(\d{1,12})/page", path)
+        if m == "GET" and mm:
+            return self.send(200, pantry_page(int(mm.group(1))))
         mm = re.fullmatch(r"/api/pantry/(\d{1,12})/(details|relookup|merge)", path)
         if m == "POST" and mm:
             require_native()

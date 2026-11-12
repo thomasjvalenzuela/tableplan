@@ -1822,3 +1822,49 @@ kbd{display:inline-block;min-width:22px;padding:2px 7px;border-radius:6px;border
   .miss-row .miss-main{min-height:44px}
 }
 @media (pointer:coarse){button.mp{position:relative}button.mp::after{content:"";position:absolute;inset:-5px 0}}
+/* Home "Tonight": coloured band only in themes that have one (Blossom, Forest); Mono and Midnight get no band,
+   like the recipe hero, so the card is one surface in light and dark */
+.tn-band h2{color:var(--on-band)}
+.tn-band span{color:color-mix(in srgb,var(--on-band) 72%,transparent)}
+:root:not([data-theme="blossom"]):not([data-theme="forest"]) .tn-band{background:none;color:var(--text)}
+:root:not([data-theme="blossom"]):not([data-theme="forest"]) .tn-band h2{color:var(--title)}
+:root:not([data-theme="blossom"]):not([data-theme="forest"]) .tn-band span{color:var(--sub)}
+:root:not([data-theme="blossom"]):not([data-theme="forest"]) .tn-band{padding-bottom:12px}
+:root:not([data-theme="blossom"]):not([data-theme="forest"]) .tn-plate{margin-top:4px}
+
+/* Inventory item page (#item/{id}) */
+.ip{display:flex;flex-direction:column;gap:var(--s3)}
+.ip-hero{display:flex;gap:var(--s5);align-items:center;margin-top:var(--s1)}
+.ip-hero .ip-pic,.ip-hero .ip-pic.has-img{width:min(42vw,220px);height:min(42vw,220px);border-radius:var(--r-lg);font-size:min(20vw,96px)}
+.ip-head{flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--s2)}
+.ip-title{margin:0;overflow-wrap:anywhere}
+.ip-tags{display:flex;flex-wrap:wrap;gap:6px}
+.ip-tags .pill{font-size:13px}
+@media (max-width:520px){.ip-hero{flex-direction:column;align-items:stretch;text-align:left}.ip-hero .ip-pic,.ip-hero .ip-pic.has-img{width:100%;height:auto;aspect-ratio:4/3;max-height:300px}}
+.ip-acts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s2)}
+.ip-act{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 4px;border-radius:var(--r-md);background:var(--card);box-shadow:var(--shadow);font-size:14px;font-weight:600;color:var(--text);min-height:72px}
+.ip-act svg{width:22px;height:22px}
+#ip-spoil{color:var(--bad-fg)}
+.ip .home-card{margin:0}
+.ip .kv{padding:0}
+.ip-fill .hc-h b{font-size:15px}
+.ip-fill.flash{animation:ip-flash .9s ease}
+@keyframes ip-flash{30%{box-shadow:0 0 0 3px var(--accent)}}
+@media (prefers-reduced-motion:reduce){.ip-fill.flash{animation:none;box-shadow:0 0 0 3px var(--accent)}}
+.ip-price .kv{grid-template-columns:repeat(2,1fr)}
+.ip-price .kv div{display:flex;flex-direction:column;gap:2px}
+.ip-hist{display:flex;flex-direction:column}
+.ip-h{display:flex;gap:var(--s3);padding:10px 0;border-top:.5px solid var(--sep);font-size:14px;align-items:baseline}
+.ip-h:first-child{border-top:0}
+.ip-h>span:first-child{width:56px;flex:none;color:var(--sub)}
+.ip-h .grow{flex:1;min-width:0}
+.ip-recs{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:var(--s2)}
+.ip-rec{display:flex;align-items:center;gap:var(--s3);padding:8px;border-radius:var(--r-sm);background:var(--fill);text-align:left;color:var(--text);min-height:56px}
+.ip-rec .thumb{width:44px;height:44px;border-radius:var(--r-sm);background:var(--card2) center/cover;display:grid;place-items:center;flex:none}
+.ip-rec .main{display:flex;flex-direction:column;min-width:0}
+.ip-rec .a{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ip-rec .b{font-size:13px;color:var(--sub)}
+.ip-done{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow)}
+.pop button.danger{color:var(--bad-fg)}
+@media (min-width:1024px){body[data-page="item"]{--page-max:var(--read-max)}}
+@media (max-width:520px){.ip-hero .ip-pic:not(.has-img){aspect-ratio:auto;height:160px;font-size:80px}}

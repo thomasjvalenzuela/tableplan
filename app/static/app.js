@@ -255,6 +255,7 @@ function route() {
   if (h.startsWith("make/use/")) { window.scrollTo(0, 0); return renderMake("use_up", h.slice(9)); }
   if (h === "make" || h.startsWith("make/")) { window.scrollTo(0, 0); return renderMake({ use: "use_up", almost: "almost", ideas: "ideas" }[h.slice(5)] || "ready"); }
   if (h === "recipes/ai") { rstate.filter = "ai"; state.tab = "recipes"; renderTabs(); window.scrollTo(0, 0); return renderRecipes(); }
+  if (h.startsWith("item/")) { window.scrollTo(0, 0); return renderItemPage(h.slice(5)); }
   if (h === "inventory/expiring") { window.scrollTo(0, 0); return renderExpiring(); }
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
@@ -1630,7 +1631,7 @@ async function renderPantry() {
   $("#inv-first") && ($("#inv-first").onclick = () => startStockUp(renderPantry));
   $$("#inv-items [data-id]").forEach((b) => (b.onclick = () => {
     const it = items.find((i) => String(i.id) === b.dataset.id);
-    if (!INV.sel) return openPantryItem(it, renderPantry);
+    if (!INV.sel) return openPantryItem(it);
     INV.sel.has(it.id) ? INV.sel.delete(it.id) : INV.sel.add(it.id);
     state.invKeepSel = true; renderPantry();
   }));
@@ -1677,96 +1678,159 @@ const PANTRY_UNITS = [["", "count"], ["tsp", "tsp"], ["tbsp", "tbsp"], ["cup", "
   ["quart", "quart"], ["gallon", "gallon"], ["ml", "ml"], ["l", "l"], ["oz", "oz"], ["lb", "lb"], ["g", "g"], ["kg", "kg"],
   ["piece", "piece"], ["clove", "clove"], ["can", "can"], ["slice", "slice"], ["stick", "stick"], ["jar", "jar"], ["bag", "bag"],
   ["box", "box"], ["package", "package"], ["bottle", "bottle"], ["loaf", "loaf"], ["dozen", "dozen"]];
-function openPantryItem(it, after) {
+// An inventory item opens as its own page (#item/{id}); `after` is kept for callers that refresh themselves.
+function openPantryItem(it) {
   if (!it) return;
-  const act = async (body, msg) => {
-    try { const r = await api("PATCH", `/api/pantry/${enc(it.id)}`, body); if (msg) toast(msg); return r; } catch (e) { fail(e); return null; }
+  location.hash = `item/${encodeURIComponent(it.id)}`;
+}
+const IP = { id: null, d: null };
+const shortD = (iso) => (iso ? fmt(parseISO(iso), { month: "short", day: "numeric" }) : "—");
+async function renderItemPage(id, keepScroll) {
+  state.tab = "pantry"; renderTabs();
+  if (!keepScroll) app.innerHTML = skel("detail");
+  let d;
+  try { d = await api("GET", `/api/pantry/${encodeURIComponent(id)}/page`); }
+  catch (e) {
+    app.innerHTML = `${topbar(`<button class="round-btn left" id="ip-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span>`)}<div class="empty"><div class="em">🥫</div>${esc(e.message)}</div><button class="btn sec empty-act" data-empty-go="pantry">Back to Inventory</button>`;
+    bindTopbar(); $("#ip-back").onclick = () => go("pantry"); return;
+  }
+  if (location.hash !== `#item/${encodeURIComponent(id)}`) return;   // navigated away while loading
+  IP.id = id; IP.d = d;
+  drawItemPage();
+}
+function drawItemPage(done) {
+  const d = IP.d, it = d.item;
+  const srcLabel = { package: "printed date", manual: "set by you", opened: "countdown since opening", frozen: "countdown since freezing" }[it.expiry_source] || "";
+  const place = it.place_label || cap(it.location);
+  const sub = [it.product, it.quantity_text && it.quantity_text !== it.name ? it.quantity_text : ""].filter(Boolean).join(" · ");
+  const pic = `<span class="pi-pic ip-pic ${it.image ? "has-img" : ""}">${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span>${esc(it.emoji || "🥫")}</span>`}${it.image ? fillSliderHtml(it.amount_left, true) : ""}</span>`;
+  const priceCard = d.paid || d.best ? `<section class="home-card ip-price" aria-label="Price"><div class="hc-h"><h2>Price</h2></div><div class="kv">
+      <div><small>You paid</small><b>${d.paid ? esc(money(d.paid.price)) : "—"}</b>${d.paid ? `<span class="muted small">${esc([d.paid.store, shortD(d.paid.date)].filter(Boolean).join(" · "))}</span>` : ""}</div>
+      <div><small>Best price</small><b>${d.best ? esc(money(d.best.price, d.best.approx)) : "—"}</b>${d.best ? `<span class="muted small">${esc([d.best.qty ? `${fmtQty(d.best.qty)} ${d.best.unit}`.trim() : "", d.best.store || d.best.source].filter(Boolean).join(" · "))}</span>` : ""}</div></div>
+      ${d.best && d.best.cheaper ? `<p class="hint" style="margin:8px 0 0">Cheaper at ${esc(d.best.store || d.best.source)} last time we saw it.</p>` : ""}</section>` : "";
+  const hist = (d.history || []).length ? `<section class="home-card" aria-label="Bought before"><div class="hc-h"><h2>Bought before</h2></div><div class="ip-hist">${d.history.map((h) => `<div class="ip-h"><span>${esc(shortD(h.date))}</span><span class="grow">${esc([h.store, h.qty ? `${fmtQty(h.qty)} ${h.unit || ""}`.trim() : "", h.status === "used" ? "used up" : h.status === "tossed" ? "spoiled" : ""].filter(Boolean).join(" · ") || h.name)}</span><b>${h.price ? esc(money(h.price)) : ""}</b></div>`).join("")}</div></section>` : "";
+  const recipes = (d.recipes || []).length ? `<section class="home-card" aria-label="Recipes that use it"><div class="hc-h"><h2>Recipes that use it</h2>${d.recipes.length > 1 ? `<button class="link-btn" id="ip-allr">Use it up ›</button>` : ""}</div><div class="ip-recs">${d.recipes.map((r) => {
+      const img = imgUrl(r);
+      return `<button class="ip-rec" data-slug="${esc(r.slug)}"><span class="thumb" ${img ? bgStyle(img) : ""}>${img ? "" : "🍽️"}</span><span class="main"><span class="a">${esc(r.name)}</span><span class="b">${esc([r.minutes ? fmtDur(r.minutes * 60).trim() : "", r.missing_n ? `missing ${r.missing_n}` : "everything's here"].filter(Boolean).join(" · "))}</span></span></button>`;
+    }).join("")}</div></section>` : "";
+  const doneCard = done ? `<div class="pi-done ip-done"><span class="ci-ic">${ic("check")}</span><b>${esc(it.name)} ${done === "spoiled" ? "marked spoiled" : "finished"}</b><span>${done === "spoiled" ? "Counted as waste in Spending. " : ""}Want it back on the list?</span>
+      <div class="btn-row"><button class="btn sec" id="ip-undo">Undo</button><button class="btn" id="ip-relist">${ic("cart")} Add to list</button></div></div>` : "";
+  app.innerHTML = `${topbar(`<button class="round-btn left" id="ip-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="ip-more" aria-label="More" aria-haspopup="menu">${ic("more")}</button>`)}
+    <div class="ip fade-in">
+      <div class="ip-hero">${pic}
+        <div class="ip-head"><h1 class="title ip-title">${esc(it.name)}</h1>${sub ? `<div class="subtitle">${esc(sub)}</div>` : ""}
+          <div class="ip-tags"><span class="pill none">${esc(place)}</span>${expiryPill(it)}${it.review ? `<button class="pill soon" id="ip-review">Review: add details</button>` : ""}</div>
+          ${c_native() ? `<div class="pi-photo-acts">${it.image ? `<button class="chip-s" id="pi-cut">✂️ Cut out background</button>${it.image_cut ? `<button class="chip-s" id="pi-orig">Use original photo</button>` : ""}` : ""}
+            <label class="chip-s">${ic("camera")} ${it.image ? "New photo" : "Add a photo"}<input type="file" accept="image/*" id="pi-file" hidden></label></div>` : ""}</div></div>
+      ${doneCard}
+      ${done ? "" : `<div class="ip-acts" role="group" aria-label="Actions">
+        <button class="ip-act" id="ip-use">${ic("open")}<span>Used some</span></button><button class="ip-act" id="ip-finish">${ic("check")}<span>Finish</span></button>
+        <button class="ip-act" id="ip-spoil">${ic("trash")}<span>Spoiled</span></button><button class="ip-act" id="ip-restock">${ic("cart")}<span>Restock</span></button></div>`}
+      <section class="home-card ip-fill" id="ip-fill" aria-label="How much is left"><div class="hc-h"><h2>How much is left</h2><b id="pi-lv">${esc(it.qty != null ? it.left_text.replace(/ left$/, "") : fillText(it.amount_left))}</b></div>
+        ${it.image ? `<p class="muted small" style="margin:0">Drag up or down on the photo, or here:</p>` : ""}<div class="pi-hfill">${fillSliderHtml(it.amount_left, false)}</div></section>
+      <section class="home-card" aria-label="Dates"><div class="hc-h"><h2>Dates</h2><button class="link-btn" id="ip-dates">Set dates ›</button></div>
+        <div class="kv"><div><small>Bought</small><b>${esc(shortD(it.purchased_on))}</b></div><div><small>Opened</small><b>${esc(shortD(it.opened_on))}</b></div>
+          ${it.frozen_on ? `<div><small>Frozen</small><b>${esc(shortD(it.frozen_on))}</b></div>` : ""}<div><small>Use by</small><b>${esc(shortD(it.expires_on))}</b></div></div>
+        <p class="muted small" style="margin:8px 0 0">${esc(relExpiry(it))}${srcLabel ? ` · ${esc(srcLabel)}` : ""}${(it.reserved || []).length ? ` · reserved for ${esc(it.reserved.map((r) => `${wkShort(r.date)} (${r.recipe})`).join(", "))}` : ""}</p></section>
+      ${priceCard}${recipes}${hist}
+    </div>`;
+  bindTopbar();
+  bindItemPage(done);
+}
+async function ipAct(body, msg) {
+  try { const r = await api("PATCH", `/api/pantry/${enc(IP.id)}`, body); if (msg) toast(msg); return r; } catch (e) { fail(e); return null; }
+}
+const ipReload = () => renderItemPage(IP.id, true);
+async function ipRestock() {
+  const r = IP.d.restock;
+  try {
+    await api("POST", "/api/list/items", { items: [r.text] });
+    toast(`${r.text} added to your list${r.product || r.store ? ` · ${[r.product, r.store ? `at ${r.store}` : ""].filter(Boolean).join(" ")}` : ""}`, "View", () => go("list"));
+  } catch (e) { fail(e); }
+}
+function bindItemPage(done) {
+  const it = IP.d.item;
+  $("#ip-back").onclick = () => (history.length > 1 ? history.back() : go("pantry"));
+  $("#ip-review") && ($("#ip-review").onclick = () => openItemDetails(it, ipReload));
+  $$(".ip-rec").forEach((b) => (b.onclick = () => openRecipe(b.dataset.slug)));
+  $("#ip-allr") && ($("#ip-allr").onclick = () => { location.hash = `make/use/${encodeURIComponent(it.id)}`; });
+  $("#ip-dates").onclick = () => openItemDates();
+  $("#ip-more").onclick = () => popover($("#ip-more"), `<button data-a="move">${ic("box")} Move</button><button data-a="edit">${ic("edit")} Edit details</button><button data-a="dates">${ic("cal")} Set dates</button><button data-a="del" class="danger">${ic("trash")} Delete</button>`, (el) => {
+    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ move: openItemMove, edit: () => openItemDetails(it, ipReload), dates: openItemDates, del: ipDelete })[b.dataset.a](); }));
+  });
+  if (done) {
+    $("#ip-undo").onclick = async () => { if (await ipAct({ action: "restore" })) { if (IP.prevLeft != null) await ipAct({ action: "fill", left: IP.prevLeft }); ipReload(); } };
+    $("#ip-relist").onclick = ipRestock;
+    return;
+  }
+  // the slider: on the photo (when there is one) and across the card; snaps to Empty, ¼, ½, ¾, Full
+  const sliders = [$(".ip-pic .fs"), $(".pi-hfill .fs")].filter(Boolean);
+  sliders.forEach((fs) => bindFillSlider(fs, it.amount_left, (v) => { const lv = $("#pi-lv"); if (lv) lv.textContent = fillText(v) + (it.full_qty ? ` · ${fmtQty(v * it.full_qty)}${it.unit ? ` ${it.unit}` : ""}` : ""); }, async (v) => {
+    if (Math.abs(v - it.amount_left) < 0.005) return;
+    const prev = it.amount_left;
+    const r = await ipAct(v <= 0.005 ? { action: "use", left: 0 } : { action: "fill", left: v });
+    if (!r) return;
+    IP.prevLeft = prev;
+    if (r.status !== "active") { IP.d.item = { ...it, ...r }; return drawItemPage("finished"); }
+    toast(`${it.name}: ${fillText(r.amount_left).toLowerCase()}`, "Undo", async () => { await ipAct({ action: "fill", left: prev }); ipReload(); });
+    ipReload();
+  }));
+  $("#ip-use").onclick = () => {
+    const card = $("#ip-fill"); card.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    card.classList.remove("flash"); void card.offsetWidth; card.classList.add("flash");
+    setTimeout(() => $(".pi-hfill .fs")?.focus({ preventScroll: true }), 300);
   };
-  const draw = (it) => {
-    const left = Math.round(it.amount_left * 100);
-    const rule = it.rule;
-    const ruleLine = rule ? `${rule.name}` : "No match — set one so opened items get a countdown";
-    const srcLabel = { package: "printed date", manual: "set by you", opened: "countdown since opening", frozen: "countdown since freezing", none: "" }[it.expiry_source] || "";
-    sheetBody().innerHTML = `
-      ${c_native() ? `<div class="pi-photo"><span class="pi-pic ${it.image ? "has-img" : ""}">${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span>${esc(it.emoji || "🥫")}</span>`}${it.image ? fillSliderHtml(it.amount_left, true) : ""}</span>
-        <div class="pi-photo-acts">${it.image ? `<button class="chip-s" id="pi-cut">✂️ Cut out background</button>${it.image_cut ? `<button class="chip-s" id="pi-orig">Use original photo</button>` : ""}` : ""}
-          <label class="chip-s">${ic("camera")} ${it.image ? "New photo" : "Add a photo"}<input type="file" accept="image/*" id="pi-file" hidden></label></div></div>` : ""}
-      ${it.review ? `<button class="nudge" id="pi-details"><span class="ic bg-ink">${ic("scan")}</span><span><b>Add details</b><small>The product databases didn't know barcode ${esc(it.upc || "")}</small></span><span class="chev">${ic("chevR")}</span></button>` : ""}
-      <div style="display:flex;align-items:center;gap:10px;margin:-4px 2px 12px">${expiryPill(it)}<span class="muted">${esc(relExpiry(it))}${srcLabel ? ` · ${esc(srcLabel)}` : ""}</span></div>
-      <div class="group"><div class="kv">
-        <div><small>Bought</small><b>${esc(fmt(parseISO(it.purchased_on), { month: "short", day: "numeric" }))}</b></div>
-        <div><small>Opened</small><b>${it.opened_on ? esc(fmt(parseISO(it.opened_on), { month: "short", day: "numeric" })) : "—"}</b></div>
-        <div><small>Use by</small><b>${it.expires_on ? esc(fmt(parseISO(it.expires_on), { month: "short", day: "numeric" })) : "—"}</b></div>
-      </div></div>
-      ${(it.reserved || []).length ? `<div class="group"><div class="reserve" style="padding-top:12px">${it.reserved.map((r) => `Reserved: <b>${esc(r.qty_text || "some")}</b> for ${esc(wkShort(r.date))} · ${esc(r.recipe)}`).join("<br>")}${it.free_text ? `<br>Free: <b>${esc(it.free_text)}</b>` : ""}</div></div>` : ""}
-      <div class="group-label">How much did you use?</div>
-      <div class="big-actions">
-        <button data-use="0.25">${ic("open")}¼</button><button data-use="0.5">${ic("open")}½</button>
-        <button data-use="0.75">${ic("open")}¾</button><button data-use="1">${ic("check")}All</button>
-      </div>
-      ${it.image && c_native() ? "" : `<div class="pi-hfill">${fillSliderHtml(it.amount_left, false)}</div>`}
-      <div class="group"><div class="amount"><span class="muted">Left</span><b id="pi-lv">${it.qty != null ? esc(it.left_text.replace(/ left$/, "")) : `${left}%`}</b></div>
-        <div class="amount-edit"><span class="muted">Amount</span><input type="number" inputmode="decimal" min="0" step="any" id="pi-qty" placeholder="—" value="${it.qty != null ? esc(+(+it.qty).toFixed(3)) : ""}" aria-label="Amount left">
-          <select id="pi-unit" aria-label="Unit">${PANTRY_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (it.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
-          <button class="pill-btn" id="pi-amt">Save</button></div></div>
-      ${!it.opened_on && it.location !== "freezer" ? `<p class="hint">Using some marks it opened and starts a countdown${rule && (it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge) ? ` (${esc(it.location === "fridge" ? rule.opened_fridge : rule.opened_pantry || rule.opened_fridge)} days)` : ""}.</p>` : ""}
-      <div class="group-label">Stored in</div>
-      <div class="tag-cloud" id="pi-loc" role="radiogroup" aria-label="Stored in">${invPlaces().map(([k, l]) => `<button class="tag ${(it.place || it.location) === k ? "on" : ""}" data-loc="${esc(k)}" role="radio" aria-checked="${(it.place || it.location) === k}">${esc(l)}</button>`).join("")}</div>
-      <div class="group" style="margin-top:12px">
-        <div class="field"><label>Use-by date</label><input type="date" id="pi-date" value="${esc(it.expires_on || "")}"></div>
-        <button class="row" id="pi-rule"><div class="main"><div class="a">Shelf life</div><div class="b">${esc(ruleLine)}</div></div><span class="chev">${ic("chevR")}</span></button>
-      </div>
-      <p class="hint">TablePlan never guesses a date for sealed food. Enter the printed date, or it starts a countdown when you open or freeze it.${it.keeps_hint ? ` ${esc(it.keeps_hint)}.` : ""}</p>
-      <div style="height:14px"></div>
-      <div class="btn-row"><button class="btn red" id="pi-toss">${ic("trash")} Toss</button>${!it.opened_on && it.location !== "freezer" ? `<button class="btn sec" id="pi-open">${ic("open")} Opened</button>` : ""}</div>`;
-    const done = () => { closeSheet(); after && after(); };
-    $$("[data-use]").forEach((b) => (b.onclick = async () => {
-      const used = +b.dataset.use;
-      const newLeft = used >= 1 ? 0 : Math.max(0, +(it.amount_left - used).toFixed(2));
-      const r = await act({ action: "use", left: newLeft });
-      if (!r) return;
-      if (newLeft <= 0 || r.status !== "active") { toast(`${it.name} finished`, "Undo", async () => { await act({ action: "restore" }); after && after(); }); done(); }
-      else { toast(`${Math.round(newLeft * 100)}% left · use by ${r.expires_on ? fmt(parseISO(r.expires_on), { month: "short", day: "numeric" }) : "—"}`); draw(r); after && after(); }
-    }));
-    // the amount-left slider (on the photo, or across the card): snaps to Empty, ¼, ½, ¾ and Full; Undo; 0 offers the list
-    const fs = $(".pi-pic .fs") || $(".pi-hfill .fs");
-    bindFillSlider(fs, it.amount_left, (v) => { const lv = $("#pi-lv"); if (lv) lv.textContent = fillText(v) + (it.full_qty ? ` · ${fmtQty(v * it.full_qty)}${it.unit ? ` ${it.unit}` : ""}` : ""); }, async (v) => {
-      if (Math.abs(v - it.amount_left) < 0.005) return;
-      const prev = it.amount_left;
-      const r = await act(v <= 0.005 ? { action: "use", left: 0 } : { action: "fill", left: v });
-      if (!r) return;
-      const undo = async () => { if (r.status !== "active") await act({ action: "restore" }); const u = await act({ action: "fill", left: prev }); if (u && sheetBody()) draw(u); after && after(); };
-      after && after();
-      if (r.status !== "active") {
-        sheetBody().innerHTML = `<div class="pi-done"><span class="ci-ic">${ic("check")}</span><b>${esc(it.name)} finished</b><span>Want it back on the list?</span>
-          <div class="btn-row"><button class="btn sec" id="pd-undo">Undo</button><button class="btn" id="pd-list">${ic("cart")} Add to list</button></div></div>`;
-        $("#pd-undo").onclick = () => undo();
-        $("#pd-list").onclick = async () => { try { await api("POST", "/api/list/items", { items: [it.name] }); toast(`${it.name} added to your list`, "View", () => { closeSheet(); go("list"); }); closeSheet(); } catch (x) { fail(x); } };
-        return;
-      }
-      toast(`${it.name}: ${fillText(r.amount_left).toLowerCase()}`, "Undo", undo);
-      draw(r);
-    });
-    $("#pi-amt").onclick = async () => {
-      const q = $("#pi-qty").value.trim();
-      const r = await act({ action: "amount", qty: q === "" ? null : q, unit: $("#pi-unit").value }, q === "" ? "Amount cleared" : "Amount saved");
-      if (r) { draw(r); after && after(); }
-    };
-    $$("#pi-loc [data-loc]").forEach((b) => (b.onclick = async () => { const r = await act({ action: "move", location: b.dataset.loc }, `Moved to ${b.textContent}`); if (r) { draw(r); after && after(); } }));
-    $("#pi-date").onchange = async (e) => { const r = await act({ action: "set_date", expires_on: e.target.value }, "Date saved"); if (r) { draw(r); after && after(); } };
-    $("#pi-rule").onclick = () => pickRule(it, async (rule) => { const r = await act({ action: "rule", rule_id: rule ? rule.id : null }, rule ? "Shelf life updated" : null); draw(r || it); after && after(); });
-    $("#pi-toss").onclick = async () => { const r = await act({ action: "toss" }); if (r) { toast(`${it.name} tossed`, "Undo", async () => { await act({ action: "restore" }); after && after(); }); done(); } };
-    $("#pi-details") && ($("#pi-details").onclick = () => { closeSheet(true); openItemDetails(it, after); });
-    const photoDone = (r) => { if (r && r.id) { it = r; draw(r); after && after(); } };
-    $("#pi-cut") && ($("#pi-cut").onclick = () => openCutout(it, (r) => { toast("Background removed"); after && after(); openPantryItem(r, after); }));
-    $("#pi-orig") && ($("#pi-orig").onclick = async () => { try { photoDone(await api("POST", `/api/pantry/${enc(it.id)}/photo/restore`, {})); toast("Original photo back"); } catch (e) { fail(e); } });
-    $("#pi-file") && ($("#pi-file").onchange = async (e) => {
-      const f = e.target.files[0]; if (!f) return;
-      try { photoDone(await api("POST", `/api/pantry/${enc(it.id)}/photo`, { image: await squarePhoto(f, 1024) })); toast("Photo saved"); } catch (x) { fail(x); }
-    });
-    $("#pi-open") && ($("#pi-open").onclick = async () => { const r = await act({ action: "open" }, "Marked opened"); if (r) { draw(r); after && after(); } });
-  };
-  openSheet(it.name, "", { onMount: () => draw(it) });
+  $("#ip-finish").onclick = async () => { IP.prevLeft = it.amount_left; const r = await ipAct({ action: "use", left: 0 }); if (r) { IP.d.item = { ...it, ...r }; drawItemPage("finished"); } };
+  $("#ip-spoil").onclick = async () => { IP.prevLeft = null; const r = await ipAct({ action: "toss" }); if (r) { IP.d.item = { ...it, ...r }; drawItemPage("spoiled"); } };
+  $("#ip-restock").onclick = ipRestock;
+  const photoDone = (r) => { if (r && r.id) ipReload(); };
+  $("#pi-cut") && ($("#pi-cut").onclick = () => openCutout(it, () => { toast("Background removed"); ipReload(); }));
+  $("#pi-orig") && ($("#pi-orig").onclick = async () => { try { photoDone(await api("POST", `/api/pantry/${enc(it.id)}/photo/restore`, {})); toast("Original photo back"); } catch (e) { fail(e); } });
+  $("#pi-file") && ($("#pi-file").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { photoDone(await api("POST", `/api/pantry/${enc(it.id)}/photo`, { image: await squarePhoto(f, 1024) })); toast("Photo saved"); } catch (x) { fail(x); }
+  });
+}
+function openItemMove() {
+  const it = IP.d.item;
+  openSheet("Move to", `<div class="tag-cloud" id="pi-loc" role="radiogroup" aria-label="Stored in">${invPlaces().map(([k, l]) => `<button class="tag ${(it.place || it.location) === k ? "on" : ""}" data-loc="${esc(k)}" role="radio" aria-checked="${(it.place || it.location) === k}">${esc(l)}</button>`).join("")}</div>
+    <p class="hint">Moving to or from the freezer starts the right countdown.</p>`, {
+    onMount() { $$("#pi-loc [data-loc]").forEach((b) => (b.onclick = async () => { const r = await ipAct({ action: "move", location: b.dataset.loc }, `Moved to ${b.textContent}`); closeSheet(); if (r) ipReload(); })); },
+  });
+}
+// Set dates: the printed use-by, opened today, the shelf-life rule behind countdowns, and the known amount
+function openItemDates() {
+  const it = IP.d.item, rule = it.rule;
+  openSheet("Dates and amount", `
+    <div class="group"><div class="field"><label for="pi-date">Use-by date</label><input type="date" id="pi-date" value="${esc(it.expires_on || "")}"></div>
+      ${!it.opened_on && it.location !== "freezer" ? `<button class="row" id="pi-open"><div class="main"><div class="a">Opened today</div><div class="b">Starts the after-opening countdown</div></div></button>` : `<div class="row"><div class="main"><div class="a">Opened</div><div class="b">${esc(shortD(it.opened_on))}</div></div></div>`}
+      ${it.frozen_on ? `<div class="row"><div class="main"><div class="a">Frozen</div><div class="b">${esc(shortD(it.frozen_on))}</div></div></div>` : ""}
+      <button class="row" id="pi-rule"><div class="main"><div class="a">Shelf life</div><div class="b">${esc(rule ? rule.name : "No match: set one so opened items get a countdown")}</div></div><span class="chev">${ic("chevR")}</span></button></div>
+    <div class="group-label">Amount</div>
+    <div class="group"><div class="amount-edit" style="padding-top:12px"><span class="muted">Amount</span><input type="number" inputmode="decimal" min="0" step="any" id="pi-qty" placeholder="—" value="${it.qty != null ? esc(+(+it.qty).toFixed(3)) : ""}" aria-label="Amount left">
+      <select id="pi-unit" aria-label="Unit">${PANTRY_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (it.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+      <button class="pill-btn" id="pi-amt">Save</button></div></div>
+    <p class="hint">TablePlan never guesses a date for sealed food. Enter the printed date, or it starts a countdown when you open or freeze it.${it.keeps_hint ? ` ${esc(it.keeps_hint)}.` : ""}</p>`, {
+    onMount() {
+      $("#pi-date").onchange = async (e) => { if (await ipAct({ action: "set_date", expires_on: e.target.value, source: "package" }, "Date saved")) ipReload(); };
+      $("#pi-open") && ($("#pi-open").onclick = async () => { if (await ipAct({ action: "open" }, "Marked opened")) { closeSheet(); ipReload(); } });
+      $("#pi-rule").onclick = () => pickRule(it, async (r) => { await ipAct({ action: "rule", rule_id: r ? r.id : null }, r ? "Shelf life updated" : null); closeSheet(); ipReload(); });
+      $("#pi-amt").onclick = async () => {
+        const q = $("#pi-qty").value.trim();
+        if (await ipAct({ action: "amount", qty: q === "" ? null : q, unit: $("#pi-unit").value }, q === "" ? "Amount cleared" : "Amount saved")) { closeSheet(); ipReload(); }
+      };
+    },
+  });
+}
+async function ipDelete() {
+  const it = IP.d.item, ids = [it.id];
+  try {
+    await api("POST", "/api/pantry/bulk", { ids, action: "delete" });
+    let undone = false;
+    toast(`Deleted ${it.name}`, "Undo", async () => { undone = true; try { await api("POST", "/api/pantry/bulk", { ids, action: "restore" }); location.hash = `item/${encodeURIComponent(it.id)}`; } catch (x) { fail(x); } });
+    setTimeout(() => { if (!undone) api("POST", "/api/pantry/bulk", { ids, action: "purge" }).catch(() => {}); }, 6500);
+    go("pantry");
+  } catch (e) { fail(e); }
 }
 
 function ruleDesc(r) {

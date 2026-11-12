@@ -1,5 +1,13 @@
 [
  {
+  "id": "item-page",
+  "date": "2026-12-04",
+  "icon": "box",
+  "color": "green",
+  "title": "Every item gets its own page",
+  "text": "Tap anything in Inventory to open its page: a big photo, how much is left (drag the slider), its dates, what you paid and the best price seen, when you bought it before, and the recipes that use it. Up top: Used some, Finish, Spoiled (counted as waste) and Restock (back on the list, with the store you usually buy it at). Move, edit details, set dates or delete (with Undo) are under ⋯."
+ },
+ {
   "id": "ui-polish",
   "date": "2026-12-03",
   "icon": "sparkle",

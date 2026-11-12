@@ -2720,7 +2720,7 @@ function drawExpiring() {
     : `<div class="all-set">${esc(empty[seg])}</div>`);
   $$("#ex-list .ex-row").forEach((row) => {
     const it = items.find((i) => String(i.id) === row.dataset.id); if (!it) return;
-    $("[data-open]", row).onclick = () => openPantryItem(it, () => renderExpiring(true));
+    $("[data-open]", row).onclick = () => openPantryItem(it);
     $$("[data-x]", row).forEach((b) => (b.onclick = () => expAction(it, b.dataset.x, b)));
   });
 }
