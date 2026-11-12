@@ -1,5 +1,13 @@
 [
  {
+  "id": "recipe-ideas",
+  "date": "2026-11-22",
+  "icon": "sparkle",
+  "color": "green",
+  "title": "Recipe ideas from your kitchen",
+  "text": "What can I make? has a new Ideas tab (or tap Cook with what I have): real recipes from TheMealDB, and Spoonacular if you add a key, ranked by what you already have. With AI, Chef's ideas suggests 3 recipes built only from your inventory and basics, checked so they never use more than you have; they're labelled AI-created · not tested. Preview, save (duplicates are caught), plan, add what's missing to the list, or dismiss. Plus: Inventory ⋯ → Export gives a CSV or a copy-paste list, for everything or just what you've selected."
+ },
+ {
   "id": "recipe-photos",
   "date": "2026-11-21",
   "icon": "camera",

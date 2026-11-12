@@ -374,7 +374,7 @@ async function renderRecipe(slug) {
       <button class="round-btn side fav ${rec.favorite ? "on" : ""}" id="rd-fav" aria-label="Favorite" aria-pressed="${!!rec.favorite}">${rec.favorite ? "♥" : "♡"}</button>
     </div>
     <div class="rd-head">
-      <h1>${esc(rec.name)}</h1>
+      <h1>${esc(rec.name)}</h1>${rec.ai_generated ? `<span class="ai-badge" title="Created by AI from your inventory; not a tested recipe">AI-created</span>` : ""}
       ${src ? `<div class="rd-src">${src}</div>` : ""}${rec.name_suggested ? `<div class="rd-src muted small">Name suggested by TablePlan (the page had no title)</div>` : ""}
       <div class="rd-meta">
         ${rec.eta ? `<button class="mp eta-chip" id="rd-eta" aria-label="How long it takes: ${esc(rec.eta.label)}. Show the breakdown">${ic("clock")} ${esc(rec.eta.label)}</button>` : rec.minutes ? `<span class="mp">${ic("clock")} ${esc(rec.minutes)} mins</span>` : ""}
@@ -1728,19 +1728,22 @@ async function renderMake(tab) {
   if (tab) MK.tab = tab;
   app.innerHTML = `${topbar(`<button class="round-btn left" id="mk-back" aria-label="Back">${ic("chevL")}</button><span class="grow"></span><button class="round-btn" id="mk-refresh" aria-label="Refresh">${ic("refresh")}</button>`)}
     <h1 class="title">What can I make?</h1><div class="subtitle" id="mk-sub">Checking your kitchen…</div>
+    <div class="toolbar"><button class="pill-btn ink" id="mk-cook">${ic("sparkle")} Cook with what I have</button></div>
     <div class="seg" id="mk-seg" role="tablist" aria-label="Show"></div><div id="mk-list">${loading()}</div>`;
   bindTopbar();
   $("#mk-back").onclick = () => (history.length > 1 ? history.back() : go("recipes"));
-  $("#mk-refresh").onclick = () => { MK.data = null; renderMake(); };
+  $("#mk-refresh").onclick = () => { MK.data = null; MK.ideas = null; renderMake(); };
+  $("#mk-cook").onclick = () => { MK.tab = "ideas"; history.replaceState(null, "", "#make/ideas"); lastHash = location.hash; if (MK.data) drawMake(); };
   try { MK.data = await api("GET", "/api/make"); } catch (e) { if ($("#mk-list")) $("#mk-list").innerHTML = `<div class="banner">${esc(e.message)}</div>`; return; }
   if (!$("#mk-list")) return;
   drawMake();
 }
 function drawMake() {
-  const d = MK.data, tabs = [["ready", "Make now"], ["almost", "Almost there"], ["use_up", "Use it up"]];
+  const d = MK.data, tabs = [["ready", "Make now"], ["almost", "Almost there"], ["use_up", "Use it up"], ["ideas", "Ideas"]];
   $("#mk-sub").textContent = `${plural(d.recipes, "recipe")} checked against your inventory${d.planned_skipped ? ` · ${d.planned_skipped} already planned left out` : ""}`;
-  $("#mk-seg").innerHTML = tabs.map(([k, l]) => `<button data-t="${k}" class="${MK.tab === k ? "on" : ""}" role="tab" aria-selected="${MK.tab === k}">${esc(l)} ${esc(d[k].length)}</button>`).join("");
-  $$("#mk-seg [data-t]").forEach((b) => (b.onclick = () => { MK.tab = b.dataset.t; history.replaceState(null, "", MK.tab === "ready" ? "#make" : `#make/${MK.tab === "use_up" ? "use" : "almost"}`); lastHash = location.hash; drawMake(); }));
+  $("#mk-seg").innerHTML = tabs.map(([k, l]) => `<button data-t="${k}" class="${MK.tab === k ? "on" : ""}" role="tab" aria-selected="${MK.tab === k}">${esc(l)}${d[k] ? ` ${esc(d[k].length)}` : ""}</button>`).join("");
+  $$("#mk-seg [data-t]").forEach((b) => (b.onclick = () => { MK.tab = b.dataset.t; history.replaceState(null, "", MK.tab === "ready" ? "#make" : `#make/${{ use_up: "use", almost: "almost", ideas: "ideas" }[MK.tab]}`); lastHash = location.hash; drawMake(); }));
+  if (MK.tab === "ideas") return drawIdeas();
   const rows = d[MK.tab];
   let html = "";
   if (MK.tab === "use_up") {
@@ -2117,6 +2120,148 @@ function openPhotoSettings() {
         try { const r = await api("PUT", "/api/photos/config", b); toast(`Saved · ${[r.unsplash && "Unsplash", r.pexels && "Pexels"].filter(Boolean).join(" and ") || "no keys"}`); closeSheet(); } catch (x) { fail(x); }
       };
       $("#pk-clear").onclick = async () => { try { await api("PUT", "/api/photos/config", { unsplash_key: "", pexels_key: "" }); toast("Keys removed"); closeSheet(); } catch (x) { fail(x); } };
+    },
+  });
+}
+
+// ------------------------------------------------------------------ Ideas: recipes from what you have (TheMealDB, Spoonacular, AI, the web)
+function ideaCard(i) {
+  const miss = i.missing || [];
+  return `<div class="mk-card idea" data-idea="${esc(i.id)}"><div class="mk-main as-div">${i.image ? `<span class="mk-img"><img src="${esc(i.image)}" alt="" loading="lazy"></span>` : `<span class="mk-img ph">${ic(i.ai ? "sparkle" : "dish")}</span>`}
+    <span class="mk-txt"><span class="idea-label ${i.ai ? "ai" : ""}">${esc(i.label)}</span><span class="a">${esc(i.title)}</span>
+      <span class="b">${esc([i.minutes ? fmtDur(i.minutes * 60).trim() : "", i.servings ? `serves ${i.servings}` : "", `${i.have_n || 0} of ${i.need_n || 0} at home`].filter(Boolean).join(" · "))}</span>
+      ${i.why ? `<span class="idea-why">${esc(i.why)}</span>` : ""}
+      ${(i.expiring || []).length ? `<span class="mk-uses">Uses ${i.expiring.map(expTag).join("")}</span>` : ""}
+      ${miss.length ? `<span class="mk-miss">Missing ${esc(miss.join(", "))}${i.to_buy && i.to_buy.total ? ` · +${esc(money(i.to_buy.total, i.to_buy.approx))}` : ""}</span>` : `<span class="mk-ok">${ic("check")} Everything's here</span>`}
+      ${i.url && safeUrl(i.url) ? `<a class="idea-src" ${extLink(i.url)}>${esc(hostOf(i.url))} ${ic("ext")}</a>` : ""}</span>
+    <button class="idea-x" data-dismiss aria-label="Not interested in ${esc(i.title)}">${ic("x")}</button></div>
+    <div class="idea-prev" hidden></div>
+    <div class="mk-acts"><button class="pill-btn" data-prev aria-expanded="false">${ic("book")} Preview</button><button class="pill-btn" data-save>${ic("plus")} Save to my recipes</button>
+      <button class="pill-btn" data-plan>${ic("cal")} Plan it</button>${miss.length ? `<button class="pill-btn" data-miss>${ic("cart")} Add missing to list</button>` : ""}</div><div class="mk-res"></div></div>`;
+}
+function bindIdeas(box, list) {
+  $$(".mk-card.idea", box).forEach((el) => {
+    const i = list.find((x) => x.id === el.dataset.idea); if (!i) return;
+    const res = $(".mk-res", el);
+    const save = async (dup) => {
+      if (i.slug) return i;
+      const r = await api("POST", "/api/ideas/save", { id: i.id, ...(dup ? { dup } : {}) });
+      i.slug = r.slug; rstate.list = null; return i;
+    };
+    const saved = () => { $("[data-save]", el).innerHTML = `${ic("check")} Saved · Open`; $("[data-save]", el).onclick = () => openRecipe(i.slug); };
+    const trySave = async (then) => {
+      try { await save(); saved(); then && then(); }
+      catch (x) {
+        if (x.data && x.data.duplicate) return duplicateCard(res, x, (r) => { i.slug = r.slug; saved(); then && then(); });
+        fail(x);
+      }
+    };
+    $("[data-prev]", el).onclick = (e) => {
+      const p = $(".idea-prev", el), open = p.hidden;
+      p.hidden = !open; e.currentTarget.setAttribute("aria-expanded", String(open));
+      if (open && !p.innerHTML) p.innerHTML = `<div class="group-label">Ingredients</div><ul>${i.ingredients.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        <div class="group-label">Steps</div><ol>${i.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>${i.ai ? `<p class="hint">Created by AI from your inventory and not tested. Check amounts and doneness as you cook.</p>` : ""}`;
+    };
+    $("[data-save]", el).onclick = () => trySave(() => toast(`Saved “${i.title}”`, "Open", () => openRecipe(i.slug)));
+    $("[data-plan]", el).onclick = () => trySave(async () => { try { const r = await api("GET", `/api/recipe/${encodeURIComponent(i.slug)}`); planRecipe(r); } catch (x) { fail(x); } });
+    $("[data-miss]", el) && ($("[data-miss]", el).onclick = async (e) => {
+      const b = e.currentTarget; b.disabled = true;
+      try { await api("POST", "/api/list/items", { items: i.missing }); b.innerHTML = `${ic("check")} On your list`; toast(`Added ${plural(i.missing.length, "item")} to your list`, "View", () => go("list")); }
+      catch (x) { b.disabled = false; fail(x); }
+    });
+    $("[data-dismiss]", el).onclick = async () => {
+      try { await api("POST", "/api/ideas/dismiss", { id: i.id }); el.remove(); toast("Won't suggest that for 30 days"); } catch (x) { fail(x); }
+    };
+  });
+}
+async function drawIdeas() {
+  const box = $("#mk-list"), ai = !!state.cfg?.ai_key;
+  box.innerHTML = `<section aria-label="Chef's ideas">${ai ? `<div class="hc-h"><h2>Chef's ideas</h2></div>
+      <form class="group idea-form" id="ia-form" autocomplete="off">
+        <div class="field"><label for="ia-meal">Meal</label><select id="ia-meal">${["dinner", "lunch", "breakfast", "snack", "dessert"].map((m) => `<option value="${m}">${esc(cap(m))}</option>`).join("")}</select></div>
+        <div class="field"><label for="ia-serv">Servings</label><input id="ia-serv" inputmode="numeric" maxlength="2" value="${esc(state.cfg.household?.people || 2)}"></div>
+        <div class="field"><label for="ia-max">Max minutes</label><input id="ia-max" inputmode="numeric" maxlength="3" placeholder="Any"></div>
+        <div class="field"><label for="ia-mood">In the mood for</label><input id="ia-mood" maxlength="200" placeholder="Optional: cosy, spicy, quick…"></div>
+        <div style="padding:10px 14px"><button class="btn" type="submit" id="ia-go">${ic("sparkle")} Get 3 ideas</button></div></form>
+      <div id="ia-out"></div>` : `<p class="hint">Add an OpenAI key (Settings → AI recipe import) for chef's ideas made from exactly what you have.</p>`}</section>
+    <section aria-label="Recipes that fit"><div class="hc-h"><h2>Recipes that fit</h2></div><div id="ix-out">${loading()}</div></section>
+    <section class="home-card mk-web" aria-label="From the web"><div class="hc-h"><h2>From the web</h2></div>
+      <p class="muted small">AI web search for recipes using what's expiring. Every link is opened and checked before it's shown.</p>
+      <div id="mk-web">${ai ? (MK.web ? "" : `<button class="btn sec" id="mk-web-go">${ic("search")} Search the web</button>`) : `<p class="hint">Needs an OpenAI key.</p>`}</div></section>`;
+  if (MK.web) drawWeb(); else $("#mk-web-go") && ($("#mk-web-go").onclick = searchWeb);
+  const showAi = () => { const o = $("#ia-out"); if (!o || !MK.aiIdeas) return; o.innerHTML = MK.aiIdeas.length ? `<div class="mk-cards">${MK.aiIdeas.map(ideaCard).join("")}</div>` : `<p class="muted small">No idea passed the checks this time (each must fit what you have). Try again or change the mood.</p>`; bindIdeas(o, MK.aiIdeas); };
+  showAi();
+  $("#ia-form") && ($("#ia-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $("#ia-go"); btn.disabled = true; btn.textContent = "Thinking…";
+    try {
+      const r = await api("POST", "/api/ideas/ai", { meal: $("#ia-meal").value, servings: +$("#ia-serv").value || undefined, max_minutes: +$("#ia-max").value || undefined, mood: $("#ia-mood").value.trim() });
+      MK.aiIdeas = r.ideas; showAi();
+    } catch (x) { fail(x); }
+    btn.disabled = false; btn.innerHTML = `${ic("sparkle")} Get 3 ideas`;
+  });
+  const out = $("#ix-out");
+  if (!MK.ideas) {
+    try { MK.ideas = await api("GET", "/api/ideas"); } catch (x) { if ($("#ix-out")) $("#ix-out").innerHTML = `<div class="banner">${esc(x.message)}</div>`; return; }
+  }
+  if (!$("#ix-out")) return;
+  const d = MK.ideas;
+  $("#ix-out").innerHTML = d.ideas.length ? `<p class="muted small">Searched for ${esc(d.foods.join(", "))} on TheMealDB${d.sources.spoonacular ? " and Spoonacular" : ""}. Fewest missing first.</p><div class="mk-cards">${d.ideas.map(ideaCard).join("")}</div>`
+    : `<p class="muted small">${d.foods.length ? `Nothing found for ${esc(d.foods.join(", "))}.` : "Add some food to your inventory first."}</p>`;
+  bindIdeas($("#ix-out"), d.ideas);
+  void out;
+}
+// Settings → Recipe ideas: optional keys (TheMealDB supporter, Spoonacular). Keys stay on the server.
+async function openIdeasSettings() {
+  let st = {}; try { st = await api("GET", "/api/ideas/config"); } catch (_) {}
+  openSheet("Recipe ideas", `<p class="hint" style="margin-top:0">TheMealDB works without a key. A TheMealDB supporter key and a free Spoonacular key add more recipes.</p>
+    <form class="group" id="ik-form" autocomplete="off"><div class="field"><label for="ik-md">TheMealDB key</label><input id="ik-md" class="full" type="password" placeholder="${st.mealdb_supporter ? "Saved · leave blank to keep" : "Optional (free test key is used)"}"></div>
+      <div class="field"><label for="ik-sp">Spoonacular key</label><input id="ik-sp" class="full" type="password" placeholder="${st.spoonacular ? "Saved · leave blank to keep" : "Optional"}"></div>
+      <div style="padding:10px 14px" class="btn-row"><button class="btn" type="submit">Save</button><button class="btn sec" type="button" id="ik-clear">Remove keys</button></div></form>
+    ${st.spoon_paused ? `<p class="hint">Spoonacular's daily quota is used up; it resumes tomorrow.</p>` : ""}
+    <p class="hint">Spoonacular's free plan has a small daily quota; TablePlan caches answers and stops for the day when it runs out.</p>`, {
+    onMount() {
+      $("#ik-form").onsubmit = async (e) => {
+        e.preventDefault();
+        const b = {}; if ($("#ik-md").value.trim()) b.mealdb_key = $("#ik-md").value.trim(); if ($("#ik-sp").value.trim()) b.spoonacular_key = $("#ik-sp").value.trim();
+        try { await api("PUT", "/api/ideas/config", b); MK.ideas = null; toast("Saved"); closeSheet(); } catch (x) { fail(x); }
+      };
+      $("#ik-clear").onclick = async () => { try { await api("PUT", "/api/ideas/config", { mealdb_key: "", spoonacular_key: "" }); MK.ideas = null; toast("Keys removed"); closeSheet(); } catch (x) { fail(x); } };
+    },
+  });
+}
+
+// ------------------------------------------------------------------ inventory export: CSV download or copy (columns paste into Sheets/Excel)
+function openExport(ids) {
+  const f = state.pantryFilter || "all", sel = ids && ids.length ? ids : null;
+  openSheet("Export inventory", `<div class="seg" id="ex-scope">${[["all", "All items"], ...(f !== "all" ? [["filter", `${cap(f)} only`]] : []), ...(sel ? [["sel", `Selected (${sel.length})`]] : [])].map(([k, l], n) => `<button data-s="${k}" class="${(sel ? k === "sel" : n === 0) ? "on" : ""}">${esc(l)}</button>`).join("")}</div>
+    <label class="row" style="margin-top:10px"><div class="main"><div class="a">Include finished items</div><div class="b">Used up or tossed</div></div><input type="checkbox" class="switch" id="ex-fin"></label>
+    <div class="btn-row" style="margin-top:14px"><a class="btn" id="ex-dl" download>${ic("file")} Download CSV</a><button class="btn sec" id="ex-copy">${ic("share")} Copy to clipboard</button></div>
+    <p class="hint">The CSV opens in Excel, Numbers or Google Sheets. Copying gives a readable list for messages, and pastes as columns into a spreadsheet.</p>`, {
+    onMount() {
+      let scope = sel ? "sel" : "all";
+      const qs = () => { const p = new URLSearchParams(); if (scope === "filter") p.set("loc", f); if (scope === "sel") p.set("ids", sel.join(",")); if ($("#ex-fin").checked) p.set("finished", "1"); return p.toString(); };
+      const link = () => { $("#ex-dl").href = `/api/pantry/export.csv?${qs()}`; };
+      $$("#ex-scope [data-s]").forEach((b) => (b.onclick = () => { scope = b.dataset.s; $$("#ex-scope [data-s]").forEach((x) => x.classList.toggle("on", x === b)); link(); }));
+      $("#ex-fin").onchange = link; link();
+      $("#ex-copy").onclick = async () => {
+        let d; try { d = await api("GET", `/api/pantry/export?${qs()}`); } catch (x) { return fail(x); }
+        if (!d.rows.length) return toast("Nothing to copy");
+        const byPlace = new Map(); d.rows.forEach((r) => { if (!byPlace.has(r.Place)) byPlace.set(r.Place, []); byPlace.get(r.Place).push(r); });
+        const line = (r) => `• ${[r.Name, r.Amount !== "" ? `${fmtQty(+r.Amount)}${r.Unit ? ` ${r.Unit}` : ""}` : r.Fill !== "100%" ? `${r.Fill} left` : "", r["Use by"] ? `use by ${fmt(parseISO(r["Use by"]), { month: "short", day: "numeric" })}` : ""].filter(Boolean).join(" · ")}`;
+        const text = [...byPlace].map(([p, rs]) => `${p}\n${rs.map(line).join("\n")}`).join("\n\n");
+        const cell = (v) => String(v ?? "").replace(/[\t\r\n]+/g, " ");
+        const tsv = [d.headers.join("\t"), ...d.rows.map((r) => d.headers.map((h) => cell(r[h])).join("\t"))].join("\n");
+        const table = `<table><thead><tr>${d.headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${d.rows.map((r) => `<tr>${d.headers.map((h) => `<td>${esc(cell(r[h]))}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+        try {
+          if (window.ClipboardItem && navigator.clipboard?.write) {
+            await navigator.clipboard.write([new ClipboardItem({ "text/plain": new Blob([text], { type: "text/plain" }), "text/html": new Blob([table], { type: "text/html" }) })]);
+          } else await navigator.clipboard.writeText(text + "\n\n" + tsv);
+          toast(`Copied ${plural(d.rows.length, "item")}`);
+        } catch (_) {
+          try { await navigator.clipboard.writeText(tsv); toast(`Copied ${plural(d.rows.length, "item")} as columns`); } catch (x) { fail(new Error("Copying isn't allowed here. Use Download CSV instead.")); }
+        }
+      };
     },
   });
 }

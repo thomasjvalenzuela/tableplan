@@ -218,7 +218,7 @@ function route() {
   if (h.startsWith("edit/")) return renderRecipeEditor(h.slice(5));
   if (h === "diary") { window.scrollTo(0, 0); return renderDiary(); }
   if (h === "spending") { window.scrollTo(0, 0); return renderSpending(); }
-  if (h === "make" || h.startsWith("make/")) { window.scrollTo(0, 0); return renderMake({ use: "use_up", almost: "almost" }[h.slice(5)] || "ready"); }
+  if (h === "make" || h.startsWith("make/")) { window.scrollTo(0, 0); return renderMake({ use: "use_up", almost: "almost", ideas: "ideas" }[h.slice(5)] || "ready"); }
   go(TABS.some((t) => t[0] === h) ? h : "home");
 }
 const upd = () => !!state.update?.update_available;
@@ -1423,8 +1423,8 @@ async function renderPantry() {
   bindTopbar();
   $("#p-select").onclick = () => { INV.sel = INV.sel ? null : new Set(); state.invKeepSel = true; renderPantry(); };
   $("#p-scan").onclick = () => startStockUp(renderPantry);
-  $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Kitchen check-in</button><button data-a="share">${ic("share")} Share or print</button>`, (el) => {
-    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ trip: () => openTrip(renderPantry), ci: () => openCheckin(renderPantry), share: () => openShare("pantry", {}) })[b.dataset.a](); }));
+  $("#p-more").onclick = () => popover($("#p-more"), `<button data-a="trip">${ic("cart")} Log a grocery trip</button><button data-a="ci">${ic("check")} Kitchen check-in</button><button data-a="share">${ic("share")} Share or print</button>${c_native() ? `<button data-a="export">${ic("file")} Export</button>` : ""}`, (el) => {
+    $$("[data-a]", el).forEach((b) => (b.onclick = () => { closePop(); ({ trip: () => openTrip(renderPantry), ci: () => openCheckin(renderPantry), share: () => openShare("pantry", {}), export: () => openExport() })[b.dataset.a](); }));
   });
   $("#btn-addp").onclick = () => openAddPantry(renderPantry);
   $$("#inv-view [data-v]").forEach((b) => (b.onclick = () => { try { localStorage.setItem("tp.invView", b.dataset.v); } catch (_) {} renderPantry(); }));
@@ -1484,9 +1484,11 @@ function drawInvBar(shown) {
       <span class="ib-group"><span class="muted small">Move to</span>${invPlaces().map(([k, l]) => `<button class="chip-s" data-mv="${esc(k)}" ${n ? "" : "disabled"}>${esc(l)}</button>`).join("")}</span>
       <button class="chip-s" id="ib-used" ${n ? "" : "disabled"}>Used up</button>
       <label class="chip-s ib-date">Exp <input type="date" id="ib-date" ${n ? "" : "disabled"} aria-label="Use-by date for the selected items"></label>
+      ${c_native() ? `<button class="chip-s" id="ib-exp" ${n ? "" : "disabled"}>Export selected</button>` : ""}
       <button class="chip-s danger" id="ib-del" ${n ? "" : "disabled"}>Delete</button></div>`;
   $("#ib-all").onclick = () => { shown.forEach((i) => INV.sel.add(i.id)); state.invKeepSel = true; renderPantry(); };
   $("#ib-done").onclick = () => { INV.sel = null; renderPantry(); };
+  $("#ib-exp") && ($("#ib-exp").onclick = () => openExport(ids));
   $$("[data-mv]", bar).forEach((b) => (b.onclick = () => bulk({ action: "move", location: b.dataset.mv }, `Moved ${plural(n, "item")} to ${b.textContent}`)));
   $("#ib-used").onclick = () => bulk({ action: "used" }, `${plural(n, "item")} marked used up`);
   $("#ib-date").onchange = (e) => e.target.value && bulk({ action: "set_date", expires_on: e.target.value, source: "package" }, `Use-by date set for ${plural(n, "item")}`);
@@ -1893,6 +1895,7 @@ async function openSettings() {
       </div>
       ${c.backend === "native" ? `<div class="group"><button class="row" id="st-prices"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("cart")}</span><div class="main"><div class="a">Prices & budget</div><div class="b">${s.budget && s.budget.amount ? `$${esc(s.budget.amount)} a ${esc(s.budget.period)} · spending, price sources` : "Grocery budget, spending and where prices come from"}</div></div><span class="chev">${ic("chevR")}</span></button></div>` : ""}
       ${c.backend === "native" ? `<div class="group"><button class="row" id="st-photos"><span class="ic bg-orange" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("camera")}</span><div class="main"><div class="a">Recipe photos</div><div class="b">Optional Unsplash and Pexels keys for more photo choices</div></div><span class="chev">${ic("chevR")}</span></button></div>` : ""}
+      ${c.backend === "native" ? `<div class="group"><button class="row" id="st-ideas"><span class="ic bg-green" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("sparkle")}</span><div class="main"><div class="a">Recipe ideas</div><div class="b">TheMealDB and Spoonacular keys (optional)</div></div><span class="chev">${ic("chevR")}</span></button></div>` : ""}
       <div class="group"><button class="row" id="st-ai"><span class="ic bg-purple" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff">${ic("dollar")}</span><div class="main"><div class="a">AI spending</div><div class="b">${s.ai_budget ? `Budget $${esc(s.ai_budget)}/month` : "See what OpenAI costs you"}</div></div><span class="chev">${ic("chevR")}</span></button></div>
       <div class="group-label">Import</div>
       <div class="group"><button class="row" id="st-share"><span class="ic bg-pink" style="width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;background:#E1306C">${ic("share")}</span><div class="main"><div class="a">Share to TablePlan from your phone</div><div class="b">Send Instagram, TikTok and recipe links straight in</div></div><span class="chev">${ic("chevR")}</span></button></div>
@@ -1967,6 +1970,7 @@ async function openSettings() {
     $("#st-bctest").onclick = () => openBarcodeTest();
     $("#st-prices") && ($("#st-prices").onclick = () => openPricesSettings());
     $("#st-photos") && ($("#st-photos").onclick = () => openPhotoSettings());
+    $("#st-ideas") && ($("#st-ideas").onclick = () => openIdeasSettings());
   };
   openSheet("Settings", loading(), { onMount: draw });
 }
