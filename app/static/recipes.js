@@ -2592,3 +2592,39 @@ function openCutout(it, onSaved) {
     },
   });
 }
+
+// ------------------------------------------------------------------ amount-left slider: drag, snaps to Empty/¼/½/¾/Full
+const FILL_SNAPS = [0, 0.25, 0.5, 0.75, 1];
+const fillText = (v) => (v >= 0.995 ? "Full" : v <= 0.005 ? "Empty" : { 0.25: "¼ left", 0.5: "½ left", 0.75: "¾ left" }[v] || `${Math.round(v * 100)}% left`);
+function fillSliderHtml(v, vertical) {
+  return `<div class="fs ${vertical ? "v" : "h"}" role="slider" tabindex="0" aria-label="How much is left" aria-valuemin="0" aria-valuemax="100"
+      aria-valuenow="${Math.round(v * 100)}" aria-valuetext="${esc(fillText(v))}"><span class="fs-track"><i class="fs-level"></i></span><b class="fs-thumb"></b>
+      ${FILL_SNAPS.slice(1, 4).map((s) => `<span class="fs-tick t${s * 100}" aria-hidden="true"></span>`).join("")}</div>`;
+}
+// el: the .fs element; onMove(v) while dragging; onCommit(v) when let go (keys: after a short pause)
+function bindFillSlider(el, start, onMove, onCommit) {
+  if (!el) return;
+  const vertical = el.classList.contains("v");
+  let v = start, t = 0;
+  const show = () => {
+    const lv = $(".fs-level", el), th = $(".fs-thumb", el), p = `${(v * 100).toFixed(1)}%`;
+    if (vertical) { lv.style.height = p; th.style.bottom = p; } else { lv.style.width = p; th.style.left = p; }
+    el.setAttribute("aria-valuenow", String(Math.round(v * 100))); el.setAttribute("aria-valuetext", fillText(v));
+    onMove && onMove(v);
+  };
+  const snap = (x) => { x = Math.max(0, Math.min(1, x)); const s = FILL_SNAPS.find((k) => Math.abs(k - x) < 0.04); return s != null ? s : Math.round(x * 100) / 100; };
+  const at = (e) => { const r = el.getBoundingClientRect(); return snap(vertical ? 1 - (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width); };
+  let drag = false;
+  el.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });   // not the sheet's swipe-to-close
+  el.onpointerdown = (e) => { drag = true; el.setPointerCapture(e.pointerId); v = at(e); show(); e.preventDefault(); };
+  el.onpointermove = (e) => { if (drag) { v = at(e); show(); } };
+  el.onpointerup = el.onpointercancel = () => { if (!drag) return; drag = false; try { navigator.vibrate?.(10); } catch (_) {} onCommit(v); };
+  el.onkeydown = (e) => {
+    const step = { ArrowUp: 0.05, ArrowRight: 0.05, ArrowDown: -0.05, ArrowLeft: -0.05, PageUp: 0.25, PageDown: -0.25 }[e.key];
+    if (step == null && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    v = e.key === "Home" ? 0 : e.key === "End" ? 1 : snap(v + step);
+    show(); clearTimeout(t); t = setTimeout(() => onCommit(v), 600);
+  };
+  show();
+}

@@ -1608,7 +1608,7 @@ function openPantryItem(it, after) {
     const ruleLine = rule ? `${rule.name}` : "No match — set one so opened items get a countdown";
     const srcLabel = { package: "printed date", manual: "set by you", opened: "countdown since opening", frozen: "countdown since freezing", none: "" }[it.expiry_source] || "";
     sheetBody().innerHTML = `
-      ${c_native() ? `<div class="pi-photo"><span class="pi-pic">${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span>${esc(it.emoji || "🥫")}</span>`}</span>
+      ${c_native() ? `<div class="pi-photo"><span class="pi-pic ${it.image ? "has-img" : ""}">${it.image ? `<img src="${esc(it.image)}" alt="">` : `<span>${esc(it.emoji || "🥫")}</span>`}${it.image ? fillSliderHtml(it.amount_left, true) : ""}</span>
         <div class="pi-photo-acts">${it.image ? `<button class="chip-s" id="pi-cut">✂️ Cut out background</button>${it.image_cut ? `<button class="chip-s" id="pi-orig">Use original photo</button>` : ""}` : ""}
           <label class="chip-s">${ic("camera")} ${it.image ? "New photo" : "Add a photo"}<input type="file" accept="image/*" id="pi-file" hidden></label></div></div>` : ""}
       ${it.review ? `<button class="nudge" id="pi-details"><span class="ic bg-ink">${ic("scan")}</span><span><b>Add details</b><small>The product databases didn't know barcode ${esc(it.upc || "")}</small></span><span class="chev">${ic("chevR")}</span></button>` : ""}
@@ -1624,7 +1624,8 @@ function openPantryItem(it, after) {
         <button data-use="0.25">${ic("open")}¼</button><button data-use="0.5">${ic("open")}½</button>
         <button data-use="0.75">${ic("open")}¾</button><button data-use="1">${ic("check")}All</button>
       </div>
-      <div class="group"><div class="amount"><span class="muted">Left</span><input type="range" min="0" max="100" step="5" value="${left}" id="pi-left"><b id="pi-lv">${it.qty != null ? esc(it.left_text.replace(/ left$/, "")) : `${left}%`}</b></div>
+      ${it.image && c_native() ? "" : `<div class="pi-hfill">${fillSliderHtml(it.amount_left, false)}</div>`}
+      <div class="group"><div class="amount"><span class="muted">Left</span><b id="pi-lv">${it.qty != null ? esc(it.left_text.replace(/ left$/, "")) : `${left}%`}</b></div>
         <div class="amount-edit"><span class="muted">Amount</span><input type="number" inputmode="decimal" min="0" step="any" id="pi-qty" placeholder="—" value="${it.qty != null ? esc(+(+it.qty).toFixed(3)) : ""}" aria-label="Amount left">
           <select id="pi-unit" aria-label="Unit">${PANTRY_UNITS.map(([v, l]) => `<option value="${esc(v)}" ${v === (it.unit || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
           <button class="pill-btn" id="pi-amt">Save</button></div></div>
@@ -1647,9 +1648,25 @@ function openPantryItem(it, after) {
       if (newLeft <= 0 || r.status !== "active") { toast(`${it.name} finished`, "Undo", async () => { await act({ action: "restore" }); after && after(); }); done(); }
       else { toast(`${Math.round(newLeft * 100)}% left · use by ${r.expires_on ? fmt(parseISO(r.expires_on), { month: "short", day: "numeric" }) : "—"}`); draw(r); after && after(); }
     }));
-    const slider = $("#pi-left");
-    slider.oninput = () => ($("#pi-lv").textContent = slider.value + "%");
-    slider.onchange = async () => { const r = await act({ action: "use", left: slider.value / 100 }); if (r) { if (r.status !== "active") return done(); draw(r); after && after(); } };
+    // the amount-left slider (on the photo, or across the card): snaps to Empty, ¼, ½, ¾ and Full; Undo; 0 offers the list
+    const fs = $(".pi-pic .fs") || $(".pi-hfill .fs");
+    bindFillSlider(fs, it.amount_left, (v) => { const lv = $("#pi-lv"); if (lv) lv.textContent = fillText(v) + (it.full_qty ? ` · ${fmtQty(v * it.full_qty)}${it.unit ? ` ${it.unit}` : ""}` : ""); }, async (v) => {
+      if (Math.abs(v - it.amount_left) < 0.005) return;
+      const prev = it.amount_left;
+      const r = await act(v <= 0.005 ? { action: "use", left: 0 } : { action: "fill", left: v });
+      if (!r) return;
+      const undo = async () => { if (r.status !== "active") await act({ action: "restore" }); const u = await act({ action: "fill", left: prev }); if (u && sheetBody()) draw(u); after && after(); };
+      after && after();
+      if (r.status !== "active") {
+        sheetBody().innerHTML = `<div class="pi-done"><span class="ci-ic">${ic("check")}</span><b>${esc(it.name)} finished</b><span>Want it back on the list?</span>
+          <div class="btn-row"><button class="btn sec" id="pd-undo">Undo</button><button class="btn" id="pd-list">${ic("cart")} Add to list</button></div></div>`;
+        $("#pd-undo").onclick = () => undo();
+        $("#pd-list").onclick = async () => { try { await api("POST", "/api/list/items", { items: [it.name] }); toast(`${it.name} added to your list`, "View", () => { closeSheet(); go("list"); }); closeSheet(); } catch (x) { fail(x); } };
+        return;
+      }
+      toast(`${it.name}: ${fillText(r.amount_left).toLowerCase()}`, "Undo", undo);
+      draw(r);
+    });
     $("#pi-amt").onclick = async () => {
       const q = $("#pi-qty").value.trim();
       const r = await act({ action: "amount", qty: q === "" ? null : q, unit: $("#pi-unit").value }, q === "" ? "Amount cleared" : "Amount saved");

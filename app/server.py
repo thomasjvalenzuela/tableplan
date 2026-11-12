@@ -1714,6 +1714,7 @@ def pantry_json(c, row):
         **_reserved(c, row),
         "image": f"/img/pantry/{row['id']}?v={urllib.parse.quote(row['image'])}" if row["image"] else None,
         "image_cut": bool(row["image"]) and _pantry_original(row["id"]) is not None,
+        "full_qty": row["original_qty"] if row["original_qty"] is not None else (row["qty"] / row["amount_left"] if row["qty"] is not None and row["amount_left"] else None),
         "rule": {"id": rule["id"], "name": rule["name"], "source": rule["source"],
                  **{f: rule[f] for f in RULE_FIELDS}, "tips": rule["tips"]} if rule else None,
     }

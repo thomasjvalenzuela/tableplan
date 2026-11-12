@@ -1,5 +1,13 @@
 [
  {
+  "id": "fill-slider",
+  "date": "2026-11-29",
+  "icon": "box",
+  "color": "green",
+  "title": "Slide to say how much is left",
+  "text": "Open an inventory item and drag the slider on its photo (or across the card) to show how much is left. It snaps to Empty, ¼, ½, ¾ and Full, updates the amount from the package size, and Undo is one tap. Slide it to empty and TablePlan offers to put it back on your list."
+ },
+ {
   "id": "product-photos",
   "date": "2026-11-28",
   "icon": "camera",
