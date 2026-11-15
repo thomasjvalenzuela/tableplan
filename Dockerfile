@@ -1,6 +1,6 @@
 # TablePlan: Python standard library server + vanilla JS PWA.
 # Pinned to the 3.12 / Alpine line; Dependabot proposes base-image updates.
-FROM python:3.12-alpine
+FROM python:3.15-alpine
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="TablePlan" \
